@@ -407,6 +407,13 @@ class Handler(BaseHTTPRequestHandler):
                 body=_required(params, "text"),
                 title=_param(params, "title") or "",
                 name=_param(params, "name") or "anonymous",
+                max_body_bytes=_body_limit(self.board.cfg, method),
+            )
+            manifest = _signing_manifest(
+                params,
+                uploads,
+                (),
+                self.board.cfg,
             )
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
@@ -420,8 +427,18 @@ class Handler(BaseHTTPRequestHandler):
                 name=name,
                 title=title,
                 body=body,
+                files=manifest,
             )
-            self._json(200, {"signer_id": signer_id, "nonce": nonce, "issued": issued, **payload_info(payload)})
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "files": list(manifest),
+                    **payload_info(payload),
+                },
+            )
             return
 
         if action in {"post.edit", "post.delete"}:
@@ -434,6 +451,13 @@ class Handler(BaseHTTPRequestHandler):
                     body=_required(params, "text"),
                     title=post.title if _param(params, "title") is None else _param(params, "title") or "",
                     name=post.name if _param(params, "name") is None else _param(params, "name") or "",
+                    max_body_bytes=_body_limit(self.board.cfg, method),
+                )
+                manifest = _signing_manifest(
+                    params,
+                    uploads,
+                    store.attachment_manifest(post.id),
+                    self.board.cfg,
                 )
                 payload = request_payload(
                     action=action,
@@ -445,6 +469,7 @@ class Handler(BaseHTTPRequestHandler):
                     name=name,
                     title=title,
                     body=body,
+                    files=manifest,
                 )
             else:
                 payload = request_payload(
@@ -455,7 +480,10 @@ class Handler(BaseHTTPRequestHandler):
                     owner_id=post.author_id or "",
                     board=post.board,
                 )
-            self._json(200, {"signer_id": signer_id, "version": version, **payload_info(payload)})
+            response = {"signer_id": signer_id, "version": version, **payload_info(payload)}
+            if action == "post.edit":
+                response["files"] = list(manifest)
+            self._json(200, response)
             return
 
         if action == "topic.policy":
@@ -660,21 +688,26 @@ class Handler(BaseHTTPRequestHandler):
         if edit is not None and delete is not None:
             raise StoreError("choose exactly one of edit or delete", 400)
         if edit is not None:
-            self._edit(_post_id(edit), params)
+            self._edit(_post_id(edit), params, uploads, method)
             return
         if delete is not None:
+            if uploads:
+                raise StoreError("delete does not accept file uploads", 400)
             self._delete(_post_id(delete), params)
             return
-        self._create(params)
+        self._create(params, uploads, method)
 
-    def _create(self, params: Params) -> None:
+    def _create(self, params: Params, uploads: Uploads, method: str) -> None:
         store = self.board.store
         board = (_required(params, "board")).lower()
         body, title, name, _ = store.prepare_post(
             body=_required(params, "text"),
             title=_param(params, "title") or "",
             name=_param(params, "name") or "anonymous",
+            max_body_bytes=_body_limit(self.board.cfg, method),
         )
+        files = store.prepare_files(uploads)
+        manifest = tuple(file.manifest() for file in files)
         key, sig = _auth_fields(params)
         auth = None
         if key is not None:
@@ -691,6 +724,7 @@ class Handler(BaseHTTPRequestHandler):
                 name=name,
                 title=title,
                 body=body,
+                files=manifest,
             )
             auth = signed_request(
                 canonical_key,
@@ -711,6 +745,8 @@ class Handler(BaseHTTPRequestHandler):
             name=name,
             title=title,
             auth=auth,
+            files=files,
+            max_body_bytes=_body_limit(self.board.cfg, method),
         )
         self._send(
             201,
@@ -722,12 +758,19 @@ class Handler(BaseHTTPRequestHandler):
                 seq=post.seq,
                 auth="signed" if post.signed else "unsigned",
                 author_id=post.author_id,
+                files=len(files),
                 evicted=evicted or None,
                 url=f"https://{self.board.cfg.site_name}/{post.board}/{post.id}",
             ),
         )
 
-    def _edit(self, post_id: int, params: Params) -> None:
+    def _edit(
+        self,
+        post_id: int,
+        params: Params,
+        uploads: Uploads,
+        method: str,
+    ) -> None:
         store = self.board.store
         post = store.get_post(post_id)
         if post is None:
@@ -736,6 +779,22 @@ class Handler(BaseHTTPRequestHandler):
             body=_required(params, "text"),
             title=post.title if _param(params, "title") is None else _param(params, "title") or "",
             name=post.name if _param(params, "name") is None else _param(params, "name") or "",
+            max_body_bytes=_body_limit(self.board.cfg, method),
+        )
+        clear_files = _truthy(_param(params, "clear_files"))
+        if clear_files and uploads:
+            raise StoreError("clear_files cannot be combined with uploads", 400)
+        file_update: tuple[FileInput, ...] | None
+        if clear_files:
+            file_update = ()
+        elif uploads:
+            file_update = store.prepare_files(uploads)
+        else:
+            file_update = None
+        manifest = (
+            tuple(file.manifest() for file in file_update)
+            if file_update is not None
+            else store.attachment_manifest(post.id)
         )
         key, sig = _auth_fields(params)
         auth = None
@@ -752,6 +811,7 @@ class Handler(BaseHTTPRequestHandler):
                 name=name,
                 title=title,
                 body=body,
+                files=manifest,
             )
             auth = signed_request(canonical_key, sig or "", payload, version=version)
             if not store.signed_allowed(
@@ -774,6 +834,8 @@ class Handler(BaseHTTPRequestHandler):
             name=name,
             title=title,
             auth=auth,
+            files=file_update,
+            max_body_bytes=_body_limit(self.board.cfg, method),
         )
         self._send(
             200,
@@ -784,6 +846,7 @@ class Handler(BaseHTTPRequestHandler):
                 board=updated.board,
                 actor_id=auth.signer_id if auth else None,
                 version=updated.sig_version if updated.signed else None,
+                files=len(manifest),
             ),
         )
 
