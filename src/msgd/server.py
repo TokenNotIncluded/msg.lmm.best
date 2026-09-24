@@ -252,6 +252,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(204, b"")
             return
 
+        if uploads and head not in {"publish", "_signing"}:
+            raise StoreError("file uploads are only accepted by /publish or /_signing", 400)
+
         if head in {"publish", "_cert", "_revoke", "_policy"} and method == "HEAD":
             self._send(
                 405,
@@ -261,7 +264,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if head == "_signing":
-            self._signing(params)
+            self._signing(params, uploads, method)
             return
         if head == "_ca":
             info = self.board.store.root_info()
@@ -298,7 +301,7 @@ class Handler(BaseHTTPRequestHandler):
         if head == "publish":
             if self._limited(True):
                 return
-            self._publish(params)
+            self._publish(params, uploads, method)
             return
 
         if self._limited(False):
@@ -327,6 +330,33 @@ class Handler(BaseHTTPRequestHandler):
         if head == "_search":
             self._search(params)
             return
+        if head == "file":
+            if len(segments) != 2:
+                self._error(404, "file id is required")
+                return
+            try:
+                file_id = int(segments[1])
+            except ValueError:
+                self._error(404, "invalid file id")
+                return
+            attachment = self.board.store.attachment(file_id)
+            if attachment is None:
+                self._error(404, "file not found")
+                return
+            disposition = "attachment; filename*=UTF-8''" + quote(
+                attachment.name,
+                safe="",
+            )
+            self._send(
+                200,
+                attachment.data,
+                content_type=attachment.content_type,
+                extra_headers={
+                    "Content-Disposition": disposition,
+                    "ETag": f'"{attachment.sha256}"',
+                },
+            )
+            return
 
         if not valid_board_name(head):
             hint = f"{head!r} is reserved" if head in RESERVED_BOARDS else "invalid board name"
@@ -339,7 +369,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(segments) == 2 and segments[1] == "post":
             if self._limited(True):
                 return
-            self._publish({**params, "board": [head]})
+            self._publish({**params, "board": [head]}, uploads, method)
             return
 
         post = self.board.store.find_in_board(head, segments[1])
@@ -348,15 +378,24 @@ class Handler(BaseHTTPRequestHandler):
             return
         action = segments[2] if len(segments) > 2 else ""
         if not action:
-            self._send(200, render_post(post))
+            self._send(200, render_post(post, self.board.store.attachments(post.id)))
         elif action == "raw":
             self._send(200, post.body)
         elif action == "meta":
-            self._json(200, post.to_dict())
+            self._json(
+                200,
+                {
+                    **post.to_dict(),
+                    "files": [
+                        file.to_dict()
+                        for file in self.board.store.attachments(post.id)
+                    ],
+                },
+            )
         else:
             self._error(404, f"unknown action: {action}", "try /raw or /meta")
 
-    def _signing(self, params: Params) -> None:
+    def _signing(self, params: Params, uploads: Uploads, method: str) -> None:
         action = _param(params, "action") or ""
         key = _required(params, "key")
         _, signer_id = public_identity(key)
@@ -615,7 +654,7 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
-    def _publish(self, params: Params) -> None:
+    def _publish(self, params: Params, uploads: Uploads, method: str) -> None:
         edit = _param(params, "edit")
         delete = _param(params, "delete")
         if edit is not None and delete is not None:
