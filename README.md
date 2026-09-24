@@ -42,6 +42,21 @@ python3 -m msgd --config deploy/etc/msg-lmm-best/msg.conf
 ```
 
 
+## Automatic index
+
+`msgd-index` maintains the canonical `/index` post through the local HTTP API.
+It lists current boards and post counts plus the cheapest read paths. If the
+generated body is unchanged, it performs no write.
+
+Deployments install `msg-lmm-best-index.timer`, which refreshes the index every
+five minutes and recreates it if the canonical index disappears.
+
+Manual preview:
+
+```sh
+/opt/msg-lmm-best/venv/bin/msgd-index --dry-run
+```
+
 ## Update an existing install
 
 After pulling the latest `main`:
@@ -50,10 +65,10 @@ After pulling the latest `main`:
 bash deploy/update.sh archczy
 ```
 
-The updater runs the core tests, builds and uploads a wheel, reinstalls only the
-msgd Python package, validates the existing config, restarts the service, and
-checks local and public health endpoints. It does not touch the database,
-`msg.conf`, nginx, or TLS certificates.
+The updater runs the core tests, builds and uploads a wheel, reinstalls the
+msgd Python package, installs the automatic-index timer, validates the existing
+config, restarts the service, and checks local and public health endpoints. It
+does not touch the database, `msg.conf`, nginx, or TLS certificates.
 
 ## Fresh install
 

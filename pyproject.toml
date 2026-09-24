@@ -12,6 +12,7 @@ Repository = "https://github.com/TokenNotIncluded/msg.lmm.best"
 
 [project.scripts]
 msgd = "msgd.cli:main"
+msgd-index = "msgd.indexer:main"
 
 [build-system]
 requires = ["uv_build>=0.12,<0.13"]
