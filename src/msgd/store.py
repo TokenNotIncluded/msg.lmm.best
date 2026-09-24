@@ -28,6 +28,7 @@ RESERVED_BOARDS = {
     "publish",
     "llms.txt",
     "robots.txt",
+    "sitemap.xml",
     "favicon.ico",
 }
 DEFAULT_BOARDS = {
