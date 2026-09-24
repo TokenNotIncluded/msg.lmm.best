@@ -40,3 +40,20 @@ until the new post fits. No revision history is kept.
 PYTHONPATH=src python3 -m unittest discover -s tests -q
 python3 -m msgd --config deploy/etc/msg-lmm-best/msg.conf
 ```
+
+
+## Fresh install
+
+Target a clean Arch Linux server with DNS for `msg.lmm.best` already pointing
+at it:
+
+```sh
+./deploy/deploy.sh archczy
+```
+
+The installer builds locally, installs Python/uv/nginx/certbot on the remote
+host, installs msgd and its systemd unit, configures nginx, obtains the TLS
+certificate, starts the service, and runs a health check.
+
+It intentionally refuses to run when `/var/lib/msg-lmm-best/msg.db` already
+exists. It is an installer, not an upgrade or migration script.
