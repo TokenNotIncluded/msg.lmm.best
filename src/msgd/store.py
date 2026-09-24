@@ -747,8 +747,16 @@ class Store:
         name: str,
         title: str,
         auth: SignedRequest | None = None,
+        files: tuple[FileInput, ...] = (),
+        max_body_bytes: int | None = None,
     ) -> tuple[Post, int]:
-        body, title, name, nbytes = self.prepare_post(body=body, title=title, name=name)
+        body, title, name, nbytes = self.prepare_post(
+            body=body,
+            title=title,
+            name=name,
+            max_body_bytes=max_body_bytes,
+        )
+        files = self.prepare_files(files)
         self.ensure_board(board)
         now = time.time()
         evicted = 0
@@ -759,13 +767,23 @@ class Store:
             self.consume_nonce(auth)
 
         with self._lock, self._conn:
-            used = int(
-                self._conn.execute("SELECT COALESCE(SUM(nbytes), 0) AS n FROM posts").fetchone()["n"]
-            )
-            need = max(0, used + nbytes - self.cfg.max_storage_bytes)
+            file_bytes = sum(file.nbytes for file in files)
+            new_bytes = nbytes + file_bytes
+            if new_bytes > self.cfg.max_storage_bytes:
+                raise StoreError("post plus attachments exceed storage capacity", 507)
+            used = self._storage_bytes()
+            need = max(0, used + new_bytes - self.cfg.max_storage_bytes)
             if need:
                 freed = 0
-                rows = self._conn.execute("SELECT id, nbytes FROM posts ORDER BY id ASC").fetchall()
+                rows = self._conn.execute(
+                    """
+                    SELECT p.id, p.nbytes + COALESCE(SUM(a.nbytes), 0) AS nbytes
+                      FROM posts p
+                      LEFT JOIN attachments a ON a.post_id = p.id
+                     GROUP BY p.id
+                     ORDER BY p.id ASC
+                    """
+                ).fetchall()
                 ids: list[int] = []
                 for row in rows:
                     ids.append(int(row["id"]))
@@ -812,6 +830,7 @@ class Store:
                 ),
             )
             post_id = int(cur.lastrowid or 0)
+            self._insert_attachments(post_id, files)
 
         post = self.get_post(post_id)
         assert post is not None
@@ -843,12 +862,17 @@ class Store:
         name: str | None = None,
         title: str | None = None,
         auth: SignedRequest | None = None,
+        files: tuple[FileInput, ...] | None = None,
+        max_body_bytes: int | None = None,
     ) -> Post:
         body, new_title, new_name, nbytes = self.prepare_post(
             body=body,
             title=post.title if title is None else title,
             name=post.name if name is None else name,
+            max_body_bytes=max_body_bytes,
         )
+        if files is not None:
+            files = self.prepare_files(files)
         if post.signed:
             if auth is None:
                 raise StoreError("signed post requires a signed request", 403)
@@ -856,10 +880,15 @@ class Store:
                 raise StoreError("stale signature version", 409)
 
         with self._lock, self._conn:
-            used = int(
-                self._conn.execute("SELECT COALESCE(SUM(nbytes), 0) AS n FROM posts").fetchone()["n"]
+            used = self._storage_bytes()
+            old_bytes = self._post_storage_bytes(post.id)
+            file_bytes = (
+                sum(file.nbytes for file in files)
+                if files is not None
+                else old_bytes - post.nbytes
             )
-            if nbytes > post.nbytes and used - post.nbytes + nbytes > self.cfg.max_storage_bytes:
+            new_bytes = nbytes + file_bytes
+            if new_bytes > old_bytes and used - old_bytes + new_bytes > self.cfg.max_storage_bytes:
                 raise StoreError(
                     "edit would exceed max_storage_bytes; only new posts may evict old posts",
                     507,
@@ -894,6 +923,10 @@ class Store:
                     "UPDATE posts SET body=?, title=?, name=?, updated=?, nbytes=? WHERE id=?",
                     (body, new_title, new_name, now, nbytes, post.id),
                 )
+
+            if files is not None:
+                self._conn.execute("DELETE FROM attachments WHERE post_id = ?", (post.id,))
+                self._insert_attachments(post.id, files)
 
         updated = self.get_post(post.id)
         assert updated is not None
@@ -976,14 +1009,22 @@ class Store:
     def stats(self) -> dict[str, int]:
         with self._lock:
             row = self._conn.execute(
-                "SELECT COUNT(*) AS posts, COALESCE(SUM(nbytes),0) AS bytes,"
+                "SELECT COUNT(*) AS posts, COALESCE(SUM(nbytes),0) AS post_bytes,"
                 " COALESCE(MAX(id),0) AS latest_id FROM posts"
             ).fetchone()
+            files = self._conn.execute(
+                "SELECT COUNT(*) AS files, COALESCE(SUM(nbytes),0) AS file_bytes FROM attachments"
+            ).fetchone()
             boards = self._conn.execute("SELECT COUNT(*) AS n FROM boards").fetchone()["n"]
+        post_bytes = int(row["post_bytes"])
+        file_bytes = int(files["file_bytes"])
         return {
             "boards": int(boards),
             "posts": int(row["posts"]),
-            "bytes": int(row["bytes"]),
+            "files": int(files["files"]),
+            "post_bytes": post_bytes,
+            "file_bytes": file_bytes,
+            "bytes": post_bytes + file_bytes,
             "capacity": self.cfg.max_storage_bytes,
             "latest_id": int(row["latest_id"]),
         }
@@ -1051,6 +1092,19 @@ class Store:
             "SELECT id, board, seq, name, title, body, created, updated, nbytes,"
             " author_key, author_id, actor_key, actor_id, signature,"
             " sig_version, sig_nonce, sig_issued FROM posts"
+        )
+
+    @staticmethod
+    def _attachment(row: sqlite3.Row) -> Attachment:
+        return Attachment(
+            id=int(row["id"]),
+            post_id=int(row["post_id"]),
+            slot=int(row["slot"]),
+            name=str(row["name"]),
+            content_type=str(row["content_type"]),
+            data=bytes(row["data"]),
+            nbytes=int(row["nbytes"]),
+            sha256=str(row["sha256"]),
         )
 
     @staticmethod
