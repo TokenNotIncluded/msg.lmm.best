@@ -888,6 +888,153 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, render_ok(ok=1, action="delete", id=post_id, actor_id=actor_id))
 
 
+def _body_limit(cfg: Config, method: str) -> int:
+    return cfg.max_post_bytes_post if method == "POST" else cfg.max_post_bytes
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _manifest_limits(
+    manifest: tuple[dict[str, object], ...],
+    cfg: Config,
+) -> tuple[dict[str, object], ...]:
+    if len(manifest) > cfg.max_files_per_post:
+        raise StoreError(
+            f"too many files; max_files_per_post={cfg.max_files_per_post}",
+            413,
+        )
+    total = 0
+    for file in manifest:
+        name = str(file["name"])
+        content_type = str(file["type"])
+        nbytes = int(file["bytes"])
+        if len(name.encode("utf-8")) > cfg.max_filename_bytes:
+            raise StoreError("file name is too long", 413)
+        if len(content_type.encode("utf-8")) > 200:
+            raise StoreError("file content type is too long", 413)
+        if nbytes > cfg.max_file_bytes:
+            raise StoreError(
+                f"file exceeds max_file_bytes={cfg.max_file_bytes}",
+                413,
+            )
+        total += nbytes
+    if total > cfg.max_storage_bytes:
+        raise StoreError("attachments exceed storage capacity", 507)
+    return manifest
+
+
+def _signing_manifest(
+    params: Params,
+    uploads: Uploads,
+    existing: tuple[dict[str, object], ...],
+    cfg: Config,
+) -> tuple[dict[str, object], ...]:
+    clear = _truthy(_param(params, "clear_files"))
+    declared_raw = _param(params, "files")
+    declared = (
+        normalize_file_manifest(declared_raw)
+        if declared_raw is not None
+        else None
+    )
+    uploaded = tuple(file.manifest() for file in uploads)
+
+    if clear:
+        if uploads or (declared is not None and declared):
+            raise StoreError("clear_files cannot be combined with files", 400)
+        return ()
+
+    if uploads:
+        if declared is not None and declared != uploaded:
+            raise StoreError("declared file manifest does not match uploaded files", 400)
+        return _manifest_limits(uploaded, cfg)
+
+    if declared is not None:
+        return _manifest_limits(declared, cfg)
+
+    return _manifest_limits(existing, cfg)
+
+
+def _clean_filename(value: str) -> str:
+    name = re.split(r"[\\/]+", value)[-1].strip()
+    name = "".join(ch for ch in name if ord(ch) >= 32 and ord(ch) != 127)
+    if not name:
+        raise StoreError("empty file name", 400)
+    return name
+
+
+def _parse_multipart(
+    raw: bytes,
+    content_type: str,
+    max_files: int,
+    max_file_bytes: int,
+    max_filename_bytes: int,
+) -> tuple[Params, Uploads]:
+    if "boundary=" not in content_type.lower():
+        raise StoreError("multipart boundary is required", 400)
+
+    message = BytesParser(policy=email_policy).parsebytes(
+        (
+            "Content-Type: "
+            + content_type
+            + "\r\nMIME-Version: 1.0\r\n\r\n"
+        ).encode("utf-8")
+        + raw
+    )
+    if not message.is_multipart():
+        raise StoreError("invalid multipart body", 400)
+
+    fields: Params = {}
+    files: list[FileInput] = []
+    field_count = 0
+
+    for part in message.iter_parts():
+        if part.is_multipart():
+            raise StoreError("nested multipart bodies are not supported", 400)
+        field = part.get_param("name", header="content-disposition")
+        if not isinstance(field, str) or not field:
+            raise StoreError("multipart field name is required", 400)
+
+        data = part.get_payload(decode=True) or b""
+        filename = part.get_filename()
+        if filename is None:
+            field_count += 1
+            if field_count > 80:
+                raise StoreError("too many multipart fields", 400)
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                value = data.decode(charset, "replace")
+            except LookupError as exc:
+                raise StoreError("unsupported multipart text charset", 400) from exc
+            fields.setdefault(field, []).append(value)
+            continue
+
+        if len(files) >= max_files:
+            raise StoreError(f"too many files; max_files_per_post={max_files}", 413)
+        name = _clean_filename(filename)
+        if len(name.encode("utf-8")) > max_filename_bytes:
+            raise StoreError("file name is too long", 413)
+        if len(data) > max_file_bytes:
+            raise StoreError(f"file exceeds max_file_bytes={max_file_bytes}", 413)
+
+        content_type_value = (
+            part.get_content_type()
+            if part.get("Content-Type")
+            else "application/octet-stream"
+        )
+        files.append(
+            FileInput(
+                name=name,
+                content_type=content_type_value,
+                data=data,
+                sha256=hashlib.sha256(data).hexdigest(),
+            )
+        )
+
+    return fields, tuple(files)
+
+
 def _auth_fields(params: Params) -> tuple[str | None, str | None]:
     key = _param(params, "key")
     sig = _param(params, "sig")
