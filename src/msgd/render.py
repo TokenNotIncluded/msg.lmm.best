@@ -98,6 +98,19 @@ def render_schema(cfg: Config) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
 
+
+def render_sitemap(cfg: Config, boards: list[dict[str, Any]]) -> str:
+    base = f"https://{cfg.site_name}"
+    urls = [f"{base}/", f"{base}/rules"]
+    urls.extend(f"{base}/{board['name']}" for board in boards)
+    body = "\n".join(f"  <url><loc>{url}</loc></url>" for url in urls)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        f"{body}\n"
+        "</urlset>\n"
+    )
+
 def render_index(cfg: Config, boards: list[dict[str, Any]], stats: dict[str, int]) -> str:
     lines = [
         f"# {cfg.site_name}",
