@@ -474,6 +474,178 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(self.c.get(f"/main/{first}")[0], 200)
 
 
+class PostUploadCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root_key = Ed25519PrivateKey.generate()
+        root_public = Path(self.tmp.name) / "root.pub"
+        root_public.write_text(public_b64(self.root_key) + "\n")
+
+        cfg = Config(
+            host="127.0.0.1",
+            port=0,
+            database=str(Path(self.tmp.name) / "msg.db"),
+            root_public_key=str(root_public),
+            max_storage_bytes=200_000,
+            max_post_bytes=1_024,
+            max_post_bytes_post=65_536,
+            max_request_bytes=131_072,
+            max_file_bytes=65_536,
+            max_files_per_post=4,
+            write_burst=100,
+            write_per_minute=1000,
+            read_per_minute=1000,
+        )
+        self.server = build_server(cfg)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        host, port = self.server.server_address[:2]
+        self.c = Client(f"http://{host}:{port}")
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.server.board.store.close()
+        self.tmp.cleanup()
+
+    def signing(self, **params: str) -> dict:
+        status, body = self.c.get("/_signing", **params)
+        self.assertEqual(status, 200, body)
+        return json.loads(body)
+
+    def issue_member(self, key: Ed25519PrivateKey) -> None:
+        ServerCase.issue(self, self.root_key, key)
+
+    def test_post_allows_longer_body_than_get(self) -> None:
+        text = "x" * 20_000
+        status, _ = self.c.get("/publish", board="main", text=text)
+        self.assertEqual(status, 413)
+
+        status, body, _ = self.c.raw(
+            "/publish?board=main&name=long",
+            data=text.encode(),
+            headers={"Content-Type": "text/plain"},
+        )
+        self.assertEqual(status, 201, body.decode())
+        fields = dict(
+            line.split("=", 1)
+            for line in body.decode().splitlines()
+            if "=" in line
+        )
+        post_id = int(fields["id"])
+        self.assertEqual(self.c.get(f"/main/{post_id}/raw")[1], text)
+
+    def test_multipart_file_create_keep_replace_and_clear(self) -> None:
+        status, body = self.c.multipart(
+            "/publish",
+            {"board": "main", "name": "uploader", "text": "with file"},
+            [("file", "hello.txt", "text/plain", b"hello")],
+        )
+        self.assertEqual(status, 201, body)
+        fields = dict(line.split("=", 1) for line in body.splitlines() if "=" in line)
+        post_id = int(fields["id"])
+
+        meta = json.loads(self.c.get(f"/main/{post_id}/meta")[1])
+        self.assertEqual(len(meta["files"]), 1)
+        first = meta["files"][0]
+        self.assertEqual(first["name"], "hello.txt")
+        self.assertEqual(first["bytes"], 5)
+        status, data, headers = self.c.get_bytes(first["url"])
+        self.assertEqual((status, data), (200, b"hello"))
+        self.assertIn("attachment", headers["Content-Disposition"])
+
+        status, _ = self.c.post("/publish", edit=str(post_id), text="keep")
+        self.assertEqual(status, 200)
+        kept = json.loads(self.c.get(f"/main/{post_id}/meta")[1])["files"]
+        self.assertEqual(kept[0]["id"], first["id"])
+
+        status, body = self.c.multipart(
+            "/publish",
+            {"edit": str(post_id), "text": "replace"},
+            [("file", "new.bin", "application/octet-stream", b"new-data")],
+        )
+        self.assertEqual(status, 200, body)
+        replaced = json.loads(self.c.get(f"/main/{post_id}/meta")[1])["files"]
+        self.assertEqual(len(replaced), 1)
+        self.assertEqual(replaced[0]["name"], "new.bin")
+        self.assertEqual(self.c.get_bytes(first["url"])[0], 404)
+        self.assertEqual(self.c.get_bytes(replaced[0]["url"])[1], b"new-data")
+
+        status, _ = self.c.post(
+            "/publish",
+            edit=str(post_id),
+            text="clear",
+            clear_files="1",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(self.c.get(f"/main/{post_id}/meta")[1])["files"],
+            [],
+        )
+
+    def test_signed_attachment_manifest_prevents_file_swap(self) -> None:
+        member = Ed25519PrivateKey.generate()
+        self.issue_member(member)
+        public = public_b64(member)
+
+        status, signing_body = self.c.multipart(
+            "/_signing",
+            {
+                "action": "post.create",
+                "key": public,
+                "board": "main",
+                "text": "signed file",
+            },
+            [("file", "proof.bin", "application/octet-stream", b"abcde")],
+        )
+        self.assertEqual(status, 200, signing_body)
+        info = json.loads(signing_body)
+        self.assertEqual(info["files"][0]["bytes"], 5)
+
+        signature = sign_b64(member, info["payload_b64"])
+        status, body = self.c.multipart(
+            "/publish",
+            {
+                "board": "main",
+                "text": "signed file",
+                "key": public,
+                "sig": signature,
+                "nonce": info["nonce"],
+                "issued": str(info["issued"]),
+            },
+            [("file", "proof.bin", "application/octet-stream", b"abcde")],
+        )
+        self.assertEqual(status, 201, body)
+
+        status, signing_body = self.c.multipart(
+            "/_signing",
+            {
+                "action": "post.create",
+                "key": public,
+                "board": "main",
+                "text": "swap attempt",
+            },
+            [("file", "proof.bin", "application/octet-stream", b"abcde")],
+        )
+        self.assertEqual(status, 200, signing_body)
+        info = json.loads(signing_body)
+        signature = sign_b64(member, info["payload_b64"])
+
+        status, _ = self.c.multipart(
+            "/publish",
+            {
+                "board": "main",
+                "text": "swap attempt",
+                "key": public,
+                "sig": signature,
+                "nonce": info["nonce"],
+                "issued": str(info["issued"]),
+            },
+            [("file", "proof.bin", "application/octet-stream", b"ABCDE")],
+        )
+        self.assertEqual(status, 400)
+
+
 class LegacyMigrationCase(unittest.TestCase):
     def test_legacy_database_migrates_in_place(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
