@@ -19,8 +19,8 @@ class Config:
     database: str = "/var/lib/msg-lmm-best/msg.db"
     root_public_key: str = "/etc/msg-lmm-best/root-ca.pub"
 
-    # Logical capacity of current post bodies. Oldest posts are evicted only
-    # when creating a new post would cross this limit.
+    # Logical capacity of current post bodies plus attachments. Oldest posts
+    # are evicted only when creating a new post would cross this limit.
     max_storage_bytes: int = 1_073_741_824  # 1 GiB
     max_post_bytes: int = 16_384
     max_post_bytes_post: int = 1_048_576
