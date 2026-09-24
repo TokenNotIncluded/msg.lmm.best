@@ -270,7 +270,6 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status, 200)
         meta = json.loads(self.c.get(f"/main/{pid}/meta")[1])
         self.assertNotEqual(meta["author_id"], meta["actor_id"])
-        self.assertEqual(meta["actor_id"], self.server.board.store.root_info()["root_id"] if False else meta["actor_id"])
         self.assertEqual(meta["body"], "admin-edit")
 
     def test_child_certificate_cannot_expand_permissions(self) -> None:
@@ -315,6 +314,7 @@ class ServerCase(unittest.TestCase):
                     "actions": [
                         "post.create",
                         "post.edit.self",
+                        "post.delete.self",
                         "cert.issue",
                         "cert.revoke",
                     ],
