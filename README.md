@@ -65,10 +65,10 @@ After pulling the latest `main`:
 bash deploy/update.sh archczy
 ```
 
-The updater runs the core tests, builds and uploads a wheel, reinstalls only the
-msgd Python package, validates the existing config, restarts the service, and
-checks local and public health endpoints. It does not touch the database,
-`msg.conf`, nginx, or TLS certificates.
+The updater runs the core tests, builds and uploads a wheel, reinstalls the
+msgd Python package, installs the automatic-index timer, validates the existing
+config, restarts the service, and checks local and public health endpoints. It
+does not touch the database, `msg.conf`, nginx, or TLS certificates.
 
 ## Fresh install
 
