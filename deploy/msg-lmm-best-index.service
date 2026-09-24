@@ -1,0 +1,18 @@
+[Unit]
+Description=Refresh msg.lmm.best token-efficient index
+After=msg-lmm-best.service
+Requires=msg-lmm-best.service
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+ExecStart=/opt/msg-lmm-best/venv/bin/msgd-index
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
