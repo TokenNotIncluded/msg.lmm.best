@@ -345,6 +345,7 @@ class Store:
         body: str,
         title: str,
         name: str,
+        max_body_bytes: int | None = None,
     ) -> tuple[str, str, str, int]:
         body = _normalise(body)
         title = " ".join(title.split())
@@ -352,8 +353,9 @@ class Store:
         if not body.strip():
             raise StoreError("text is empty", 400)
         nbytes = len(body.encode("utf-8"))
-        if nbytes > self.cfg.max_post_bytes:
-            raise StoreError(f"text exceeds max_post_bytes={self.cfg.max_post_bytes}", 413)
+        limit = self.cfg.max_post_bytes if max_body_bytes is None else max_body_bytes
+        if nbytes > limit:
+            raise StoreError(f"text exceeds max_post_bytes={limit}", 413)
         if len(title.encode("utf-8")) > self.cfg.max_title_bytes:
             raise StoreError(f"title exceeds max_title_bytes={self.cfg.max_title_bytes}", 413)
         if len(name.encode("utf-8")) > self.cfg.max_name_bytes:
@@ -361,6 +363,100 @@ class Store:
         if nbytes > self.cfg.max_storage_bytes:
             raise StoreError("post is larger than the whole storage capacity", 507)
         return body, title, name, nbytes
+
+    def prepare_files(self, files: tuple[FileInput, ...]) -> tuple[FileInput, ...]:
+        if len(files) > self.cfg.max_files_per_post:
+            raise StoreError(
+                f"too many files; max_files_per_post={self.cfg.max_files_per_post}",
+                413,
+            )
+        total = 0
+        for file in files:
+            if not file.name or len(file.name.encode("utf-8")) > self.cfg.max_filename_bytes:
+                raise StoreError("invalid or too-long file name", 413)
+            if len(file.content_type.encode("utf-8")) > 200:
+                raise StoreError("file content type is too long", 413)
+            if file.nbytes > self.cfg.max_file_bytes:
+                raise StoreError(
+                    f"file exceeds max_file_bytes={self.cfg.max_file_bytes}",
+                    413,
+                )
+            if hashlib.sha256(file.data).hexdigest() != file.sha256:
+                raise StoreError("file sha256 mismatch", 400)
+            total += file.nbytes
+        if total > self.cfg.max_storage_bytes:
+            raise StoreError("attachments exceed the whole storage capacity", 507)
+        return files
+
+    def attachments(self, post_id: int) -> list[Attachment]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256
+                  FROM attachments
+                 WHERE post_id = ?
+                 ORDER BY slot
+                """,
+                (post_id,),
+            ).fetchall()
+        return [self._attachment(row) for row in rows]
+
+    def attachment(self, file_id: int) -> Attachment | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256
+                  FROM attachments
+                 WHERE id = ?
+                """,
+                (file_id,),
+            ).fetchone()
+        return self._attachment(row) if row else None
+
+    def attachment_manifest(self, post_id: int) -> tuple[dict[str, object], ...]:
+        return tuple(file.manifest() for file in self.attachments(post_id))
+
+    def _storage_bytes(self) -> int:
+        row = self._conn.execute(
+            """
+            SELECT
+                COALESCE((SELECT SUM(nbytes) FROM posts), 0)
+              + COALESCE((SELECT SUM(nbytes) FROM attachments), 0) AS n
+            """
+        ).fetchone()
+        return int(row["n"])
+
+    def _post_storage_bytes(self, post_id: int) -> int:
+        row = self._conn.execute(
+            """
+            SELECT p.nbytes + COALESCE(SUM(a.nbytes), 0) AS n
+              FROM posts p
+              LEFT JOIN attachments a ON a.post_id = p.id
+             WHERE p.id = ?
+             GROUP BY p.id
+            """,
+            (post_id,),
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def _insert_attachments(self, post_id: int, files: tuple[FileInput, ...]) -> None:
+        for slot, file in enumerate(files):
+            self._conn.execute(
+                """
+                INSERT INTO attachments(
+                    post_id, slot, name, content_type, data, nbytes, sha256
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    post_id,
+                    slot,
+                    file.name,
+                    file.content_type,
+                    file.data,
+                    file.nbytes,
+                    file.sha256,
+                ),
+            )
 
     def _ensure_board(self, name: str, description: str = "") -> None:
         self._conn.execute(
