@@ -760,7 +760,7 @@ class Store:
 
     def consume_nonce(self, auth: SignedRequest) -> None:
         if auth.nonce is None or auth.issued is None:
-            raise StoreError("signed create requires nonce and issued", 400)
+            raise StoreError("signed request requires nonce and issued", 400)
         now = int(time.time())
         if abs(now - auth.issued) > 300:
             raise StoreError("signed create timestamp is outside the 5 minute window", 400)
