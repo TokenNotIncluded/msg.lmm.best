@@ -462,9 +462,9 @@ class ServerCase(unittest.TestCase):
         file_id = meta["files"][0]["id"]
 
         second = self.publish("12345")
-        self.assertEqual(self.c.get(f"/main/{first}")[0], 404)
+        self.assertIsNone(self.server.board.store.get_post(first))
         self.assertEqual(self.c.get_bytes(f"/file/{file_id}")[0], 404)
-        self.assertEqual(self.c.get(f"/main/{second}")[0], 200)
+        self.assertIsNotNone(self.server.board.store.get_post(second))
 
     def test_edit_cannot_evict_other_posts(self) -> None:
         first = self.publish("1234567890")
