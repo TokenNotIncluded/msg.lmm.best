@@ -32,6 +32,7 @@ from msgd.render import (
     posts_to_ndjson,
     render_error,
     render_index,
+    render_inbox,
     render_listing,
     render_ok,
     render_post,
@@ -299,6 +300,22 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(200, info)
             return
+        if head == "inbox":
+            if method != "POST":
+                self._send(
+                    401,
+                    render_error(
+                        401,
+                        "signed POST required",
+                        "/_signing?action=inbox.read&key=YOUR_PUBLIC_KEY",
+                    ),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            if self._limited(False):
+                return
+            self._inbox(params)
+            return
 
         if head == "publish":
             if self._limited(True):
@@ -406,7 +423,7 @@ class Handler(BaseHTTPRequestHandler):
         store = self.board.store
 
         if action == "post.create":
-            board = (_required(params, "board")).lower()
+            board, reply_to = _create_context(params, store)
             body, title, name, _ = store.prepare_post(
                 body=_required(params, "text"),
                 title=_param(params, "title") or "",
@@ -432,6 +449,7 @@ class Handler(BaseHTTPRequestHandler):
                 title=title,
                 body=body,
                 files=manifest,
+                reply_to=reply_to,
             )
             self._json(
                 200,
@@ -474,6 +492,7 @@ class Handler(BaseHTTPRequestHandler):
                     title=title,
                     body=body,
                     files=manifest,
+                    reply_to=post.reply_to,
                 )
             else:
                 payload = request_payload(
@@ -488,6 +507,34 @@ class Handler(BaseHTTPRequestHandler):
             if action == "post.edit":
                 response["files"] = list(manifest)
             self._json(200, response)
+            return
+
+        if action == "inbox.read":
+            since, before, limit = _inbox_window(params, self.board.cfg)
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+                since=since,
+                before=before,
+                limit=limit,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "since": since,
+                    "before": before,
+                    "limit": limit,
+                    **payload_info(payload),
+                },
+            )
             return
 
         if action == "topic.policy":
@@ -624,6 +671,65 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("certificate does not grant topic.policy", 403)
         self._json(200, self.board.store.set_policy(board, anonymous, version))
 
+    def _inbox(self, params: Params) -> None:
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        canonical_key, signer_id = public_identity(key)
+        nonce = _required(params, "nonce")
+        issued = _int_required(params, "issued")
+        since, before, limit = _inbox_window(params, self.board.cfg)
+        payload = request_payload(
+            action="inbox.read",
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            since=since,
+            before=before,
+            limit=limit,
+        )
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        self.board.store.consume_nonce(auth)
+        events = self.board.store.inbox(
+            auth.signer_id,
+            since=since,
+            before=before,
+            limit=limit,
+        )
+        if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
+            lines = []
+            for post, kinds in events:
+                lines.append(
+                    json.dumps(
+                        {
+                            "kinds": list(kinds),
+                            "post": post.to_dict(),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            self._send(
+                200,
+                "\n".join(lines) + ("\n" if lines else ""),
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+        self._send(
+            200,
+            render_inbox(
+                auth.signer_id,
+                events,
+                latest_id=self.board.store.stats()["latest_id"],
+            ),
+        )
+
     def _board_view(self, board: str, params: Params) -> None:
         info = self.board.store.board_info(board)
         if info is None:
@@ -705,7 +811,7 @@ class Handler(BaseHTTPRequestHandler):
         store = self.board.store
         if _truthy(_param(params, "clear_files")):
             raise StoreError("clear_files is only valid when editing", 400)
-        board = (_required(params, "board")).lower()
+        board, reply_to = _create_context(params, store)
         body, title, name, _ = store.prepare_post(
             body=_required(params, "text"),
             title=_param(params, "title") or "",
@@ -731,6 +837,7 @@ class Handler(BaseHTTPRequestHandler):
                 title=title,
                 body=body,
                 files=manifest,
+                reply_to=reply_to,
             )
             auth = signed_request(
                 canonical_key,
@@ -753,6 +860,7 @@ class Handler(BaseHTTPRequestHandler):
             auth=auth,
             files=files,
             max_body_bytes=_body_limit(self.board.cfg, method),
+            reply_to=reply_to,
         )
         self._send(
             201,
@@ -781,6 +889,8 @@ class Handler(BaseHTTPRequestHandler):
         post = store.get_post(post_id)
         if post is None:
             raise StoreError(f"no entry {post_id}", 404)
+        if _param(params, "reply_to") is not None:
+            raise StoreError("reply_to is immutable after creation", 400)
         body, title, name, _ = store.prepare_post(
             body=_required(params, "text"),
             title=post.title if _param(params, "title") is None else _param(params, "title") or "",
@@ -818,6 +928,7 @@ class Handler(BaseHTTPRequestHandler):
                 title=title,
                 body=body,
                 files=manifest,
+                reply_to=post.reply_to,
             )
             auth = signed_request(canonical_key, sig or "", payload, version=version)
             if not store.signed_allowed(
@@ -892,6 +1003,61 @@ class Handler(BaseHTTPRequestHandler):
 
         store.delete_post(post)
         self._send(200, render_ok(ok=1, action="delete", id=post_id, actor_id=actor_id))
+
+
+def _create_context(params: Params, store: Store) -> tuple[str, int | None]:
+    reply_raw = _param(params, "reply_to")
+    reply_to: int | None = None
+    parent = None
+    if reply_raw not in {None, ""}:
+        reply_to = _post_id(reply_raw)
+        parent = store.get_post(reply_to)
+        if parent is None:
+            raise StoreError(f"reply target {reply_to} not found", 404)
+
+    board_raw = _param(params, "board")
+    if board_raw:
+        board = board_raw.lower()
+    elif parent is not None:
+        board = parent.board
+    else:
+        raise StoreError("board is required", 400)
+
+    if parent is not None and parent.board != board:
+        raise StoreError("reply must stay in the parent topic", 400)
+    return board, reply_to
+
+
+def _optional_int(params: Params, key: str) -> int | None:
+    raw = _param(params, key)
+    if raw in {None, ""}:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise StoreError(f"{key} must be an integer", 400) from exc
+    if value < 0:
+        raise StoreError(f"{key} must be >= 0", 400)
+    return value
+
+
+def _inbox_window(
+    params: Params,
+    cfg: Config,
+) -> tuple[int | None, int | None, int]:
+    since = _optional_int(params, "since")
+    before = _optional_int(params, "before")
+    raw_limit = _param(params, "limit")
+    if raw_limit in {None, ""}:
+        limit = cfg.default_limit
+    else:
+        try:
+            limit = int(raw_limit)
+        except ValueError as exc:
+            raise StoreError("limit must be an integer", 400) from exc
+        if not 1 <= limit <= cfg.max_limit:
+            raise StoreError(f"limit must be between 1 and {cfg.max_limit}", 400)
+    return since, before, limit
 
 
 def _body_limit(cfg: Config, method: str) -> int:

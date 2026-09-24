@@ -646,7 +646,399 @@ class PostUploadCase(unittest.TestCase):
         self.assertEqual(status, 400)
 
 
+class InboxCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root_key = Ed25519PrivateKey.generate()
+        root_public = Path(self.tmp.name) / "root.pub"
+        root_public.write_text(public_b64(self.root_key) + "\n")
+
+        cfg = Config(
+            host="127.0.0.1",
+            port=0,
+            database=str(Path(self.tmp.name) / "msg.db"),
+            root_public_key=str(root_public),
+            max_storage_bytes=200_000,
+            max_post_bytes=10_000,
+            max_post_bytes_post=50_000,
+            write_burst=100,
+            write_per_minute=1000,
+            read_per_minute=1000,
+        )
+        self.server = build_server(cfg)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        host, port = self.server.server_address[:2]
+        self.c = Client(f"http://{host}:{port}")
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.server.board.store.close()
+        self.tmp.cleanup()
+
+    def signing(self, **params: str) -> dict:
+        status, body = self.c.get("/_signing", **params)
+        self.assertEqual(status, 200, body)
+        return json.loads(body)
+
+    def issue_member(self, key: Ed25519PrivateKey) -> None:
+        ServerCase.issue(self, self.root_key, key)
+
+    def signed_create(
+        self,
+        key: Ed25519PrivateKey,
+        text: str,
+        *,
+        name: str = "anonymous",
+        board: str | None = "main",
+        reply_to: int | None = None,
+    ) -> int:
+        request = {
+            "action": "post.create",
+            "key": public_b64(key),
+            "name": name,
+            "text": text,
+        }
+        if board is not None:
+            request["board"] = board
+        if reply_to is not None:
+            request["reply_to"] = str(reply_to)
+        info = self.signing(**request)
+        fields = {
+            "name": name,
+            "text": text,
+            "key": public_b64(key),
+            "sig": sign_b64(key, info["payload_b64"]),
+            "nonce": info["nonce"],
+            "issued": str(info["issued"]),
+        }
+        if board is not None:
+            fields["board"] = board
+        if reply_to is not None:
+            fields["reply_to"] = str(reply_to)
+        status, body = self.c.post("/publish", **fields)
+        self.assertEqual(status, 201, body)
+        response = dict(
+            line.split("=", 1)
+            for line in body.splitlines()
+            if "=" in line
+        )
+        return int(response["id"])
+
+    def read_inbox(
+        self,
+        key: Ed25519PrivateKey,
+        *,
+        since: int | None = None,
+        before: int | None = None,
+        limit: int = 20,
+        sign_with: Ed25519PrivateKey | None = None,
+    ) -> tuple[int, str, dict]:
+        request = {
+            "action": "inbox.read",
+            "key": public_b64(key),
+            "limit": str(limit),
+        }
+        if since is not None:
+            request["since"] = str(since)
+        if before is not None:
+            request["before"] = str(before)
+        info = self.signing(**request)
+        signer = sign_with or key
+        fields = {
+            "key": public_b64(key),
+            "sig": sign_b64(signer, info["payload_b64"]),
+            "nonce": info["nonce"],
+            "issued": str(info["issued"]),
+            "limit": str(limit),
+        }
+        if since is not None:
+            fields["since"] = str(since)
+        if before is not None:
+            fields["before"] = str(before)
+        status, body = self.c.post("/inbox", **fields)
+        return status, body, info
+
+    def test_private_inbox_collects_replies_and_mentions(self) -> None:
+        alice = Ed25519PrivateKey.generate()
+        self.issue_member(alice)
+        parent = self.signed_create(alice, "hello", name="Alice")
+        author_id = json.loads(self.c.get(f"/main/{parent}/meta")[1])["author_id"]
+
+        status, body = self.c.post(
+            "/publish",
+            reply_to=str(parent),
+            text="a comment",
+        )
+        self.assertEqual(status, 201, body)
+        comment_id = int(
+            dict(
+                line.split("=", 1)
+                for line in body.splitlines()
+                if "=" in line
+            )["id"]
+        )
+        comment_meta = json.loads(self.c.get(f"/main/{comment_id}/meta")[1])
+        self.assertEqual(comment_meta["reply_to"], parent)
+        self.assertEqual(comment_meta["board"], "main")
+
+        status, alias_body = self.c.post(
+            "/publish",
+            board="main",
+            text="ping @Alice",
+        )
+        self.assertEqual(status, 201, alias_body)
+        alias_id = int(
+            dict(
+                line.split("=", 1)
+                for line in alias_body.splitlines()
+                if "=" in line
+            )["id"]
+        )
+
+        status, direct_body = self.c.post(
+            "/publish",
+            board="main",
+            text=f"ping @{author_id}",
+        )
+        self.assertEqual(status, 201, direct_body)
+        direct_id = int(
+            dict(
+                line.split("=", 1)
+                for line in direct_body.splitlines()
+                if "=" in line
+            )["id"]
+        )
+
+        self.assertEqual(self.c.get("/inbox")[0], 401)
+        status, inbox, _ = self.read_inbox(alice)
+        self.assertEqual(status, 200, inbox)
+        self.assertIn(f"[reply] #{comment_id}", inbox)
+        self.assertIn(f"[mention] #{alias_id}", inbox)
+        self.assertIn(f"[mention] #{direct_id}", inbox)
+        self.assertIn("latest_id=", inbox)
+
+    def test_inbox_signature_nonce_and_cursor_are_enforced(self) -> None:
+        alice = Ed25519PrivateKey.generate()
+        mallory = Ed25519PrivateKey.generate()
+        self.issue_member(alice)
+        parent = self.signed_create(alice, "parent", name="alice")
+        author_id = json.loads(self.c.get(f"/main/{parent}/meta")[1])["author_id"]
+
+        first = self.c.post(
+            "/publish",
+            board="main",
+            text=f"first @{author_id}",
+        )
+        self.assertEqual(first[0], 201)
+        first_id = int(
+            dict(
+                line.split("=", 1)
+                for line in first[1].splitlines()
+                if "=" in line
+            )["id"]
+        )
+
+        status, _, _ = self.read_inbox(alice, sign_with=mallory)
+        self.assertEqual(status, 400)
+
+        request = {
+            "action": "inbox.read",
+            "key": public_b64(alice),
+            "limit": "20",
+        }
+        info = self.signing(**request)
+        fields = {
+            "key": public_b64(alice),
+            "sig": sign_b64(alice, info["payload_b64"]),
+            "nonce": info["nonce"],
+            "issued": str(info["issued"]),
+            "limit": "20",
+        }
+        status, body = self.c.post("/inbox", **fields)
+        self.assertEqual(status, 200, body)
+        self.assertIn(f"#{first_id}", body)
+        self.assertEqual(self.c.post("/inbox", **fields)[0], 409)
+
+        second = self.c.post(
+            "/publish",
+            board="main",
+            text=f"second @{author_id}",
+        )
+        self.assertEqual(second[0], 201)
+        second_id = int(
+            dict(
+                line.split("=", 1)
+                for line in second[1].splitlines()
+                if "=" in line
+            )["id"]
+        )
+
+        status, body, _ = self.read_inbox(alice, since=first_id)
+        self.assertEqual(status, 200, body)
+        self.assertIn(f"#{second_id}", body)
+        self.assertNotIn(f"#{first_id} ", body)
+
+    def test_inbox_reflects_current_post_state(self) -> None:
+        alice = Ed25519PrivateKey.generate()
+        self.issue_member(alice)
+        parent = self.signed_create(alice, "parent", name="Alice")
+        author_id = json.loads(self.c.get(f"/main/{parent}/meta")[1])["author_id"]
+
+        status, body = self.c.post(
+            "/publish",
+            board="main",
+            text=f"temporary @{author_id}",
+        )
+        self.assertEqual(status, 201, body)
+        mention_id = int(
+            dict(
+                line.split("=", 1)
+                for line in body.splitlines()
+                if "=" in line
+            )["id"]
+        )
+
+        status, inbox, _ = self.read_inbox(alice)
+        self.assertEqual(status, 200)
+        self.assertIn(f"#{mention_id}", inbox)
+
+        status, _ = self.c.post(
+            "/publish",
+            edit=str(mention_id),
+            text="mention removed",
+        )
+        self.assertEqual(status, 200)
+
+        status, inbox, _ = self.read_inbox(alice)
+        self.assertEqual(status, 200)
+        self.assertNotIn(f"#{mention_id}", inbox)
+
+    def test_inbox_signature_binds_query_window(self) -> None:
+        alice = Ed25519PrivateKey.generate()
+        public = public_b64(alice)
+        info = self.signing(
+            action="inbox.read",
+            key=public,
+            since="10",
+            limit="5",
+        )
+        status, _ = self.c.post(
+            "/inbox",
+            key=public,
+            sig=sign_b64(alice, info["payload_b64"]),
+            nonce=info["nonce"],
+            issued=str(info["issued"]),
+            since="11",
+            limit="5",
+        )
+        self.assertEqual(status, 400)
+
+    def test_signed_reply_target_is_bound_by_signature(self) -> None:
+        alice = Ed25519PrivateKey.generate()
+        bob = Ed25519PrivateKey.generate()
+        self.issue_member(alice)
+        self.issue_member(bob)
+        first = self.signed_create(alice, "first", name="Alice")
+        second = self.signed_create(alice, "second", name="Alice")
+
+        request = {
+            "action": "post.create",
+            "key": public_b64(bob),
+            "text": "reply",
+            "reply_to": str(first),
+        }
+        info = self.signing(**request)
+        status, _ = self.c.post(
+            "/publish",
+            text="reply",
+            reply_to=str(second),
+            key=public_b64(bob),
+            sig=sign_b64(bob, info["payload_b64"]),
+            nonce=info["nonce"],
+            issued=str(info["issued"]),
+        )
+        self.assertEqual(status, 400)
+
+
+
 class LegacyMigrationCase(unittest.TestCase):
+    def test_existing_mentions_are_indexed_on_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "v05.db"
+            conn = sqlite3.connect(db)
+            conn.executescript(
+                """
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE boards (
+                    name TEXT PRIMARY KEY,
+                    description TEXT NOT NULL DEFAULT '',
+                    created REAL NOT NULL
+                );
+                CREATE TABLE posts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    board TEXT NOT NULL REFERENCES boards(name) ON DELETE CASCADE,
+                    seq INTEGER NOT NULL,
+                    name TEXT NOT NULL DEFAULT 'anonymous',
+                    title TEXT NOT NULL DEFAULT '',
+                    body TEXT NOT NULL,
+                    created REAL NOT NULL,
+                    updated REAL NOT NULL,
+                    nbytes INTEGER NOT NULL,
+                    author_key TEXT,
+                    author_id TEXT,
+                    actor_key TEXT,
+                    actor_id TEXT,
+                    signature TEXT,
+                    sig_version INTEGER NOT NULL DEFAULT 0,
+                    sig_nonce TEXT,
+                    sig_issued INTEGER
+                );
+                INSERT INTO boards(name, description, created)
+                VALUES ('main', 'General discussion.', 1);
+                """
+            )
+            identity = "a" * 64
+            conn.execute(
+                """
+                INSERT INTO posts(
+                    board, seq, name, title, body, created, updated, nbytes,
+                    author_key, author_id, actor_key, actor_id, signature,
+                    sig_version, sig_nonce, sig_issued
+                ) VALUES ('main', 1, 'Alice', '', 'signed', 1, 1, 6,
+                          'key', ?, 'key', ?, 'sig', 1, 'nonce', 1)
+                """,
+                (identity, identity),
+            )
+            conn.execute(
+                """
+                INSERT INTO posts(
+                    board, seq, name, title, body, created, updated, nbytes
+                ) VALUES ('main', 2, 'anon', '', 'ping @Alice', 2, 2, 11)
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            root = Ed25519PrivateKey.generate()
+            root_public = Path(tmp) / "root.pub"
+            root_public.write_text(public_b64(root) + "\n")
+            store = Store(
+                Config(
+                    database=str(db),
+                    root_public_key=str(root_public),
+                )
+            )
+            try:
+                events = store.inbox(identity)
+                self.assertEqual(len(events), 1)
+                post, kinds = events[0]
+                self.assertEqual(post.body, "ping @Alice")
+                self.assertEqual(kinds, ("mention",))
+            finally:
+                store.close()
+
     def test_legacy_database_migrates_in_place(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "legacy.db"
@@ -709,9 +1101,11 @@ class LegacyMigrationCase(unittest.TestCase):
                 check.close()
                 self.assertIn("author_id", columns)
                 self.assertIn("actor_id", columns)
+                self.assertIn("reply_to", columns)
                 self.assertIn("certificates", tables)
                 self.assertIn("revocations", tables)
                 self.assertIn("topic_policies", tables)
+                self.assertIn("inbox_events", tables)
             finally:
                 store.close()
 

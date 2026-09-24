@@ -26,6 +26,9 @@ from msgd.crypto import (
 
 BOARD_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 AUTHOR_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+MENTION_RE = re.compile(
+    r"(?<![A-Za-z0-9._-])@([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?![A-Za-z0-9._-])"
+)
 
 DEFAULT_ANONYMOUS = frozenset({"post.create", "post.edit.any", "post.delete.any"})
 
@@ -43,6 +46,7 @@ RESERVED_BOARDS = {
     "_policy",
     "_revocations",
     "publish",
+    "inbox",
     "file",
     "key",
     "llms.txt",
@@ -83,7 +87,8 @@ CREATE TABLE IF NOT EXISTS posts (
     signature   TEXT,
     sig_version INTEGER NOT NULL DEFAULT 0,
     sig_nonce   TEXT,
-    sig_issued  INTEGER
+    sig_issued  INTEGER,
+    reply_to    INTEGER
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS posts_board_seq ON posts(board, seq);
@@ -134,6 +139,15 @@ CREATE TABLE IF NOT EXISTS topic_policies (
     version   INTEGER NOT NULL,
     updated   REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS inbox_events (
+    post_id    INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    subject_id TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    PRIMARY KEY(post_id, subject_id, kind)
+);
+CREATE INDEX IF NOT EXISTS inbox_subject_post
+    ON inbox_events(subject_id, post_id);
 """
 
 
@@ -212,6 +226,7 @@ class Post:
     sig_version: int = 0
     sig_nonce: str | None = None
     sig_issued: int | None = None
+    reply_to: int | None = None
 
     @property
     def signed(self) -> bool:
@@ -241,6 +256,7 @@ class Post:
             ),
             "sig_nonce": self.sig_nonce if self.signed and self.sig_version == 1 else None,
             "sig_issued": self.sig_issued if self.signed and self.sig_version == 1 else None,
+            "reply_to": self.reply_to,
         }
 
 
@@ -267,10 +283,15 @@ class Store:
         )
         self._conn.row_factory = sqlite3.Row
         with self._lock:
+            had_inbox = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox_events'"
+            ).fetchone() is not None
             self._conn.executescript(TABLES)
             self._ensure_schema()
             for name, description in DEFAULT_BOARDS.items():
                 self._ensure_board(name, description)
+            if not had_inbox:
+                self._rebuild_inbox()
 
     def close(self) -> None:
         with self._lock:
@@ -290,6 +311,7 @@ class Store:
             "sig_version": "INTEGER NOT NULL DEFAULT 0",
             "sig_nonce": "TEXT",
             "sig_issued": "INTEGER",
+            "reply_to": "INTEGER",
         }
         for name, definition in additions.items():
             if name not in columns:
@@ -297,6 +319,7 @@ class Store:
         self._conn.executescript(
             """
             CREATE INDEX IF NOT EXISTS posts_author_id ON posts(author_id);
+            CREATE INDEX IF NOT EXISTS posts_reply_to ON posts(reply_to);
             CREATE TABLE IF NOT EXISTS signature_nonces (
                 signer_id TEXT NOT NULL,
                 nonce TEXT NOT NULL,
@@ -325,8 +348,22 @@ class Store:
                 version INTEGER NOT NULL,
                 updated REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS inbox_events (
+                post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+                subject_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                PRIMARY KEY(post_id, subject_id, kind)
+            );
+            CREATE INDEX IF NOT EXISTS inbox_subject_post
+                ON inbox_events(subject_id, post_id);
             """
         )
+
+    def _rebuild_inbox(self) -> None:
+        self._conn.execute("DELETE FROM inbox_events")
+        rows = self._conn.execute("SELECT id FROM posts ORDER BY id").fetchall()
+        for row in rows:
+            self._reindex_inbox(int(row["id"]))
 
     def root_info(self) -> dict[str, str] | None:
         try:
@@ -723,7 +760,7 @@ class Store:
 
     def consume_nonce(self, auth: SignedRequest) -> None:
         if auth.nonce is None or auth.issued is None:
-            raise StoreError("signed create requires nonce and issued", 400)
+            raise StoreError("signed request requires nonce and issued", 400)
         now = int(time.time())
         if abs(now - auth.issued) > 300:
             raise StoreError("signed create timestamp is outside the 5 minute window", 400)
@@ -750,6 +787,7 @@ class Store:
         auth: SignedRequest | None = None,
         files: tuple[FileInput, ...] = (),
         max_body_bytes: int | None = None,
+        reply_to: int | None = None,
     ) -> tuple[Post, int]:
         body, title, name, nbytes = self.prepare_post(
             body=body,
@@ -759,6 +797,12 @@ class Store:
         )
         files = self.prepare_files(files)
         self.ensure_board(board)
+        if reply_to is not None:
+            parent = self.get_post(reply_to)
+            if parent is None:
+                raise StoreError(f"reply target {reply_to} not found", 404)
+            if parent.board != board:
+                raise StoreError("reply must stay in the parent topic", 400)
         now = time.time()
         evicted = 0
 
@@ -808,8 +852,8 @@ class Store:
                 INSERT INTO posts(
                     board, seq, name, title, body, created, updated, nbytes,
                     author_key, author_id, actor_key, actor_id, signature,
-                    sig_version, sig_nonce, sig_issued
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sig_version, sig_nonce, sig_issued, reply_to
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     board,
@@ -828,10 +872,12 @@ class Store:
                     auth.version if auth else 0,
                     auth.nonce if auth else None,
                     auth.issued if auth else None,
+                    reply_to,
                 ),
             )
             post_id = int(cur.lastrowid or 0)
             self._insert_attachments(post_id, files)
+            self._reindex_inbox(post_id)
 
         post = self.get_post(post_id)
         assert post is not None
@@ -928,6 +974,7 @@ class Store:
             if files is not None:
                 self._conn.execute("DELETE FROM attachments WHERE post_id = ?", (post.id,))
                 self._insert_attachments(post.id, files)
+            self._reindex_inbox(post.id)
 
         updated = self.get_post(post.id)
         assert updated is not None
@@ -988,6 +1035,111 @@ class Store:
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [post for row in rows if (post := self._row(row)) is not None]
+
+    def inbox(
+        self,
+        subject_id: str,
+        *,
+        since: int | None = None,
+        before: int | None = None,
+        limit: int = 20,
+    ) -> list[tuple[Post, tuple[str, ...]]]:
+        if not valid_author_id(subject_id):
+            raise StoreError("invalid inbox identity", 400)
+
+        where = ["e.subject_id = ?"]
+        params: list[Any] = [subject_id]
+        if since is not None:
+            where.append("e.post_id > ?")
+            params.append(since)
+        if before is not None:
+            where.append("e.post_id < ?")
+            params.append(before)
+
+        sql = (
+            "SELECT e.post_id, GROUP_CONCAT(e.kind) AS kinds "
+            "FROM inbox_events e WHERE "
+            + " AND ".join(where)
+            + " GROUP BY e.post_id ORDER BY e.post_id DESC LIMIT ?"
+        )
+        params.append(max(1, min(limit, self.cfg.max_limit)))
+
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            result: list[tuple[Post, tuple[str, ...]]] = []
+            for row in rows:
+                post_row = self._conn.execute(
+                    self._select_posts() + " WHERE id = ?",
+                    (int(row["post_id"]),),
+                ).fetchone()
+                post = self._row(post_row)
+                if post is None:
+                    continue
+                kinds = tuple(
+                    sorted(
+                        {
+                            item
+                            for item in str(row["kinds"] or "").split(",")
+                            if item
+                        }
+                    )
+                )
+                result.append((post, kinds))
+        return result
+
+    def _reindex_inbox(self, post_id: int) -> None:
+        self._conn.execute("DELETE FROM inbox_events WHERE post_id = ?", (post_id,))
+        row = self._conn.execute(
+            self._select_posts() + " WHERE id = ?",
+            (post_id,),
+        ).fetchone()
+        post = self._row(row)
+        if post is None:
+            return
+
+        actor_id = post.actor_id
+        events: set[tuple[str, str]] = set()
+
+        if post.reply_to is not None:
+            parent = self._conn.execute(
+                "SELECT author_id FROM posts WHERE id = ?",
+                (post.reply_to,),
+            ).fetchone()
+            if parent is not None and parent["author_id"] is not None:
+                target = str(parent["author_id"])
+                if target != actor_id:
+                    events.add((target, "reply"))
+
+        text = post.title + "\n" + post.body
+        for token in set(MENTION_RE.findall(text)):
+            lowered = token.lower()
+            targets: set[str] = set()
+            if AUTHOR_ID_RE.fullmatch(lowered):
+                targets.add(lowered)
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT DISTINCT author_id
+                      FROM posts
+                     WHERE author_id IS NOT NULL
+                       AND name = ? COLLATE NOCASE
+                    """,
+                    (token,),
+                ).fetchall()
+                targets.update(str(item["author_id"]) for item in rows)
+
+            for target in targets:
+                if target != actor_id:
+                    events.add((target, "mention"))
+
+        if events:
+            self._conn.executemany(
+                """
+                INSERT OR IGNORE INTO inbox_events(post_id, subject_id, kind)
+                VALUES (?, ?, ?)
+                """,
+                [(post_id, subject_id, kind) for subject_id, kind in events],
+            )
 
     def key_info(self, author_id: str) -> dict[str, Any] | None:
         if not valid_author_id(author_id):
@@ -1092,7 +1244,7 @@ class Store:
         return (
             "SELECT id, board, seq, name, title, body, created, updated, nbytes,"
             " author_key, author_id, actor_key, actor_id, signature,"
-            " sig_version, sig_nonce, sig_issued FROM posts"
+            " sig_version, sig_nonce, sig_issued, reply_to FROM posts"
         )
 
     @staticmethod
@@ -1130,4 +1282,5 @@ class Store:
             sig_version=int(row["sig_version"] or 0),
             sig_nonce=str(row["sig_nonce"]) if row["sig_nonce"] is not None else None,
             sig_issued=int(row["sig_issued"]) if row["sig_issued"] is not None else None,
+            reply_to=int(row["reply_to"]) if row["reply_to"] is not None else None,
         )

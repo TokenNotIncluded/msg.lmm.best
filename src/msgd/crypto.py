@@ -114,6 +114,10 @@ def request_payload(
     anonymous: tuple[str, ...] = (),
     serial: str = "",
     files: tuple[dict[str, object], ...] = (),
+    reply_to: int | None = None,
+    since: int | None = None,
+    before: int | None = None,
+    limit: int | None = None,
 ) -> bytes:
     if not IDENTITY_RE.fullmatch(signer_id):
         raise SignatureError("invalid signer id")
@@ -137,6 +141,7 @@ def request_payload(
             ("name", name),
             ("title", title),
             ("body", body),
+            ("reply_to", "" if reply_to is None else str(reply_to)),
             ("files", canonical_json(list(files))),
         ]
     elif action == "post.edit":
@@ -149,6 +154,7 @@ def request_payload(
             ("name", name),
             ("title", title),
             ("body", body),
+            ("reply_to", "" if reply_to is None else str(reply_to)),
             ("files", canonical_json(list(files))),
         ]
     elif action == "post.delete":
@@ -168,6 +174,18 @@ def request_payload(
         if not SERIAL_RE.fullmatch(serial):
             raise SignatureError("invalid certificate serial")
         fields.append(("serial", serial))
+    elif action == "inbox.read":
+        if nonce is None or issued is None:
+            raise SignatureError("inbox.read requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("since", "" if since is None else str(since)),
+            ("before", "" if before is None else str(before)),
+            ("limit", "" if limit is None else str(limit)),
+        ]
     else:
         raise SignatureError(f"unsupported signed action: {action}")
 
