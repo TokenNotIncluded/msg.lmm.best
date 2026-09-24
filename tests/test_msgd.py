@@ -330,16 +330,22 @@ class ServerCase(unittest.TestCase):
 
         status, _ = self.signed_revoke(ca, child_serial)
         self.assertEqual(status, 200)
+        info = self.signing(
+            action="post.create",
+            key=public_b64(member),
+            board="main",
+            text="after",
+        )
         status, _ = self.c.post(
             "/publish",
             board="main",
             text="after",
             key=public_b64(member),
-            sig="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
-            nonce="0" * 32,
-            issued="0",
+            sig=sign_b64(member, info["payload_b64"]),
+            nonce=info["nonce"],
+            issued=str(info["issued"]),
         )
-        self.assertIn(status, {400, 403})
+        self.assertEqual(status, 403)
 
     def test_revocation_invalidates_descendant_permissions(self) -> None:
         ca = Ed25519PrivateKey.generate()
