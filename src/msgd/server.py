@@ -6,7 +6,7 @@ import json
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlparse
 
 from msgd import __version__
@@ -69,14 +69,13 @@ class MsgServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server: MsgServer
     server_version = f"msgd/{__version__}"
     sys_version = ""
     protocol_version = "HTTP/1.1"
 
     @property
     def board(self) -> Board:
-        return self.server.board
+        return cast(MsgServer, self.server).board
 
     def log_message(self, _format: str, *_args: Any) -> None:
         return
