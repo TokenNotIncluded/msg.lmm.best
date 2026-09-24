@@ -313,13 +313,6 @@ class Store:
         assert updated is not None
         return updated
 
-    def append_post(self, *, post: Post, body: str) -> Post:
-        addition = _normalise(body)
-        if not addition.strip():
-            raise StoreError("text is empty", 400)
-        merged = post.body + "\n\n" + addition
-        return self.edit_post(post=post, body=merged)
-
     def delete_post(self, post_id: int) -> bool:
         with self._lock, self._conn:
             cur = self._conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
