@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -87,6 +88,20 @@ CREATE TABLE IF NOT EXISTS posts (
 CREATE UNIQUE INDEX IF NOT EXISTS posts_board_seq ON posts(board, seq);
 CREATE INDEX IF NOT EXISTS posts_board_id ON posts(board, id);
 CREATE INDEX IF NOT EXISTS posts_created ON posts(id);
+
+CREATE TABLE IF NOT EXISTS attachments (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id      INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    slot         INTEGER NOT NULL,
+    name         TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    data         BLOB NOT NULL,
+    nbytes       INTEGER NOT NULL,
+    sha256       TEXT NOT NULL,
+    UNIQUE(post_id, slot)
+);
+CREATE INDEX IF NOT EXISTS attachments_post ON attachments(post_id);
+
 CREATE TABLE IF NOT EXISTS signature_nonces (
     signer_id TEXT NOT NULL,
     nonce     TEXT NOT NULL,
@@ -128,6 +143,54 @@ class StoreError(Exception):
         self.status = status
         self.hint = hint
 
+
+
+@dataclass(frozen=True)
+class FileInput:
+    name: str
+    content_type: str
+    data: bytes
+    sha256: str
+
+    @property
+    def nbytes(self) -> int:
+        return len(self.data)
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "type": self.content_type,
+            "bytes": self.nbytes,
+            "sha256": self.sha256,
+        }
+
+
+@dataclass(frozen=True)
+class Attachment:
+    id: int
+    post_id: int
+    slot: int
+    name: str
+    content_type: str
+    data: bytes
+    nbytes: int
+    sha256: str
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "type": self.content_type,
+            "bytes": self.nbytes,
+            "sha256": self.sha256,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "slot": self.slot,
+            **self.manifest(),
+            "url": f"/file/{self.id}",
+        }
 
 @dataclass
 class Post:
