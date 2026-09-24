@@ -55,7 +55,7 @@ class ServerCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.server.shutdown()
         self.server.server_close()
-        self.server.board.store.close()  # type: ignore[attr-defined]
+        self.server.board.store.close()
         self.tmp.cleanup()
 
     def publish(self, text: str, board: str = "main") -> int:
