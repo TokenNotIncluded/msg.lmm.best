@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         server.serve_forever(poll_interval=0.5)
     finally:
         server.server_close()
-        server.board.store.close()  # type: ignore[attr-defined]
+        server.board.store.close()
     return 0
 
 

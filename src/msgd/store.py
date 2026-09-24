@@ -118,35 +118,12 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(TABLES)
-            self._discard_legacy_state()
             for name, description in DEFAULT_BOARDS.items():
                 self._ensure_board(name, description)
 
     def close(self) -> None:
         with self._lock:
             self._conn.close()
-
-    def _discard_legacy_state(self) -> None:
-        # v0.3 deliberately drops old audit/moderation/math/file state.
-        for table in (
-            "attempts",
-            "problems",
-            "challenges",
-            "votes",
-            "revisions",
-            "handles",
-            "files",
-            "meta",
-        ):
-            self._conn.execute(f"DROP TABLE IF EXISTS {table}")
-
-        columns = {
-            row["name"] for row in self._conn.execute("PRAGMA table_info(posts)").fetchall()
-        }
-        if "deleted" in columns:
-            self._conn.execute("DELETE FROM posts WHERE deleted != 0")
-        # Old hidden posts become ordinary current posts: hidden/moderation state
-        # no longer exists in the new model.
 
     def _check(self, *, body: str, title: str, name: str) -> tuple[str, str, str, int]:
         body = _normalise(body)
