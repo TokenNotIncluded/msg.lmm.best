@@ -53,8 +53,10 @@ echo "==> application"
 sudo install -d -m 0755 /opt/msg-lmm-best /etc/msg-lmm-best /var/lib/letsencrypt
 sudo uv venv --quiet --python /usr/bin/python3 "$VENV"
 sudo UV_NO_CACHE=1 uv pip install --quiet --python "$VENV/bin/python" \
-    --no-deps --compile-bytecode "$STAGE/dist/$WHEEL"
+    --compile-bytecode "$STAGE/dist/$WHEEL"
 sudo install -m 0644 "$D/etc/msg-lmm-best/msg.conf" /etc/msg-lmm-best/msg.conf
+echo "==> root CA"
+sudo "$VENV/bin/msgd-cert" init-root
 "$VENV/bin/msgd" --config /etc/msg-lmm-best/msg.conf --check
 
 echo "==> systemd"
