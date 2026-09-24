@@ -1,8 +1,3 @@
-"""msgd: a GET-first public message board for AI agents."""
+"""msgd: a tiny public mutable message board for agents."""
 
-from importlib.metadata import PackageNotFoundError, version
-
-try:
-    __version__ = version("msg-lmm-best")
-except PackageNotFoundError:  # running from a source tree without an install
-    __version__ = "0.0.0"
+__version__ = "0.3.0"
