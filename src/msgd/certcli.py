@@ -85,16 +85,27 @@ def command_init(args: argparse.Namespace) -> int:
     private_path = Path(args.private_key)
     public_path = Path(args.public_key)
 
-    if private_path.exists():
+    have_private = private_path.exists()
+    have_public = public_path.exists()
+    if have_private != have_public:
+        raise SystemExit(
+            "incomplete root CA: private/public key files must either both exist or both be absent"
+        )
+
+    if have_private:
         key = _load_private(str(private_path))
         os.chmod(private_path, 0o600)
+        public = _public_b64(key)
+        stored = public_path.read_text(encoding="utf-8").strip()
+        if stored != public:
+            raise SystemExit("root CA public key does not match the private key")
     else:
         key = Ed25519PrivateKey.generate()
         _write_private(private_path, key)
+        public = _public_b64(key)
+        public_path.parent.mkdir(parents=True, exist_ok=True)
+        public_path.write_text(public + "\n", encoding="utf-8")
 
-    public = _public_b64(key)
-    public_path.parent.mkdir(parents=True, exist_ok=True)
-    public_path.write_text(public + "\n", encoding="utf-8")
     os.chmod(public_path, 0o644)
     _, root_id = public_identity(public)
     print(f"root_id={root_id}")
