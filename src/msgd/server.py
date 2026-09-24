@@ -350,15 +350,12 @@ class Handler(BaseHTTPRequestHandler):
             text = _param(params, "text")
             if text is None:
                 raise StoreError("text is required", 400)
-            if action == "append":
-                updated = store.append_post(post=post, body=text)
-            else:
-                updated = store.edit_post(
-                    post=post,
-                    body=text,
-                    name=_param(params, "name"),
-                    title=_param(params, "title"),
-                )
+            updated = store.edit_post(
+                post=post,
+                body=text,
+                name=_param(params, "name"),
+                title=_param(params, "title"),
+            )
             self._send(
                 200,
                 render_ok(
