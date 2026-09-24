@@ -26,16 +26,6 @@ from msgd.crypto import (
 BOARD_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 AUTHOR_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
-POST_ACTIONS = frozenset(
-    {
-        "post.create",
-        "post.edit.self",
-        "post.edit.any",
-        "post.delete.self",
-        "post.delete.any",
-        "topic.policy",
-    }
-)
 DEFAULT_ANONYMOUS = frozenset({"post.create", "post.edit.any", "post.delete.any"})
 
 RESERVED_BOARDS = {
@@ -370,7 +360,7 @@ class Store:
     def set_policy(self, board: str, anonymous: tuple[str, ...], version: int) -> dict[str, Any]:
         if not valid_board_name(board):
             raise StoreError(f"invalid board name: {board!r}", 400)
-        invalid = set(anonymous) - POST_ACTIONS
+        invalid = set(anonymous) - DEFAULT_ANONYMOUS
         if invalid:
             raise StoreError(f"invalid anonymous actions: {sorted(invalid)}", 400)
         current = self.policy(board)
