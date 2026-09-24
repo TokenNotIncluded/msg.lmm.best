@@ -57,7 +57,10 @@ command -v uv >/dev/null || {
 }
 
 echo "==> install package"
-sudo UV_NO_CACHE=1 uv pip install --quiet     --python "$VENV/bin/python"     --reinstall --no-deps --compile-bytecode     "$STAGE/dist/$WHEEL"
+sudo UV_NO_CACHE=1 uv pip install --quiet     --python "$VENV/bin/python"     --reinstall --compile-bytecode     "$STAGE/dist/$WHEEL"
+
+echo "==> root CA"
+sudo "$VENV/bin/msgd-cert" init-root
 
 echo "==> validate"
 "$VENV/bin/msgd" --config "$CONFIG" --check
