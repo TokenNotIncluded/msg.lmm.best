@@ -264,6 +264,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if head == "_signing":
+            if self._limited(bool(uploads)):
+                return
             self._signing(params, uploads, method)
             return
         if head == "_ca":
@@ -397,6 +399,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _signing(self, params: Params, uploads: Uploads, method: str) -> None:
         action = _param(params, "action") or ""
+        if uploads and action not in {"post.create", "post.edit"}:
+            raise StoreError("file uploads are only valid for post.create/post.edit signing", 400)
         key = _required(params, "key")
         _, signer_id = public_identity(key)
         store = self.board.store
@@ -699,6 +703,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _create(self, params: Params, uploads: Uploads, method: str) -> None:
         store = self.board.store
+        if _truthy(_param(params, "clear_files")):
+            raise StoreError("clear_files is only valid when editing", 400)
         board = (_required(params, "board")).lower()
         body, title, name, _ = store.prepare_post(
             body=_required(params, "text"),
