@@ -25,11 +25,11 @@ from msgd.render import (
 from msgd.store import RESERVED_BOARDS, Store, StoreError, valid_board_name
 
 Params = dict[str, list[str]]
-MAX_REQUEST_BYTES = 65536
+MAX_REQUEST_BYTES = 65_536
 
 
 def log(level: str, message: str, **fields: Any) -> None:
-    suffix = " ".join(f"{k}={v}" for k, v in fields.items())
+    suffix = " ".join(f"{key}={value}" for key, value in fields.items())
     print(
         f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}] {level}: "
         f"{message}{' ' + suffix if suffix else ''}",
@@ -46,23 +46,45 @@ class Board:
             burst=max(30, cfg.read_per_minute // 4),
             per_minute=cfg.read_per_minute,
         )
-        self.writes = Limiter(burst=cfg.write_burst, per_minute=cfg.write_per_minute)
+        self.writes = Limiter(
+            burst=cfg.write_burst,
+            per_minute=cfg.write_per_minute,
+        )
         self.started = time.time()
 
 
+class MsgServer(ThreadingHTTPServer):
+    """Threading HTTP server with typed shared board state."""
+
+    daemon_threads = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler_class: type[BaseHTTPRequestHandler],
+        board: Board,
+    ) -> None:
+        self.board = board
+        super().__init__(server_address, handler_class)
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "msgd/0.3"
+    server: MsgServer
+    server_version = f"msgd/{__version__}"
     sys_version = ""
     protocol_version = "HTTP/1.1"
-    board: Board
 
-    def log_message(self, fmt: str, *args: Any) -> None:
+    @property
+    def board(self) -> Board:
+        return self.server.board
+
+    def log_message(self, _format: str, *_args: Any) -> None:
         return
 
     def _client(self) -> str:
         if self.board.cfg.trust_proxy:
             if value := self.headers.get("X-Forwarded-For"):
-                return value.split(",")[0].strip()
+                return value.split(",", 1)[0].strip()
             if value := self.headers.get("X-Real-IP"):
                 return value.strip()
         return self.client_address[0] if self.client_address else "unknown"
@@ -73,7 +95,6 @@ class Handler(BaseHTTPRequestHandler):
         body: str | bytes,
         *,
         content_type: str = "text/plain; charset=utf-8",
-        method: str = "GET",
         extra_headers: dict[str, str] | None = None,
     ) -> None:
         payload = body.encode("utf-8") if isinstance(body, str) else body
@@ -89,7 +110,7 @@ class Handler(BaseHTTPRequestHandler):
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
-        if method != "HEAD":
+        if self.command != "HEAD":
             self.wfile.write(payload)
 
     def _error(self, status: int, message: str, hint: str = "") -> None:
@@ -100,10 +121,11 @@ class Handler(BaseHTTPRequestHandler):
         allowed, wait = limiter.check(self._client())
         if allowed:
             return False
+        retry_after = int(wait) + 1
         self._send(
             429,
-            render_ok(error="rate limited", status=429, retry_after=int(wait) + 1),
-            extra_headers={"Retry-After": str(int(wait) + 1)},
+            render_ok(error="rate limited", status=429, retry_after=retry_after),
+            extra_headers={"Retry-After": str(retry_after)},
         )
         return True
 
@@ -130,18 +152,24 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 self._error(400, "bad Content-Length")
                 return
-            if length > MAX_REQUEST_BYTES:
+            if length < 0 or length > MAX_REQUEST_BYTES:
                 self._error(413, "request too large")
                 return
+
             raw = self.rfile.read(length) if length else b""
-            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
-            if ctype == "application/x-www-form-urlencoded":
-                form = parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True)
-            elif ctype in {"text/plain", "text/markdown", ""}:
+            content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip()
+            if content_type == "application/x-www-form-urlencoded":
+                form = parse_qs(
+                    raw.decode("utf-8", "replace"),
+                    keep_blank_values=True,
+                    max_num_fields=50,
+                )
+            elif content_type in {"text/plain", "text/markdown", ""}:
                 form = {"text": [raw.decode("utf-8", "replace")]}
             else:
-                self._error(415, f"unsupported Content-Type: {ctype}")
+                self._error(415, f"unsupported Content-Type: {content_type}")
                 return
+
             for key, values in form.items():
                 params.setdefault(key, values)
 
@@ -160,27 +188,33 @@ class Handler(BaseHTTPRequestHandler):
         head = segments[0] if segments else ""
 
         if head in {"rules", "_rules", "_help", "llms.txt"}:
-            self._send(200, render_rules(self.board.cfg), method=method)
+            self._send(200, render_rules(self.board.cfg))
             return
         if head == "_schema":
             self._send(
                 200,
                 render_schema(self.board.cfg),
                 content_type="application/json; charset=utf-8",
-                method=method,
             )
             return
         if head == "robots.txt":
-            self._send(200, "User-agent: *\nAllow: /\n", method=method)
+            self._send(200, "User-agent: *\nAllow: /\n")
             return
         if head == "favicon.ico":
-            self._send(204, b"", method=method)
+            self._send(204, b"")
             return
 
         if head == "publish":
+            if method == "HEAD":
+                self._send(
+                    405,
+                    render_error(405, "HEAD cannot write"),
+                    extra_headers={"Allow": "GET, POST"},
+                )
+                return
             if self._limited(True):
                 return
-            self._publish(method, params)
+            self._publish(params)
             return
 
         if self._limited(False):
@@ -190,25 +224,26 @@ class Handler(BaseHTTPRequestHandler):
             stats = self.board.store.stats()
             self._send(
                 200,
-                render_index(self.board.cfg, self.board.store.list_boards(), stats),
-                method=method,
+                render_index(
+                    self.board.cfg,
+                    self.board.store.list_boards(),
+                    stats,
+                ),
             )
             return
         if head == "_health":
-            stats = self.board.store.stats()
             self._send(
                 200,
                 render_ok(
                     ok=1,
                     version=__version__,
                     uptime_seconds=int(time.time() - self.board.started),
-                    **stats,
+                    **self.board.store.stats(),
                 ),
-                method=method,
             )
             return
         if head == "_search":
-            self._search(method, params)
+            self._search(params)
             return
 
         if not valid_board_name(head):
@@ -221,43 +256,51 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if len(segments) == 1:
-            self._board_view(method, head, params)
+            self._board_view(head, params)
             return
+
         if len(segments) == 2 and segments[1] == "post":
+            if method == "HEAD":
+                self._send(
+                    405,
+                    render_error(405, "HEAD cannot write"),
+                    extra_headers={"Allow": "GET, POST"},
+                )
+                return
             if self._limited(True):
                 return
-            self._publish(method, {**params, "board": [head]})
+            self._publish({**params, "board": [head]})
             return
 
         post = self.board.store.find_in_board(head, segments[1])
         if post is None:
             self._error(404, f"no entry {segments[1]!r} on /{head}")
             return
+
         action = segments[2] if len(segments) > 2 else ""
         if not action:
-            self._send(200, render_post(post), method=method)
+            self._send(200, render_post(post))
         elif action == "raw":
-            self._send(200, post.body, method=method)
+            self._send(200, post.body)
         elif action == "meta":
             self._send(
                 200,
                 json.dumps(post.to_dict(), ensure_ascii=False, indent=2) + "\n",
                 content_type="application/json; charset=utf-8",
-                method=method,
             )
         else:
             self._error(404, f"unknown action: {action}", "try /raw or /meta")
 
-    def _board_view(self, method: str, board: str, params: Params) -> None:
+    def _board_view(self, board: str, params: Params) -> None:
         info = self.board.store.board_info(board)
         if info is None:
             self._send(
                 200,
                 f"# /{board} · empty\n\n"
                 f"create it: /publish?board={board}&name=YOU&text=hello\n",
-                method=method,
             )
             return
+
         limit = _int(
             params,
             "limit",
@@ -265,26 +308,28 @@ class Handler(BaseHTTPRequestHandler):
             1,
             self.board.cfg.max_limit,
         )
+        assert limit is not None
+
         posts = self.board.store.list_posts(
             board=board,
             since=_int(params, "since", None, 0, None),
             before=_int(params, "before", None, 0, None),
-            limit=(limit or self.board.cfg.default_limit) + 1,
+            limit=limit + 1,
             order="asc" if (_param(params, "order") or "").lower() == "asc" else "desc",
             author=_param(params, "name"),
             search=_param(params, "q"),
         )
-        limit = limit or self.board.cfg.default_limit
         truncated = len(posts) > limit
         posts = posts[:limit]
+
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
                 posts_to_ndjson(posts),
                 content_type="application/x-ndjson; charset=utf-8",
-                method=method,
             )
             return
+
         self._send(
             200,
             render_listing(
@@ -294,14 +339,14 @@ class Handler(BaseHTTPRequestHandler):
                 truncated=truncated,
                 note=info["description"],
             ),
-            method=method,
         )
 
-    def _search(self, method: str, params: Params) -> None:
+    def _search(self, params: Params) -> None:
         needle = _param(params, "q") or ""
         if not needle:
             self._error(400, "q is required", "/_search?q=hello")
             return
+
         limit = _int(
             params,
             "limit",
@@ -309,7 +354,8 @@ class Handler(BaseHTTPRequestHandler):
             1,
             self.board.cfg.max_limit,
         )
-        limit = limit or self.board.cfg.default_limit
+        assert limit is not None
+
         posts = self.board.store.list_posts(search=needle, limit=limit + 1)
         self._send(
             200,
@@ -320,36 +366,26 @@ class Handler(BaseHTTPRequestHandler):
                 truncated=len(posts) > limit,
                 note=f"search: {needle!r}",
             ),
-            method=method,
         )
 
-    def _publish(self, method: str, params: Params) -> None:
+    def _publish(self, params: Params) -> None:
         store = self.board.store
+        edit = _param(params, "edit")
+        delete = _param(params, "delete")
 
-        for action in ("edit", "delete"):
-            target = _param(params, action)
-            if target is None:
-                continue
-            try:
-                post_id = int(target)
-            except ValueError as exc:
-                raise StoreError(f"{action} requires a numeric id", 400) from exc
+        if edit is not None and delete is not None:
+            raise StoreError("choose exactly one of edit or delete", 400)
+
+        if edit is not None:
+            post_id = _post_id(edit, "edit")
             post = store.get_post(post_id)
             if post is None:
                 raise StoreError(f"no entry {post_id}", 404)
 
-            if action == "delete":
-                store.delete_post(post_id)
-                self._send(
-                    200,
-                    render_ok(ok=1, action="delete", id=post_id),
-                    method=method,
-                )
-                return
-
             text = _param(params, "text")
             if text is None:
                 raise StoreError("text is required", 400)
+
             updated = store.edit_post(
                 post=post,
                 body=text,
@@ -360,22 +396,30 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 render_ok(
                     ok=1,
-                    action=action,
+                    action="edit",
                     id=updated.id,
                     board=updated.board,
                     bytes=updated.nbytes,
                     url=f"https://{self.board.cfg.site_name}/{updated.board}/{updated.id}",
                 ),
-                method=method,
             )
+            return
+
+        if delete is not None:
+            post_id = _post_id(delete, "delete")
+            if not store.delete_post(post_id):
+                raise StoreError(f"no entry {post_id}", 404)
+            self._send(200, render_ok(ok=1, action="delete", id=post_id))
             return
 
         board = (_param(params, "board") or "").lower()
         if not board:
             raise StoreError("board is required", 400, "/publish?board=main&text=hello")
+
         text = _param(params, "text")
         if text is None:
             raise StoreError("text is required", 400)
+
         post, evicted = store.create_post(
             board=board,
             body=text,
@@ -383,7 +427,7 @@ class Handler(BaseHTTPRequestHandler):
             title=_param(params, "title") or "",
         )
         self._send(
-            201 if method != "HEAD" else 200,
+            201,
             render_ok(
                 ok=1,
                 action="create",
@@ -393,8 +437,17 @@ class Handler(BaseHTTPRequestHandler):
                 evicted=evicted or None,
                 url=f"https://{self.board.cfg.site_name}/{post.board}/{post.id}",
             ),
-            method=method,
         )
+
+
+def _post_id(value: str, action: str) -> int:
+    try:
+        post_id = int(value)
+    except ValueError as exc:
+        raise StoreError(f"{action} requires a numeric id", 400) from exc
+    if post_id < 1:
+        raise StoreError(f"{action} requires a positive id", 400)
+    return post_id
 
 
 def _param(params: Params, key: str) -> str | None:
@@ -423,14 +476,6 @@ def _int(
     return value
 
 
-def build_server(cfg: Config) -> ThreadingHTTPServer:
+def build_server(cfg: Config) -> MsgServer:
     board = Board(cfg)
-
-    class BoundHandler(Handler):
-        pass
-
-    BoundHandler.board = board
-    server = ThreadingHTTPServer((cfg.host, cfg.port), BoundHandler)
-    server.daemon_threads = True
-    server.board = board  # type: ignore[attr-defined]
-    return server
+    return MsgServer((cfg.host, cfg.port), Handler, board)
