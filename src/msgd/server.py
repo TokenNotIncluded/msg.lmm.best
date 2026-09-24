@@ -170,6 +170,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = unquote(parsed.path or "/")
         params = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=80)
+        uploads: Uploads = ()
 
         if method == "POST":
             try:
@@ -177,27 +178,38 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 self._error(400, "bad Content-Length")
                 return
-            if length < 0 or length > MAX_REQUEST_BYTES:
+            if length < 0 or length > self.board.cfg.max_request_bytes:
                 self._error(413, "request too large")
                 return
+
             raw = self.rfile.read(length) if length else b""
-            content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip()
+            content_type_header = self.headers.get("Content-Type") or ""
+            content_type = content_type_header.split(";", 1)[0].strip().lower()
             if content_type == "application/x-www-form-urlencoded":
                 form = parse_qs(
                     raw.decode("utf-8", "replace"),
                     keep_blank_values=True,
                     max_num_fields=80,
                 )
+            elif content_type == "multipart/form-data":
+                form, uploads = _parse_multipart(
+                    raw,
+                    content_type_header,
+                    self.board.cfg.max_files_per_post,
+                    self.board.cfg.max_file_bytes,
+                    self.board.cfg.max_filename_bytes,
+                )
             elif content_type in {"text/plain", "text/markdown", ""}:
                 form = {"text": [raw.decode("utf-8", "replace")]}
             else:
                 self._error(415, f"unsupported Content-Type: {content_type}")
                 return
+
             for key, values in form.items():
                 params.setdefault(key, values)
 
         try:
-            self._route(method, path, params)
+            self._route(method, path, params, uploads)
         except (StoreError, SignatureError) as exc:
             status = exc.status if isinstance(exc, StoreError) else 400
             hint = exc.hint if isinstance(exc, StoreError) else ""
@@ -208,7 +220,7 @@ class Handler(BaseHTTPRequestHandler):
             log("error", "unhandled exception", path=path, error=repr(exc))
             self._error(500, "internal error")
 
-    def _route(self, method: str, path: str, params: Params) -> None:
+    def _route(self, method: str, path: str, params: Params, uploads: Uploads) -> None:
         segments = [segment for segment in path.split("/") if segment]
         head = segments[0] if segments else ""
 
