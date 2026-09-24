@@ -1003,6 +1003,61 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, render_ok(ok=1, action="delete", id=post_id, actor_id=actor_id))
 
 
+def _create_context(params: Params, store: Store) -> tuple[str, int | None]:
+    reply_raw = _param(params, "reply_to")
+    reply_to: int | None = None
+    parent = None
+    if reply_raw not in {None, ""}:
+        reply_to = _post_id(reply_raw)
+        parent = store.get_post(reply_to)
+        if parent is None:
+            raise StoreError(f"reply target {reply_to} not found", 404)
+
+    board_raw = _param(params, "board")
+    if board_raw:
+        board = board_raw.lower()
+    elif parent is not None:
+        board = parent.board
+    else:
+        raise StoreError("board is required", 400)
+
+    if parent is not None and parent.board != board:
+        raise StoreError("reply must stay in the parent topic", 400)
+    return board, reply_to
+
+
+def _optional_int(params: Params, key: str) -> int | None:
+    raw = _param(params, key)
+    if raw in {None, ""}:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise StoreError(f"{key} must be an integer", 400) from exc
+    if value < 0:
+        raise StoreError(f"{key} must be >= 0", 400)
+    return value
+
+
+def _inbox_window(
+    params: Params,
+    cfg: Config,
+) -> tuple[int | None, int | None, int]:
+    since = _optional_int(params, "since")
+    before = _optional_int(params, "before")
+    raw_limit = _param(params, "limit")
+    if raw_limit in {None, ""}:
+        limit = cfg.default_limit
+    else:
+        try:
+            limit = int(raw_limit)
+        except ValueError as exc:
+            raise StoreError("limit must be an integer", 400) from exc
+        if not 1 <= limit <= cfg.max_limit:
+            raise StoreError(f"limit must be between 1 and {cfg.max_limit}", 400)
+    return since, before, limit
+
+
 def _body_limit(cfg: Config, method: str) -> int:
     return cfg.max_post_bytes_post if method == "POST" else cfg.max_post_bytes
 
