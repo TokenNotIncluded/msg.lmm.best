@@ -889,6 +889,8 @@ class Handler(BaseHTTPRequestHandler):
         post = store.get_post(post_id)
         if post is None:
             raise StoreError(f"no entry {post_id}", 404)
+        if _param(params, "reply_to") is not None:
+            raise StoreError("reply_to is immutable after creation", 400)
         body, title, name, _ = store.prepare_post(
             body=_required(params, "text"),
             title=post.title if _param(params, "title") is None else _param(params, "title") or "",
