@@ -866,6 +866,7 @@ class Store:
             )
             post_id = int(cur.lastrowid or 0)
             self._insert_attachments(post_id, files)
+            self._reindex_inbox(post_id)
 
         post = self.get_post(post_id)
         assert post is not None
@@ -962,6 +963,7 @@ class Store:
             if files is not None:
                 self._conn.execute("DELETE FROM attachments WHERE post_id = ?", (post.id,))
                 self._insert_attachments(post.id, files)
+            self._reindex_inbox(post.id)
 
         updated = self.get_post(post.id)
         assert updated is not None
@@ -1022,6 +1024,111 @@ class Store:
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [post for row in rows if (post := self._row(row)) is not None]
+
+    def inbox(
+        self,
+        subject_id: str,
+        *,
+        since: int | None = None,
+        before: int | None = None,
+        limit: int = 20,
+    ) -> list[tuple[Post, tuple[str, ...]]]:
+        if not valid_author_id(subject_id):
+            raise StoreError("invalid inbox identity", 400)
+
+        where = ["e.subject_id = ?"]
+        params: list[Any] = [subject_id]
+        if since is not None:
+            where.append("e.post_id > ?")
+            params.append(since)
+        if before is not None:
+            where.append("e.post_id < ?")
+            params.append(before)
+
+        sql = (
+            "SELECT e.post_id, GROUP_CONCAT(e.kind) AS kinds "
+            "FROM inbox_events e WHERE "
+            + " AND ".join(where)
+            + " GROUP BY e.post_id ORDER BY e.post_id DESC LIMIT ?"
+        )
+        params.append(max(1, min(limit, self.cfg.max_limit)))
+
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            result: list[tuple[Post, tuple[str, ...]]] = []
+            for row in rows:
+                post_row = self._conn.execute(
+                    self._select_posts() + " WHERE id = ?",
+                    (int(row["post_id"]),),
+                ).fetchone()
+                post = self._row(post_row)
+                if post is None:
+                    continue
+                kinds = tuple(
+                    sorted(
+                        {
+                            item
+                            for item in str(row["kinds"] or "").split(",")
+                            if item
+                        }
+                    )
+                )
+                result.append((post, kinds))
+        return result
+
+    def _reindex_inbox(self, post_id: int) -> None:
+        self._conn.execute("DELETE FROM inbox_events WHERE post_id = ?", (post_id,))
+        row = self._conn.execute(
+            self._select_posts() + " WHERE id = ?",
+            (post_id,),
+        ).fetchone()
+        post = self._row(row)
+        if post is None:
+            return
+
+        actor_id = post.actor_id
+        events: set[tuple[str, str]] = set()
+
+        if post.reply_to is not None:
+            parent = self._conn.execute(
+                "SELECT author_id FROM posts WHERE id = ?",
+                (post.reply_to,),
+            ).fetchone()
+            if parent is not None and parent["author_id"] is not None:
+                target = str(parent["author_id"])
+                if target != actor_id:
+                    events.add((target, "reply"))
+
+        text = post.title + "\n" + post.body
+        for token in set(MENTION_RE.findall(text)):
+            lowered = token.lower()
+            targets: set[str] = set()
+            if AUTHOR_ID_RE.fullmatch(lowered):
+                targets.add(lowered)
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT DISTINCT author_id
+                      FROM posts
+                     WHERE author_id IS NOT NULL
+                       AND name = ? COLLATE NOCASE
+                    """,
+                    (token,),
+                ).fetchall()
+                targets.update(str(item["author_id"]) for item in rows)
+
+            for target in targets:
+                if target != actor_id:
+                    events.add((target, "mention"))
+
+        if events:
+            self._conn.executemany(
+                """
+                INSERT OR IGNORE INTO inbox_events(post_id, subject_id, kind)
+                VALUES (?, ?, ?)
+                """,
+                [(post_id, subject_id, kind) for subject_id, kind in events],
+            )
 
     def key_info(self, author_id: str) -> dict[str, Any] | None:
         if not valid_author_id(author_id):
