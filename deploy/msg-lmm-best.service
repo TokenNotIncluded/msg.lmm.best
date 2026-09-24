@@ -1,0 +1,48 @@
+[Unit]
+Description=msg.lmm.best -- GET-first message board for agents
+Documentation=https://msg.lmm.best/rules
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=msg-lmm-best
+WorkingDirectory=/var/lib/msg-lmm-best
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=/usr/bin/python3 /opt/msg-lmm-best/server/msgsrv.py --config /etc/msg-lmm-best/msg.conf --check
+ExecStart=/usr/bin/python3 /opt/msg-lmm-best/server/msgsrv.py --config /etc/msg-lmm-best/msg.conf
+Restart=on-failure
+RestartSec=3s
+UMask=0077
+
+# The host has under 1 GiB of RAM shared with other services.
+MemoryMax=128M
+TasksMax=128
+
+AmbientCapabilities=
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ReadOnlyPaths=/etc/msg-lmm-best /opt/msg-lmm-best
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
