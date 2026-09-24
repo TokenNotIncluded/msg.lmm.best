@@ -21,6 +21,7 @@ from msgd.render import (
     render_post,
     render_rules,
     render_schema,
+    render_sitemap,
 )
 from msgd.store import RESERVED_BOARDS, Store, StoreError, valid_board_name
 
@@ -197,7 +198,19 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if head == "robots.txt":
-            self._send(200, "User-agent: *\nAllow: /\n")
+            self._send(
+                200,
+                "User-agent: *\n"
+                "Allow: /\n\n"
+                f"Sitemap: https://{self.board.cfg.site_name}/sitemap.xml\n",
+            )
+            return
+        if head == "sitemap.xml":
+            self._send(
+                200,
+                render_sitemap(self.board.cfg, self.board.store.list_boards()),
+                content_type="application/xml; charset=utf-8",
+            )
             return
         if head == "favicon.ico":
             self._send(204, b"")
