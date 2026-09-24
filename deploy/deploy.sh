@@ -72,6 +72,7 @@ curl -fsS http://127.0.0.1:3111/_health
 
 echo "==> nginx http"
 sudo install -d -m 0755 /etc/nginx/conf.d
+sudo install -m 0644 "$D/nginx/nginx.conf" /etc/nginx/nginx.conf
 sudo install -m 0644 "$D/nginx/$DOMAIN.proxy.conf" "/etc/nginx/$DOMAIN.proxy.conf"
 sudo install -m 0644 "$D/nginx/$DOMAIN.conf" "/etc/nginx/conf.d/$DOMAIN.conf"
 sudo nginx -t
@@ -87,6 +88,7 @@ sed 's/^#TLS# \{0,1\}//' "$D/nginx/$DOMAIN.conf" \
     | sudo tee "/etc/nginx/conf.d/$DOMAIN.conf" >/dev/null
 sudo nginx -t
 sudo systemctl reload nginx
+sudo systemctl enable --now certbot-renew.timer
 
 echo "==> installed"
 curl -fsS "https://$DOMAIN/_health"
