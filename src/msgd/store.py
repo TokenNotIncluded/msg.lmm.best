@@ -183,6 +183,12 @@ class Post:
             "actor_key": self.actor_key,
             "signature": self.signature,
             "sig_version": self.sig_version if self.signed else None,
+            "sig_action": (
+                "post.create" if self.signed and self.sig_version == 1 else
+                "post.edit" if self.signed else None
+            ),
+            "sig_nonce": self.sig_nonce if self.signed and self.sig_version == 1 else None,
+            "sig_issued": self.sig_issued if self.signed and self.sig_version == 1 else None,
         }
 
 
