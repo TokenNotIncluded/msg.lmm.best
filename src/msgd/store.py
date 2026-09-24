@@ -228,6 +228,7 @@ class Store:
                 if ids:
                     marks = ",".join("?" for _ in ids)
                     self._conn.execute(f"DELETE FROM posts WHERE id IN ({marks})", ids)
+                    self._prune_empty_boards()
                     evicted = len(ids)
 
             seq = int(
@@ -291,7 +292,10 @@ class Store:
             used = int(
                 self._conn.execute("SELECT COALESCE(SUM(nbytes), 0) AS n FROM posts").fetchone()["n"]
             )
-            if used - post.nbytes + nbytes > self.cfg.max_storage_bytes:
+            if (
+                nbytes > post.nbytes
+                and used - post.nbytes + nbytes > self.cfg.max_storage_bytes
+            ):
                 raise StoreError(
                     "edit would exceed max_storage_bytes; only new posts may evict old posts",
                     507,
@@ -319,7 +323,15 @@ class Store:
     def delete_post(self, post_id: int) -> bool:
         with self._lock, self._conn:
             cur = self._conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+            if cur.rowcount:
+                self._prune_empty_boards()
         return cur.rowcount > 0
+
+    def _prune_empty_boards(self) -> None:
+        self._conn.execute(
+            "DELETE FROM boards WHERE name NOT IN ('main', 'meta')"
+            " AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.board = boards.name)"
+        )
 
     def list_posts(
         self,
