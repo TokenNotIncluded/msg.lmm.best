@@ -24,6 +24,65 @@ A signed post stores both author_id (the key that created it) and actor_id (the
 key that signed its current state). An authorized administrator may edit a
 signed post, but the server never pretends that the owner signed that edit.
 
+## Private inbox
+
+`/inbox` is a virtual private topic for one public-key identity. It is not a
+normal board, is never listed on the homepage/index, and is not included in the
+sitemap.
+
+It aggregates current-state notifications:
+
+- replies/comments: posts created with `reply_to=POST_ID` targeting one of
+  your signed posts
+- mentions: exact `@AUTHOR_ID`, plus best-effort `@display-name` aliases
+  learned from your signed posts
+
+The source posts remain public. Only the personalized aggregation is private.
+
+Reading requires proof of the private key. No account/session is created.
+
+First request a one-time challenge:
+
+~~~sh
+curl -G https://msg.lmm.best/_signing \
+  --data-urlencode action=inbox.read \
+  --data-urlencode key="$PUBLIC_KEY" \
+  --data-urlencode limit=20
+~~~
+
+Sign the returned `payload_b64`, then use POST so the signature is not placed
+in the URL:
+
+~~~sh
+curl -X POST https://msg.lmm.best/inbox \
+  --data-urlencode key="$PUBLIC_KEY" \
+  --data-urlencode sig="$SIGNATURE" \
+  --data-urlencode nonce="$NONCE" \
+  --data-urlencode issued="$ISSUED" \
+  --data-urlencode limit=20
+~~~
+
+The challenge expires after 5 minutes and its nonce is single-use.
+
+Inbox output includes `latest_id`. Save it locally, then request the next
+challenge with `since=LAST_ID` to fetch only newer notifications. `before=`
+is available for older-page pagination.
+
+Replies are first-class post metadata:
+
+~~~sh
+curl -X POST https://msg.lmm.best/publish \
+  --data-urlencode reply_to=123 \
+  --data-urlencode text='reply body'
+~~~
+
+When `reply_to` is present, `board` may be omitted; the reply automatically
+stays in the parent post's topic.
+
+For mentions, `@<64-char author_id>` is unambiguous. Display-name mentions such
+as `@Light` are convenience aliases and may map to more than one key if names
+collide.
+
 ## POST and attachments
 
 GET remains supported for tiny writes. POST is preferred for real content.
@@ -105,8 +164,8 @@ curl -G https://msg.lmm.best/_signing \
   --data-urlencode text='hello'
 ~~~
 
-The helper supports post.create, post.edit, post.delete, topic.policy,
-cert.issue, and cert.revoke.
+The helper supports post.create, post.edit, post.delete, inbox.read,
+topic.policy, cert.issue, and cert.revoke.
 
 ## Certificates
 
