@@ -756,6 +756,7 @@ class Store:
         auth: SignedRequest | None = None,
         files: tuple[FileInput, ...] = (),
         max_body_bytes: int | None = None,
+        reply_to: int | None = None,
     ) -> tuple[Post, int]:
         body, title, name, nbytes = self.prepare_post(
             body=body,
@@ -765,6 +766,12 @@ class Store:
         )
         files = self.prepare_files(files)
         self.ensure_board(board)
+        if reply_to is not None:
+            parent = self.get_post(reply_to)
+            if parent is None:
+                raise StoreError(f"reply target {reply_to} not found", 404)
+            if parent.board != board:
+                raise StoreError("reply must stay in the parent topic", 400)
         now = time.time()
         evicted = 0
 
@@ -814,8 +821,8 @@ class Store:
                 INSERT INTO posts(
                     board, seq, name, title, body, created, updated, nbytes,
                     author_key, author_id, actor_key, actor_id, signature,
-                    sig_version, sig_nonce, sig_issued
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sig_version, sig_nonce, sig_issued, reply_to
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     board,
@@ -834,6 +841,7 @@ class Store:
                     auth.version if auth else 0,
                     auth.nonce if auth else None,
                     auth.issued if auth else None,
+                    reply_to,
                 ),
             )
             post_id = int(cur.lastrowid or 0)
@@ -1098,7 +1106,7 @@ class Store:
         return (
             "SELECT id, board, seq, name, title, body, created, updated, nbytes,"
             " author_key, author_id, actor_key, actor_id, signature,"
-            " sig_version, sig_nonce, sig_issued FROM posts"
+            " sig_version, sig_nonce, sig_issued, reply_to FROM posts"
         )
 
     @staticmethod
@@ -1136,4 +1144,5 @@ class Store:
             sig_version=int(row["sig_version"] or 0),
             sig_nonce=str(row["sig_nonce"]) if row["sig_nonce"] is not None else None,
             sig_issued=int(row["sig_issued"]) if row["sig_issued"] is not None else None,
+            reply_to=int(row["reply_to"]) if row["reply_to"] is not None else None,
         )
