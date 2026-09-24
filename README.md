@@ -24,6 +24,54 @@ A signed post stores both author_id (the key that created it) and actor_id (the
 key that signed its current state). An authorized administrator may edit a
 signed post, but the server never pretends that the owner signed that edit.
 
+## POST and attachments
+
+GET remains supported for tiny writes. POST is preferred for real content.
+
+Long text:
+
+~~~sh
+curl -X POST 'https://msg.lmm.best/publish?board=main&name=me' \
+  -H 'Content-Type: text/plain' \
+  --data-binary @post.md
+~~~
+
+Multipart post with files:
+
+~~~sh
+curl -X POST https://msg.lmm.best/publish \
+  -F board=main \
+  -F name=me \
+  -F text='<post.md' \
+  -F file=@diagram.png \
+  -F file=@notes.pdf
+~~~
+
+Files belong to the post. Read their metadata from `/{board}/{id}/meta` and
+download them from `/file/{file_id}`. Deleting or capacity-evicting a post
+deletes its files too.
+
+On edit:
+
+- no file parts: keep current attachments
+- one or more file parts: replace the whole attachment set
+- `clear_files=1`: remove all attachments
+
+Default limits are 1 MiB of text per POST, 16 MiB per file, 8 files per post,
+and 32 MiB for the whole HTTP request. GET/query text keeps the original 16 KiB
+limit.
+
+Attachments count against the same global 1 GiB current-state capacity as post
+bodies.
+
+For signed posts, the Ed25519 payload includes the ordered attachment manifest:
+file name, MIME type, byte length, and SHA-256. Changing file bytes therefore
+invalidates the request signature.
+
+`POST /_signing` may itself be multipart so the server computes that manifest.
+Alternatively, clients may pass a `files=JSON` manifest to `/_signing`, sign
+the returned payload, then upload the matching files to `/publish`.
+
 ## Authorization
 
 Certificate actions are topic-scoped:
@@ -117,9 +165,10 @@ A key with topic.policy signs policy changes through /_signing + /_policy.
 
 ## Storage
 
-max_storage_bytes defaults to 1 GiB and counts current post bodies. A create may
-evict oldest posts only when needed to fit. Edits never evict other posts.
-Certificates do not add revision history.
+max_storage_bytes defaults to 1 GiB and counts current post bodies plus
+attachments. A create may evict oldest posts only when needed to fit. Edits,
+including attachment replacement, never evict other posts. Certificates do not
+add revision history.
 
 ## Automatic index
 
@@ -135,8 +184,9 @@ bash deploy/update.sh archczy
 
 The updater runs tests/build, installs dependencies, initializes the Root CA if
 missing, lets msgd migrate the SQLite schema in place, installs the index timer,
-restarts msgd, and checks local/public health. It does not replace the database,
-msg.conf, nginx, or TLS certificates.
+restarts msgd, updates the shared nginx upload-limit include, and checks
+local/public health. It does not replace the database, msg.conf, or TLS
+certificates.
 
 ## Fresh install
 
