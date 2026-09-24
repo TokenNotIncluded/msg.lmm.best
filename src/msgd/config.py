@@ -17,6 +17,7 @@ class Config:
     host: str = "127.0.0.1"
     port: int = 3111
     database: str = "/var/lib/msg-lmm-best/msg.db"
+    root_public_key: str = "/etc/msg-lmm-best/root-ca.pub"
 
     # Logical capacity of current post bodies. Oldest posts are evicted only
     # when creating a new post would cross this limit.
@@ -70,6 +71,7 @@ class Config:
             host=get("server", "host", base.host),
             port=get("server", "port", base.port),
             database=get("storage", "database", base.database),
+            root_public_key=get("ca", "root_public_key", base.root_public_key),
             max_storage_bytes=get("storage", "max_storage_bytes", base.max_storage_bytes),
             max_post_bytes=get("limits", "max_post_bytes", base.max_post_bytes),
             max_title_bytes=get("limits", "max_title_bytes", base.max_title_bytes),

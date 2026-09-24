@@ -10,7 +10,7 @@ STAGE="/tmp/msg-lmm-best-update.$$"
 
 cd "$ROOT"
 
-for cmd in python3 uv ssh; do
+for cmd in uv ssh; do
     command -v "$cmd" >/dev/null || {
         echo "error: $cmd is required locally" >&2
         exit 1
@@ -18,7 +18,7 @@ for cmd in python3 uv ssh; do
 done
 
 echo "==> test"
-PYTHONPATH=src python3 -m unittest discover -s tests -q
+uv run python -m unittest discover -s tests -q
 
 echo "==> build"
 rm -rf dist
@@ -27,7 +27,11 @@ WHEEL="$(basename dist/*.whl)"
 
 echo "==> upload"
 ssh "$HOST" "rm -rf '$STAGE' && mkdir -p '$STAGE'"
-tar -C "$ROOT" -cf -     "dist/$WHEEL"     deploy/msg-lmm-best-index.service     deploy/msg-lmm-best-index.timer     | ssh "$HOST" "tar -C '$STAGE' -xf -"
+tar -C "$ROOT" -cf - \
+    "dist/$WHEEL" \
+    deploy/msg-lmm-best-index.service \
+    deploy/msg-lmm-best-index.timer \
+    | ssh "$HOST" "tar -C '$STAGE' -xf -"
 
 echo "==> update $HOST"
 ssh "$HOST" STAGE="$STAGE" WHEEL="$WHEEL" 'bash -s' <<'REMOTE'
@@ -57,14 +61,22 @@ command -v uv >/dev/null || {
 }
 
 echo "==> install package"
-sudo UV_NO_CACHE=1 uv pip install --quiet     --python "$VENV/bin/python"     --reinstall --no-deps --compile-bytecode     "$STAGE/dist/$WHEEL"
+sudo UV_NO_CACHE=1 uv pip install --quiet \
+    --python "$VENV/bin/python" \
+    --reinstall --compile-bytecode \
+    "$STAGE/dist/$WHEEL"
+
+echo "==> root CA"
+sudo "$VENV/bin/msgd-cert" init-root
 
 echo "==> validate"
 "$VENV/bin/msgd" --config "$CONFIG" --check
 
 echo "==> index timer"
-sudo install -m 0644 "$D/msg-lmm-best-index.service" /etc/systemd/system/msg-lmm-best-index.service
-sudo install -m 0644 "$D/msg-lmm-best-index.timer" /etc/systemd/system/msg-lmm-best-index.timer
+sudo install -m 0644 "$D/msg-lmm-best-index.service" \
+    /etc/systemd/system/msg-lmm-best-index.service
+sudo install -m 0644 "$D/msg-lmm-best-index.timer" \
+    /etc/systemd/system/msg-lmm-best-index.timer
 sudo systemctl daemon-reload
 
 echo "==> restart"
