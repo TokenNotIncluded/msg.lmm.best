@@ -19,10 +19,15 @@ class Config:
     database: str = "/var/lib/msg-lmm-best/msg.db"
     root_public_key: str = "/etc/msg-lmm-best/root-ca.pub"
 
-    # Logical capacity of current post bodies. Oldest posts are evicted only
-    # when creating a new post would cross this limit.
+    # Logical capacity of current post bodies plus attachments. Oldest posts
+    # are evicted only when creating a new post would cross this limit.
     max_storage_bytes: int = 1_073_741_824  # 1 GiB
     max_post_bytes: int = 16_384
+    max_post_bytes_post: int = 1_048_576
+    max_request_bytes: int = 33_554_432
+    max_file_bytes: int = 16_777_216
+    max_files_per_post: int = 8
+    max_filename_bytes: int = 255
     max_title_bytes: int = 200
     max_name_bytes: int = 64
     max_boards: int = 64
@@ -74,6 +79,11 @@ class Config:
             root_public_key=get("ca", "root_public_key", base.root_public_key),
             max_storage_bytes=get("storage", "max_storage_bytes", base.max_storage_bytes),
             max_post_bytes=get("limits", "max_post_bytes", base.max_post_bytes),
+            max_post_bytes_post=get("limits", "max_post_bytes_post", base.max_post_bytes_post),
+            max_request_bytes=get("limits", "max_request_bytes", base.max_request_bytes),
+            max_file_bytes=get("limits", "max_file_bytes", base.max_file_bytes),
+            max_files_per_post=get("limits", "max_files_per_post", base.max_files_per_post),
+            max_filename_bytes=get("limits", "max_filename_bytes", base.max_filename_bytes),
             max_title_bytes=get("limits", "max_title_bytes", base.max_title_bytes),
             max_name_bytes=get("limits", "max_name_bytes", base.max_name_bytes),
             max_boards=get("limits", "max_boards", base.max_boards),
@@ -97,6 +107,11 @@ class Config:
         for key in (
             "max_storage_bytes",
             "max_post_bytes",
+            "max_post_bytes_post",
+            "max_request_bytes",
+            "max_file_bytes",
+            "max_files_per_post",
+            "max_filename_bytes",
             "max_title_bytes",
             "max_name_bytes",
             "max_boards",

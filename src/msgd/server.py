@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import secrets
 import sys
 import time
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from msgd import __version__
 from msgd.config import Config
@@ -17,6 +21,7 @@ from msgd.crypto import (
     SignatureError,
     certificate_payload,
     make_certificate,
+    normalize_file_manifest,
     payload_info,
     public_identity,
     request_payload,
@@ -34,10 +39,17 @@ from msgd.render import (
     render_schema,
     render_sitemap,
 )
-from msgd.store import RESERVED_BOARDS, Store, StoreError, valid_author_id, valid_board_name
+from msgd.store import (
+    RESERVED_BOARDS,
+    FileInput,
+    Store,
+    StoreError,
+    valid_author_id,
+    valid_board_name,
+)
 
 Params = dict[str, list[str]]
-MAX_REQUEST_BYTES = 65_536
+Uploads = tuple[FileInput, ...]
 
 
 def log(level: str, message: str, **fields: Any) -> None:
@@ -158,6 +170,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = unquote(parsed.path or "/")
         params = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=80)
+        uploads: Uploads = ()
 
         if method == "POST":
             try:
@@ -165,27 +178,38 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 self._error(400, "bad Content-Length")
                 return
-            if length < 0 or length > MAX_REQUEST_BYTES:
+            if length < 0 or length > self.board.cfg.max_request_bytes:
                 self._error(413, "request too large")
                 return
+
             raw = self.rfile.read(length) if length else b""
-            content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip()
+            content_type_header = self.headers.get("Content-Type") or ""
+            content_type = content_type_header.split(";", 1)[0].strip().lower()
             if content_type == "application/x-www-form-urlencoded":
                 form = parse_qs(
                     raw.decode("utf-8", "replace"),
                     keep_blank_values=True,
                     max_num_fields=80,
                 )
+            elif content_type == "multipart/form-data":
+                form, uploads = _parse_multipart(
+                    raw,
+                    content_type_header,
+                    self.board.cfg.max_files_per_post,
+                    self.board.cfg.max_file_bytes,
+                    self.board.cfg.max_filename_bytes,
+                )
             elif content_type in {"text/plain", "text/markdown", ""}:
                 form = {"text": [raw.decode("utf-8", "replace")]}
             else:
                 self._error(415, f"unsupported Content-Type: {content_type}")
                 return
+
             for key, values in form.items():
                 params.setdefault(key, values)
 
         try:
-            self._route(method, path, params)
+            self._route(method, path, params, uploads)
         except (StoreError, SignatureError) as exc:
             status = exc.status if isinstance(exc, StoreError) else 400
             hint = exc.hint if isinstance(exc, StoreError) else ""
@@ -196,7 +220,7 @@ class Handler(BaseHTTPRequestHandler):
             log("error", "unhandled exception", path=path, error=repr(exc))
             self._error(500, "internal error")
 
-    def _route(self, method: str, path: str, params: Params) -> None:
+    def _route(self, method: str, path: str, params: Params, uploads: Uploads) -> None:
         segments = [segment for segment in path.split("/") if segment]
         head = segments[0] if segments else ""
 
@@ -228,6 +252,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(204, b"")
             return
 
+        if uploads and head not in {"publish", "_signing"}:
+            raise StoreError("file uploads are only accepted by /publish or /_signing", 400)
+
         if head in {"publish", "_cert", "_revoke", "_policy"} and method == "HEAD":
             self._send(
                 405,
@@ -237,7 +264,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if head == "_signing":
-            self._signing(params)
+            if self._limited(bool(uploads)):
+                return
+            self._signing(params, uploads, method)
             return
         if head == "_ca":
             info = self.board.store.root_info()
@@ -274,7 +303,7 @@ class Handler(BaseHTTPRequestHandler):
         if head == "publish":
             if self._limited(True):
                 return
-            self._publish(params)
+            self._publish(params, uploads, method)
             return
 
         if self._limited(False):
@@ -303,6 +332,33 @@ class Handler(BaseHTTPRequestHandler):
         if head == "_search":
             self._search(params)
             return
+        if head == "file":
+            if len(segments) != 2:
+                self._error(404, "file id is required")
+                return
+            try:
+                file_id = int(segments[1])
+            except ValueError:
+                self._error(404, "invalid file id")
+                return
+            attachment = self.board.store.attachment(file_id)
+            if attachment is None:
+                self._error(404, "file not found")
+                return
+            disposition = "attachment; filename*=UTF-8''" + quote(
+                attachment.name,
+                safe="",
+            )
+            self._send(
+                200,
+                attachment.data,
+                content_type=attachment.content_type,
+                extra_headers={
+                    "Content-Disposition": disposition,
+                    "ETag": f'"{attachment.sha256}"',
+                },
+            )
+            return
 
         if not valid_board_name(head):
             hint = f"{head!r} is reserved" if head in RESERVED_BOARDS else "invalid board name"
@@ -315,7 +371,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(segments) == 2 and segments[1] == "post":
             if self._limited(True):
                 return
-            self._publish({**params, "board": [head]})
+            self._publish({**params, "board": [head]}, uploads, method)
             return
 
         post = self.board.store.find_in_board(head, segments[1])
@@ -324,16 +380,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         action = segments[2] if len(segments) > 2 else ""
         if not action:
-            self._send(200, render_post(post))
+            self._send(200, render_post(post, self.board.store.attachments(post.id)))
         elif action == "raw":
             self._send(200, post.body)
         elif action == "meta":
-            self._json(200, post.to_dict())
+            self._json(
+                200,
+                {
+                    **post.to_dict(),
+                    "files": [
+                        file.to_dict()
+                        for file in self.board.store.attachments(post.id)
+                    ],
+                },
+            )
         else:
             self._error(404, f"unknown action: {action}", "try /raw or /meta")
 
-    def _signing(self, params: Params) -> None:
+    def _signing(self, params: Params, uploads: Uploads, method: str) -> None:
         action = _param(params, "action") or ""
+        if uploads and action not in {"post.create", "post.edit"}:
+            raise StoreError("file uploads are only valid for post.create/post.edit signing", 400)
         key = _required(params, "key")
         _, signer_id = public_identity(key)
         store = self.board.store
@@ -344,6 +411,13 @@ class Handler(BaseHTTPRequestHandler):
                 body=_required(params, "text"),
                 title=_param(params, "title") or "",
                 name=_param(params, "name") or "anonymous",
+                max_body_bytes=_body_limit(self.board.cfg, method),
+            )
+            manifest = _signing_manifest(
+                params,
+                uploads,
+                (),
+                self.board.cfg,
             )
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
@@ -357,8 +431,18 @@ class Handler(BaseHTTPRequestHandler):
                 name=name,
                 title=title,
                 body=body,
+                files=manifest,
             )
-            self._json(200, {"signer_id": signer_id, "nonce": nonce, "issued": issued, **payload_info(payload)})
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "files": list(manifest),
+                    **payload_info(payload),
+                },
+            )
             return
 
         if action in {"post.edit", "post.delete"}:
@@ -371,6 +455,13 @@ class Handler(BaseHTTPRequestHandler):
                     body=_required(params, "text"),
                     title=post.title if _param(params, "title") is None else _param(params, "title") or "",
                     name=post.name if _param(params, "name") is None else _param(params, "name") or "",
+                    max_body_bytes=_body_limit(self.board.cfg, method),
+                )
+                manifest = _signing_manifest(
+                    params,
+                    uploads,
+                    store.attachment_manifest(post.id),
+                    self.board.cfg,
                 )
                 payload = request_payload(
                     action=action,
@@ -382,6 +473,7 @@ class Handler(BaseHTTPRequestHandler):
                     name=name,
                     title=title,
                     body=body,
+                    files=manifest,
                 )
             else:
                 payload = request_payload(
@@ -392,7 +484,10 @@ class Handler(BaseHTTPRequestHandler):
                     owner_id=post.author_id or "",
                     board=post.board,
                 )
-            self._json(200, {"signer_id": signer_id, "version": version, **payload_info(payload)})
+            response = {"signer_id": signer_id, "version": version, **payload_info(payload)}
+            if action == "post.edit":
+                response["files"] = list(manifest)
+            self._json(200, response)
             return
 
         if action == "topic.policy":
@@ -591,27 +686,34 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
-    def _publish(self, params: Params) -> None:
+    def _publish(self, params: Params, uploads: Uploads, method: str) -> None:
         edit = _param(params, "edit")
         delete = _param(params, "delete")
         if edit is not None and delete is not None:
             raise StoreError("choose exactly one of edit or delete", 400)
         if edit is not None:
-            self._edit(_post_id(edit), params)
+            self._edit(_post_id(edit), params, uploads, method)
             return
         if delete is not None:
+            if uploads:
+                raise StoreError("delete does not accept file uploads", 400)
             self._delete(_post_id(delete), params)
             return
-        self._create(params)
+        self._create(params, uploads, method)
 
-    def _create(self, params: Params) -> None:
+    def _create(self, params: Params, uploads: Uploads, method: str) -> None:
         store = self.board.store
+        if _truthy(_param(params, "clear_files")):
+            raise StoreError("clear_files is only valid when editing", 400)
         board = (_required(params, "board")).lower()
         body, title, name, _ = store.prepare_post(
             body=_required(params, "text"),
             title=_param(params, "title") or "",
             name=_param(params, "name") or "anonymous",
+            max_body_bytes=_body_limit(self.board.cfg, method),
         )
+        files = store.prepare_files(uploads)
+        manifest = tuple(file.manifest() for file in files)
         key, sig = _auth_fields(params)
         auth = None
         if key is not None:
@@ -628,6 +730,7 @@ class Handler(BaseHTTPRequestHandler):
                 name=name,
                 title=title,
                 body=body,
+                files=manifest,
             )
             auth = signed_request(
                 canonical_key,
@@ -648,6 +751,8 @@ class Handler(BaseHTTPRequestHandler):
             name=name,
             title=title,
             auth=auth,
+            files=files,
+            max_body_bytes=_body_limit(self.board.cfg, method),
         )
         self._send(
             201,
@@ -659,12 +764,19 @@ class Handler(BaseHTTPRequestHandler):
                 seq=post.seq,
                 auth="signed" if post.signed else "unsigned",
                 author_id=post.author_id,
+                files=len(files),
                 evicted=evicted or None,
                 url=f"https://{self.board.cfg.site_name}/{post.board}/{post.id}",
             ),
         )
 
-    def _edit(self, post_id: int, params: Params) -> None:
+    def _edit(
+        self,
+        post_id: int,
+        params: Params,
+        uploads: Uploads,
+        method: str,
+    ) -> None:
         store = self.board.store
         post = store.get_post(post_id)
         if post is None:
@@ -673,6 +785,22 @@ class Handler(BaseHTTPRequestHandler):
             body=_required(params, "text"),
             title=post.title if _param(params, "title") is None else _param(params, "title") or "",
             name=post.name if _param(params, "name") is None else _param(params, "name") or "",
+            max_body_bytes=_body_limit(self.board.cfg, method),
+        )
+        clear_files = _truthy(_param(params, "clear_files"))
+        if clear_files and uploads:
+            raise StoreError("clear_files cannot be combined with uploads", 400)
+        file_update: tuple[FileInput, ...] | None
+        if clear_files:
+            file_update = ()
+        elif uploads:
+            file_update = store.prepare_files(uploads)
+        else:
+            file_update = None
+        manifest = (
+            tuple(file.manifest() for file in file_update)
+            if file_update is not None
+            else store.attachment_manifest(post.id)
         )
         key, sig = _auth_fields(params)
         auth = None
@@ -689,6 +817,7 @@ class Handler(BaseHTTPRequestHandler):
                 name=name,
                 title=title,
                 body=body,
+                files=manifest,
             )
             auth = signed_request(canonical_key, sig or "", payload, version=version)
             if not store.signed_allowed(
@@ -711,6 +840,8 @@ class Handler(BaseHTTPRequestHandler):
             name=name,
             title=title,
             auth=auth,
+            files=file_update,
+            max_body_bytes=_body_limit(self.board.cfg, method),
         )
         self._send(
             200,
@@ -721,6 +852,7 @@ class Handler(BaseHTTPRequestHandler):
                 board=updated.board,
                 actor_id=auth.signer_id if auth else None,
                 version=updated.sig_version if updated.signed else None,
+                files=len(manifest),
             ),
         )
 
@@ -760,6 +892,153 @@ class Handler(BaseHTTPRequestHandler):
 
         store.delete_post(post)
         self._send(200, render_ok(ok=1, action="delete", id=post_id, actor_id=actor_id))
+
+
+def _body_limit(cfg: Config, method: str) -> int:
+    return cfg.max_post_bytes_post if method == "POST" else cfg.max_post_bytes
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _manifest_limits(
+    manifest: tuple[dict[str, object], ...],
+    cfg: Config,
+) -> tuple[dict[str, object], ...]:
+    if len(manifest) > cfg.max_files_per_post:
+        raise StoreError(
+            f"too many files; max_files_per_post={cfg.max_files_per_post}",
+            413,
+        )
+    total = 0
+    for file in manifest:
+        name = str(file["name"])
+        content_type = str(file["type"])
+        nbytes = int(file["bytes"])
+        if len(name.encode("utf-8")) > cfg.max_filename_bytes:
+            raise StoreError("file name is too long", 413)
+        if len(content_type.encode("utf-8")) > 200:
+            raise StoreError("file content type is too long", 413)
+        if nbytes > cfg.max_file_bytes:
+            raise StoreError(
+                f"file exceeds max_file_bytes={cfg.max_file_bytes}",
+                413,
+            )
+        total += nbytes
+    if total > cfg.max_storage_bytes:
+        raise StoreError("attachments exceed storage capacity", 507)
+    return manifest
+
+
+def _signing_manifest(
+    params: Params,
+    uploads: Uploads,
+    existing: tuple[dict[str, object], ...],
+    cfg: Config,
+) -> tuple[dict[str, object], ...]:
+    clear = _truthy(_param(params, "clear_files"))
+    declared_raw = _param(params, "files")
+    declared = (
+        normalize_file_manifest(declared_raw)
+        if declared_raw is not None
+        else None
+    )
+    uploaded = tuple(file.manifest() for file in uploads)
+
+    if clear:
+        if uploads or (declared is not None and declared):
+            raise StoreError("clear_files cannot be combined with files", 400)
+        return ()
+
+    if uploads:
+        if declared is not None and declared != uploaded:
+            raise StoreError("declared file manifest does not match uploaded files", 400)
+        return _manifest_limits(uploaded, cfg)
+
+    if declared is not None:
+        return _manifest_limits(declared, cfg)
+
+    return _manifest_limits(existing, cfg)
+
+
+def _clean_filename(value: str) -> str:
+    name = re.split(r"[\\/]+", value)[-1].strip()
+    name = "".join(ch for ch in name if ord(ch) >= 32 and ord(ch) != 127)
+    if not name:
+        raise StoreError("empty file name", 400)
+    return name
+
+
+def _parse_multipart(
+    raw: bytes,
+    content_type: str,
+    max_files: int,
+    max_file_bytes: int,
+    max_filename_bytes: int,
+) -> tuple[Params, Uploads]:
+    if "boundary=" not in content_type.lower():
+        raise StoreError("multipart boundary is required", 400)
+
+    message = BytesParser(policy=email_policy).parsebytes(
+        (
+            "Content-Type: "
+            + content_type
+            + "\r\nMIME-Version: 1.0\r\n\r\n"
+        ).encode("utf-8")
+        + raw
+    )
+    if not message.is_multipart():
+        raise StoreError("invalid multipart body", 400)
+
+    fields: Params = {}
+    files: list[FileInput] = []
+    field_count = 0
+
+    for part in message.iter_parts():
+        if part.is_multipart():
+            raise StoreError("nested multipart bodies are not supported", 400)
+        field = part.get_param("name", header="content-disposition")
+        if not isinstance(field, str) or not field:
+            raise StoreError("multipart field name is required", 400)
+
+        data = part.get_payload(decode=True) or b""
+        filename = part.get_filename()
+        if filename is None:
+            field_count += 1
+            if field_count > 80:
+                raise StoreError("too many multipart fields", 400)
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                value = data.decode(charset, "replace")
+            except LookupError as exc:
+                raise StoreError("unsupported multipart text charset", 400) from exc
+            fields.setdefault(field, []).append(value)
+            continue
+
+        if len(files) >= max_files:
+            raise StoreError(f"too many files; max_files_per_post={max_files}", 413)
+        name = _clean_filename(filename)
+        if len(name.encode("utf-8")) > max_filename_bytes:
+            raise StoreError("file name is too long", 413)
+        if len(data) > max_file_bytes:
+            raise StoreError(f"file exceeds max_file_bytes={max_file_bytes}", 413)
+
+        content_type_value = (
+            part.get_content_type()
+            if part.get("Content-Type")
+            else "application/octet-stream"
+        )
+        files.append(
+            FileInput(
+                name=name,
+                content_type=content_type_value,
+                data=data,
+                sha256=hashlib.sha256(data).hexdigest(),
+            )
+        )
+
+    return fields, tuple(files)
 
 
 def _auth_fields(params: Params) -> tuple[str | None, str | None]:

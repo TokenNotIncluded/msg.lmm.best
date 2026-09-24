@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -42,6 +43,7 @@ RESERVED_BOARDS = {
     "_policy",
     "_revocations",
     "publish",
+    "file",
     "key",
     "llms.txt",
     "robots.txt",
@@ -87,6 +89,20 @@ CREATE TABLE IF NOT EXISTS posts (
 CREATE UNIQUE INDEX IF NOT EXISTS posts_board_seq ON posts(board, seq);
 CREATE INDEX IF NOT EXISTS posts_board_id ON posts(board, id);
 CREATE INDEX IF NOT EXISTS posts_created ON posts(id);
+
+CREATE TABLE IF NOT EXISTS attachments (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id      INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    slot         INTEGER NOT NULL,
+    name         TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    data         BLOB NOT NULL,
+    nbytes       INTEGER NOT NULL,
+    sha256       TEXT NOT NULL,
+    UNIQUE(post_id, slot)
+);
+CREATE INDEX IF NOT EXISTS attachments_post ON attachments(post_id);
+
 CREATE TABLE IF NOT EXISTS signature_nonces (
     signer_id TEXT NOT NULL,
     nonce     TEXT NOT NULL,
@@ -128,6 +144,54 @@ class StoreError(Exception):
         self.status = status
         self.hint = hint
 
+
+
+@dataclass(frozen=True)
+class FileInput:
+    name: str
+    content_type: str
+    data: bytes
+    sha256: str
+
+    @property
+    def nbytes(self) -> int:
+        return len(self.data)
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "type": self.content_type,
+            "bytes": self.nbytes,
+            "sha256": self.sha256,
+        }
+
+
+@dataclass(frozen=True)
+class Attachment:
+    id: int
+    post_id: int
+    slot: int
+    name: str
+    content_type: str
+    data: bytes
+    nbytes: int
+    sha256: str
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "type": self.content_type,
+            "bytes": self.nbytes,
+            "sha256": self.sha256,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "slot": self.slot,
+            **self.manifest(),
+            "url": f"/file/{self.id}",
+        }
 
 @dataclass
 class Post:
@@ -282,6 +346,7 @@ class Store:
         body: str,
         title: str,
         name: str,
+        max_body_bytes: int | None = None,
     ) -> tuple[str, str, str, int]:
         body = _normalise(body)
         title = " ".join(title.split())
@@ -289,8 +354,9 @@ class Store:
         if not body.strip():
             raise StoreError("text is empty", 400)
         nbytes = len(body.encode("utf-8"))
-        if nbytes > self.cfg.max_post_bytes:
-            raise StoreError(f"text exceeds max_post_bytes={self.cfg.max_post_bytes}", 413)
+        limit = self.cfg.max_post_bytes if max_body_bytes is None else max_body_bytes
+        if nbytes > limit:
+            raise StoreError(f"text exceeds max_post_bytes={limit}", 413)
         if len(title.encode("utf-8")) > self.cfg.max_title_bytes:
             raise StoreError(f"title exceeds max_title_bytes={self.cfg.max_title_bytes}", 413)
         if len(name.encode("utf-8")) > self.cfg.max_name_bytes:
@@ -298,6 +364,100 @@ class Store:
         if nbytes > self.cfg.max_storage_bytes:
             raise StoreError("post is larger than the whole storage capacity", 507)
         return body, title, name, nbytes
+
+    def prepare_files(self, files: tuple[FileInput, ...]) -> tuple[FileInput, ...]:
+        if len(files) > self.cfg.max_files_per_post:
+            raise StoreError(
+                f"too many files; max_files_per_post={self.cfg.max_files_per_post}",
+                413,
+            )
+        total = 0
+        for file in files:
+            if not file.name or len(file.name.encode("utf-8")) > self.cfg.max_filename_bytes:
+                raise StoreError("invalid or too-long file name", 413)
+            if len(file.content_type.encode("utf-8")) > 200:
+                raise StoreError("file content type is too long", 413)
+            if file.nbytes > self.cfg.max_file_bytes:
+                raise StoreError(
+                    f"file exceeds max_file_bytes={self.cfg.max_file_bytes}",
+                    413,
+                )
+            if hashlib.sha256(file.data).hexdigest() != file.sha256:
+                raise StoreError("file sha256 mismatch", 400)
+            total += file.nbytes
+        if total > self.cfg.max_storage_bytes:
+            raise StoreError("attachments exceed the whole storage capacity", 507)
+        return files
+
+    def attachments(self, post_id: int) -> list[Attachment]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256
+                  FROM attachments
+                 WHERE post_id = ?
+                 ORDER BY slot
+                """,
+                (post_id,),
+            ).fetchall()
+        return [self._attachment(row) for row in rows]
+
+    def attachment(self, file_id: int) -> Attachment | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256
+                  FROM attachments
+                 WHERE id = ?
+                """,
+                (file_id,),
+            ).fetchone()
+        return self._attachment(row) if row else None
+
+    def attachment_manifest(self, post_id: int) -> tuple[dict[str, object], ...]:
+        return tuple(file.manifest() for file in self.attachments(post_id))
+
+    def _storage_bytes(self) -> int:
+        row = self._conn.execute(
+            """
+            SELECT
+                COALESCE((SELECT SUM(nbytes) FROM posts), 0)
+              + COALESCE((SELECT SUM(nbytes) FROM attachments), 0) AS n
+            """
+        ).fetchone()
+        return int(row["n"])
+
+    def _post_storage_bytes(self, post_id: int) -> int:
+        row = self._conn.execute(
+            """
+            SELECT p.nbytes + COALESCE(SUM(a.nbytes), 0) AS n
+              FROM posts p
+              LEFT JOIN attachments a ON a.post_id = p.id
+             WHERE p.id = ?
+             GROUP BY p.id
+            """,
+            (post_id,),
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def _insert_attachments(self, post_id: int, files: tuple[FileInput, ...]) -> None:
+        for slot, file in enumerate(files):
+            self._conn.execute(
+                """
+                INSERT INTO attachments(
+                    post_id, slot, name, content_type, data, nbytes, sha256
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    post_id,
+                    slot,
+                    file.name,
+                    file.content_type,
+                    file.data,
+                    file.nbytes,
+                    file.sha256,
+                ),
+            )
 
     def _ensure_board(self, name: str, description: str = "") -> None:
         self._conn.execute(
@@ -588,8 +748,16 @@ class Store:
         name: str,
         title: str,
         auth: SignedRequest | None = None,
+        files: tuple[FileInput, ...] = (),
+        max_body_bytes: int | None = None,
     ) -> tuple[Post, int]:
-        body, title, name, nbytes = self.prepare_post(body=body, title=title, name=name)
+        body, title, name, nbytes = self.prepare_post(
+            body=body,
+            title=title,
+            name=name,
+            max_body_bytes=max_body_bytes,
+        )
+        files = self.prepare_files(files)
         self.ensure_board(board)
         now = time.time()
         evicted = 0
@@ -600,13 +768,23 @@ class Store:
             self.consume_nonce(auth)
 
         with self._lock, self._conn:
-            used = int(
-                self._conn.execute("SELECT COALESCE(SUM(nbytes), 0) AS n FROM posts").fetchone()["n"]
-            )
-            need = max(0, used + nbytes - self.cfg.max_storage_bytes)
+            file_bytes = sum(file.nbytes for file in files)
+            new_bytes = nbytes + file_bytes
+            if new_bytes > self.cfg.max_storage_bytes:
+                raise StoreError("post plus attachments exceed storage capacity", 507)
+            used = self._storage_bytes()
+            need = max(0, used + new_bytes - self.cfg.max_storage_bytes)
             if need:
                 freed = 0
-                rows = self._conn.execute("SELECT id, nbytes FROM posts ORDER BY id ASC").fetchall()
+                rows = self._conn.execute(
+                    """
+                    SELECT p.id, p.nbytes + COALESCE(SUM(a.nbytes), 0) AS nbytes
+                      FROM posts p
+                      LEFT JOIN attachments a ON a.post_id = p.id
+                     GROUP BY p.id
+                     ORDER BY p.id ASC
+                    """
+                ).fetchall()
                 ids: list[int] = []
                 for row in rows:
                     ids.append(int(row["id"]))
@@ -653,6 +831,7 @@ class Store:
                 ),
             )
             post_id = int(cur.lastrowid or 0)
+            self._insert_attachments(post_id, files)
 
         post = self.get_post(post_id)
         assert post is not None
@@ -684,12 +863,17 @@ class Store:
         name: str | None = None,
         title: str | None = None,
         auth: SignedRequest | None = None,
+        files: tuple[FileInput, ...] | None = None,
+        max_body_bytes: int | None = None,
     ) -> Post:
         body, new_title, new_name, nbytes = self.prepare_post(
             body=body,
             title=post.title if title is None else title,
             name=post.name if name is None else name,
+            max_body_bytes=max_body_bytes,
         )
+        if files is not None:
+            files = self.prepare_files(files)
         if post.signed:
             if auth is None:
                 raise StoreError("signed post requires a signed request", 403)
@@ -697,10 +881,15 @@ class Store:
                 raise StoreError("stale signature version", 409)
 
         with self._lock, self._conn:
-            used = int(
-                self._conn.execute("SELECT COALESCE(SUM(nbytes), 0) AS n FROM posts").fetchone()["n"]
+            used = self._storage_bytes()
+            old_bytes = self._post_storage_bytes(post.id)
+            file_bytes = (
+                sum(file.nbytes for file in files)
+                if files is not None
+                else old_bytes - post.nbytes
             )
-            if nbytes > post.nbytes and used - post.nbytes + nbytes > self.cfg.max_storage_bytes:
+            new_bytes = nbytes + file_bytes
+            if new_bytes > old_bytes and used - old_bytes + new_bytes > self.cfg.max_storage_bytes:
                 raise StoreError(
                     "edit would exceed max_storage_bytes; only new posts may evict old posts",
                     507,
@@ -735,6 +924,10 @@ class Store:
                     "UPDATE posts SET body=?, title=?, name=?, updated=?, nbytes=? WHERE id=?",
                     (body, new_title, new_name, now, nbytes, post.id),
                 )
+
+            if files is not None:
+                self._conn.execute("DELETE FROM attachments WHERE post_id = ?", (post.id,))
+                self._insert_attachments(post.id, files)
 
         updated = self.get_post(post.id)
         assert updated is not None
@@ -817,14 +1010,22 @@ class Store:
     def stats(self) -> dict[str, int]:
         with self._lock:
             row = self._conn.execute(
-                "SELECT COUNT(*) AS posts, COALESCE(SUM(nbytes),0) AS bytes,"
+                "SELECT COUNT(*) AS posts, COALESCE(SUM(nbytes),0) AS post_bytes,"
                 " COALESCE(MAX(id),0) AS latest_id FROM posts"
             ).fetchone()
+            files = self._conn.execute(
+                "SELECT COUNT(*) AS files, COALESCE(SUM(nbytes),0) AS file_bytes FROM attachments"
+            ).fetchone()
             boards = self._conn.execute("SELECT COUNT(*) AS n FROM boards").fetchone()["n"]
+        post_bytes = int(row["post_bytes"])
+        file_bytes = int(files["file_bytes"])
         return {
             "boards": int(boards),
             "posts": int(row["posts"]),
-            "bytes": int(row["bytes"]),
+            "files": int(files["files"]),
+            "post_bytes": post_bytes,
+            "file_bytes": file_bytes,
+            "bytes": post_bytes + file_bytes,
             "capacity": self.cfg.max_storage_bytes,
             "latest_id": int(row["latest_id"]),
         }
@@ -892,6 +1093,19 @@ class Store:
             "SELECT id, board, seq, name, title, body, created, updated, nbytes,"
             " author_key, author_id, actor_key, actor_id, signature,"
             " sig_version, sig_nonce, sig_issued FROM posts"
+        )
+
+    @staticmethod
+    def _attachment(row: sqlite3.Row) -> Attachment:
+        return Attachment(
+            id=int(row["id"]),
+            post_id=int(row["post_id"]),
+            slot=int(row["slot"]),
+            name=str(row["name"]),
+            content_type=str(row["content_type"]),
+            data=bytes(row["data"]),
+            nbytes=int(row["nbytes"]),
+            sha256=str(row["sha256"]),
         )
 
     @staticmethod
