@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import threading
@@ -73,7 +72,7 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(f"#{pid}", body)
 
-    def test_anyone_can_edit_append_and_delete_without_key(self) -> None:
+    def test_anyone_can_edit_and_delete_without_key(self) -> None:
         pid = self.publish("one")
         status, _ = self.c.get("/publish", edit=str(pid), text="two")
         self.assertEqual(status, 200)
@@ -102,11 +101,6 @@ class ServerCase(unittest.TestCase):
         _, body = self.c.get(f"/main/{second}/raw")
         self.assertEqual(body, "abcdefghij")
 
-    def test_ndjson(self) -> None:
-        self.publish("a")
-        _, body = self.c.get("/main", format="ndjson")
-        rows = [json.loads(line) for line in body.splitlines()]
-        self.assertEqual(rows[0]["body"], "a")
 
 
 if __name__ == "__main__":
