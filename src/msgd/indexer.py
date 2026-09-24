@@ -85,7 +85,12 @@ def refresh_index(base_url: str = DEFAULT_BASE_URL, *, dry_run: bool = False) ->
 
     body = _render_index(boards)
     current = _current_index(base_url)
-    if current is not None and current.get("body") == body:
+    if (
+        current is not None
+        and current.get("body") == body
+        and current.get("name") == INDEX_NAME
+        and current.get("title") == INDEX_TITLE
+    ):
         return "unchanged"
 
     if dry_run:
