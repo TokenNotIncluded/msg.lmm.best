@@ -43,6 +43,7 @@ RESERVED_BOARDS = {
     "_policy",
     "_revocations",
     "publish",
+    "file",
     "key",
     "llms.txt",
     "robots.txt",
