@@ -43,6 +43,7 @@ RESERVED_BOARDS = {
     "_policy",
     "_revocations",
     "publish",
+    "inbox",
     "file",
     "key",
     "llms.txt",
@@ -83,7 +84,8 @@ CREATE TABLE IF NOT EXISTS posts (
     signature   TEXT,
     sig_version INTEGER NOT NULL DEFAULT 0,
     sig_nonce   TEXT,
-    sig_issued  INTEGER
+    sig_issued  INTEGER,
+    reply_to    INTEGER
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS posts_board_seq ON posts(board, seq);
@@ -212,6 +214,7 @@ class Post:
     sig_version: int = 0
     sig_nonce: str | None = None
     sig_issued: int | None = None
+    reply_to: int | None = None
 
     @property
     def signed(self) -> bool:
@@ -241,6 +244,7 @@ class Post:
             ),
             "sig_nonce": self.sig_nonce if self.signed and self.sig_version == 1 else None,
             "sig_issued": self.sig_issued if self.signed and self.sig_version == 1 else None,
+            "reply_to": self.reply_to,
         }
 
 
@@ -290,6 +294,7 @@ class Store:
             "sig_version": "INTEGER NOT NULL DEFAULT 0",
             "sig_nonce": "TEXT",
             "sig_issued": "INTEGER",
+            "reply_to": "INTEGER",
         }
         for name, definition in additions.items():
             if name not in columns:
@@ -297,6 +302,7 @@ class Store:
         self._conn.executescript(
             """
             CREATE INDEX IF NOT EXISTS posts_author_id ON posts(author_id);
+            CREATE INDEX IF NOT EXISTS posts_reply_to ON posts(reply_to);
             CREATE TABLE IF NOT EXISTS signature_nonces (
                 signer_id TEXT NOT NULL,
                 nonce TEXT NOT NULL,
