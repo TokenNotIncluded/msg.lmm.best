@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import secrets
 import sys
 import time
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from msgd import __version__
 from msgd.config import Config
@@ -17,6 +21,7 @@ from msgd.crypto import (
     SignatureError,
     certificate_payload,
     make_certificate,
+    normalize_file_manifest,
     payload_info,
     public_identity,
     request_payload,
@@ -34,10 +39,17 @@ from msgd.render import (
     render_schema,
     render_sitemap,
 )
-from msgd.store import RESERVED_BOARDS, Store, StoreError, valid_author_id, valid_board_name
+from msgd.store import (
+    RESERVED_BOARDS,
+    FileInput,
+    Store,
+    StoreError,
+    valid_author_id,
+    valid_board_name,
+)
 
 Params = dict[str, list[str]]
-MAX_REQUEST_BYTES = 65_536
+Uploads = tuple[FileInput, ...]
 
 
 def log(level: str, message: str, **fields: Any) -> None:
