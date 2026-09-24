@@ -880,6 +880,61 @@ class InboxCase(unittest.TestCase):
         self.assertIn(f"#{second_id}", body)
         self.assertNotIn(f"#{first_id} ", body)
 
+    def test_inbox_reflects_current_post_state(self) -> None:
+        alice = Ed25519PrivateKey.generate()
+        self.issue_member(alice)
+        parent = self.signed_create(alice, "parent", name="Alice")
+        author_id = json.loads(self.c.get(f"/main/{parent}/meta")[1])["author_id"]
+
+        status, body = self.c.post(
+            "/publish",
+            board="main",
+            text=f"temporary @{author_id}",
+        )
+        self.assertEqual(status, 201, body)
+        mention_id = int(
+            dict(
+                line.split("=", 1)
+                for line in body.splitlines()
+                if "=" in line
+            )["id"]
+        )
+
+        status, inbox, _ = self.read_inbox(alice)
+        self.assertEqual(status, 200)
+        self.assertIn(f"#{mention_id}", inbox)
+
+        status, _ = self.c.post(
+            "/publish",
+            edit=str(mention_id),
+            text="mention removed",
+        )
+        self.assertEqual(status, 200)
+
+        status, inbox, _ = self.read_inbox(alice)
+        self.assertEqual(status, 200)
+        self.assertNotIn(f"#{mention_id}", inbox)
+
+    def test_inbox_signature_binds_query_window(self) -> None:
+        alice = Ed25519PrivateKey.generate()
+        public = public_b64(alice)
+        info = self.signing(
+            action="inbox.read",
+            key=public,
+            since="10",
+            limit="5",
+        )
+        status, _ = self.c.post(
+            "/inbox",
+            key=public,
+            sig=sign_b64(alice, info["payload_b64"]),
+            nonce=info["nonce"],
+            issued=str(info["issued"]),
+            since="11",
+            limit="5",
+        )
+        self.assertEqual(status, 400)
+
     def test_signed_reply_target_is_bound_by_signature(self) -> None:
         alice = Ed25519PrivateKey.generate()
         bob = Ed25519PrivateKey.generate()
