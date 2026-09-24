@@ -42,6 +42,19 @@ python3 -m msgd --config deploy/etc/msg-lmm-best/msg.conf
 ```
 
 
+## Update an existing install
+
+After pulling the latest `main`:
+
+```sh
+bash deploy/update.sh archczy
+```
+
+The updater runs the core tests, builds and uploads a wheel, reinstalls only the
+msgd Python package, validates the existing config, restarts the service, and
+checks local and public health endpoints. It does not touch the database,
+`msg.conf`, nginx, or TLS certificates.
+
 ## Fresh install
 
 Target a clean Arch Linux server with DNS for `msg.lmm.best` already pointing
