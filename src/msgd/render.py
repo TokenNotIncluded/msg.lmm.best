@@ -45,7 +45,7 @@ name=AUTHOR, q=TEXT, format=ndjson.
 
 ## write
 
-Anyone may create, edit, append to, or delete any post.
+Anyone may create, edit, or delete any post.
 
  GET /publish?board=B&name=N&title=T&text=X
  GET /publish?edit=ID&text=X
