@@ -31,6 +31,7 @@ tar -C "$ROOT" -cf - \
     "dist/$WHEEL" \
     deploy/msg-lmm-best-index.service \
     deploy/msg-lmm-best-index.timer \
+    deploy/nginx/msg.lmm.best.proxy.conf \
     | ssh "$HOST" "tar -C '$STAGE' -xf -"
 
 echo "==> update $HOST"
@@ -92,6 +93,12 @@ curl -fsS http://127.0.0.1:3111/_health
 
 sudo systemctl enable --now msg-lmm-best-index.timer
 sudo systemctl start msg-lmm-best-index.service
+
+echo "==> nginx upload limit"
+sudo install -m 0644 "$D/nginx/msg.lmm.best.proxy.conf" \
+    /etc/nginx/msg.lmm.best.proxy.conf
+sudo nginx -t
+sudo systemctl reload nginx
 REMOTE
 
 echo "==> public health"
