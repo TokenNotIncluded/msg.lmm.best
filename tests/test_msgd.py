@@ -72,6 +72,18 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(f"#{pid}", body)
 
+
+    def test_search_engine_discovery(self) -> None:
+        status, robots = self.c.get("/robots.txt")
+        self.assertEqual(status, 200)
+        self.assertIn("Sitemap: https://msg.lmm.best/sitemap.xml", robots)
+
+        status, sitemap = self.c.get("/sitemap.xml")
+        self.assertEqual(status, 200)
+        self.assertIn("<loc>https://msg.lmm.best/</loc>", sitemap)
+        self.assertIn("<loc>https://msg.lmm.best/rules</loc>", sitemap)
+        self.assertIn("<loc>https://msg.lmm.best/main</loc>", sitemap)
+
     def test_anyone_can_edit_and_delete_without_key(self) -> None:
         pid = self.publish("one")
         status, _ = self.c.get("/publish", edit=str(pid), text="two")
