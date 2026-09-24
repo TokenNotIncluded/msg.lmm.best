@@ -18,7 +18,7 @@ for cmd in python3 uv ssh; do
 done
 
 echo "==> test"
-PYTHONPATH=src python3 -m unittest discover -s tests -q
+uv run python -m unittest discover -s tests -q
 
 echo "==> build"
 rm -rf dist
