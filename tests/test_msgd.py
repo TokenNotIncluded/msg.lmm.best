@@ -41,31 +41,88 @@ class Client:
     def __init__(self, base: str) -> None:
         self.base = base
 
-    def request(self, path: str, params: dict[str, str] | None = None, *, post: bool = False) -> tuple[int, str]:
+    def raw(
+        self,
+        path: str,
+        *,
+        data: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes, dict[str, str]]:
+        req = urllib.request.Request(
+            self.base + path,
+            data=data,
+            headers=headers or {},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status, response.read(), dict(response.headers)
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read(), dict(exc.headers)
+
+    def request(
+        self,
+        path: str,
+        params: dict[str, str] | None = None,
+        *,
+        post: bool = False,
+    ) -> tuple[int, str]:
         params = params or {}
         if post:
             data = urllib.parse.urlencode(params).encode()
-            req = urllib.request.Request(
-                self.base + path,
+            status, body, _ = self.raw(
+                path,
                 data=data,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
         else:
-            url = self.base + path
+            url = path
             if params:
                 url += ("&" if "?" in path else "?") + urllib.parse.urlencode(params)
-            req = urllib.request.Request(url)
-        try:
-            with urllib.request.urlopen(req, timeout=5) as response:
-                return response.status, response.read().decode()
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode()
+            status, body, _ = self.raw(url)
+        return status, body.decode()
 
     def get(self, path: str, **params: str) -> tuple[int, str]:
         return self.request(path, params)
 
+    def get_bytes(self, path: str) -> tuple[int, bytes, dict[str, str]]:
+        return self.raw(path)
+
     def post(self, path: str, **params: str) -> tuple[int, str]:
         return self.request(path, params, post=True)
+
+    def multipart(
+        self,
+        path: str,
+        fields: dict[str, str],
+        files: list[tuple[str, str, str, bytes]],
+    ) -> tuple[int, str]:
+        boundary = "----msgd-test-boundary"
+        chunks: list[bytes] = []
+        for name, value in fields.items():
+            chunks += [
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                value.encode(),
+                b"\r\n",
+            ]
+        for field, filename, content_type, data in files:
+            chunks += [
+                f"--{boundary}\r\n".encode(),
+                (
+                    f'Content-Disposition: form-data; name="{field}"; '
+                    f'filename="{filename}"\r\n'
+                ).encode(),
+                f"Content-Type: {content_type}\r\n\r\n".encode(),
+                data,
+                b"\r\n",
+            ]
+        chunks.append(f"--{boundary}--\r\n".encode())
+        status, body, _ = self.raw(
+            path,
+            data=b"".join(chunks),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        return status, body.decode()
 
 
 class ServerCase(unittest.TestCase):
@@ -391,6 +448,23 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(self.c.get(f"/main/{first}")[0], 404)
         self.assertEqual(self.c.get(f"/main/{second}")[0], 200)
         self.assertEqual(self.c.get(f"/main/{third}")[0], 200)
+
+    def test_attachment_bytes_participate_in_eviction(self) -> None:
+        status, body = self.c.multipart(
+            "/publish",
+            {"board": "main", "text": "x"},
+            [("file", "a.bin", "application/octet-stream", b"123456789012345")],
+        )
+        self.assertEqual(status, 201, body)
+        fields = dict(line.split("=", 1) for line in body.splitlines() if "=" in line)
+        first = int(fields["id"])
+        meta = json.loads(self.c.get(f"/main/{first}/meta")[1])
+        file_id = meta["files"][0]["id"]
+
+        second = self.publish("12345")
+        self.assertEqual(self.c.get(f"/main/{first}")[0], 404)
+        self.assertEqual(self.c.get_bytes(f"/file/{file_id}")[0], 404)
+        self.assertEqual(self.c.get(f"/main/{second}")[0], 200)
 
     def test_edit_cannot_evict_other_posts(self) -> None:
         first = self.publish("1234567890")
