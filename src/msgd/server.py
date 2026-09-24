@@ -326,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
     def _publish(self, method: str, params: Params) -> None:
         store = self.board.store
 
-        for action in ("edit", "append", "delete"):
+        for action in ("edit", "delete"):
             target = _param(params, action)
             if target is None:
                 continue
