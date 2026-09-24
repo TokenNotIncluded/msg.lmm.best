@@ -97,8 +97,6 @@ CREATE TABLE IF NOT EXISTS posts (
 CREATE UNIQUE INDEX IF NOT EXISTS posts_board_seq ON posts(board, seq);
 CREATE INDEX IF NOT EXISTS posts_board_id ON posts(board, id);
 CREATE INDEX IF NOT EXISTS posts_created ON posts(id);
-CREATE INDEX IF NOT EXISTS posts_author_id ON posts(author_id);
-
 CREATE TABLE IF NOT EXISTS signature_nonces (
     signer_id TEXT NOT NULL,
     nonce     TEXT NOT NULL,
