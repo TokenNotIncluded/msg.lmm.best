@@ -26,6 +26,9 @@ from msgd.crypto import (
 
 BOARD_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 AUTHOR_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+MENTION_RE = re.compile(
+    r"(?<![A-Za-z0-9._-])@([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?![A-Za-z0-9._-])"
+)
 
 DEFAULT_ANONYMOUS = frozenset({"post.create", "post.edit.any", "post.delete.any"})
 
@@ -136,6 +139,15 @@ CREATE TABLE IF NOT EXISTS topic_policies (
     version   INTEGER NOT NULL,
     updated   REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS inbox_events (
+    post_id    INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    subject_id TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    PRIMARY KEY(post_id, subject_id, kind)
+);
+CREATE INDEX IF NOT EXISTS inbox_subject_post
+    ON inbox_events(subject_id, post_id);
 """
 
 
@@ -331,6 +343,14 @@ class Store:
                 version INTEGER NOT NULL,
                 updated REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS inbox_events (
+                post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+                subject_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                PRIMARY KEY(post_id, subject_id, kind)
+            );
+            CREATE INDEX IF NOT EXISTS inbox_subject_post
+                ON inbox_events(subject_id, post_id);
             """
         )
 
