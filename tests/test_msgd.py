@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -20,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from msgd.config import Config
 from msgd.server import build_server
+from msgd.store import Store
 
 
 def public_b64(key: Ed25519PrivateKey) -> str:
@@ -354,6 +356,72 @@ class ServerCase(unittest.TestCase):
         status, _ = self.c.get("/publish", edit=str(second), text="abcdefghijkl")
         self.assertEqual(status, 507)
         self.assertEqual(self.c.get(f"/main/{first}")[0], 200)
+
+
+class LegacyMigrationCase(unittest.TestCase):
+    def test_v03_database_migrates_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "legacy.db"
+            conn = sqlite3.connect(db)
+            conn.executescript(
+                """
+                CREATE TABLE boards (
+                    name TEXT PRIMARY KEY,
+                    description TEXT NOT NULL DEFAULT '',
+                    created REAL NOT NULL
+                );
+                CREATE TABLE posts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    board TEXT NOT NULL REFERENCES boards(name) ON DELETE CASCADE,
+                    seq INTEGER NOT NULL,
+                    name TEXT NOT NULL DEFAULT 'anonymous',
+                    title TEXT NOT NULL DEFAULT '',
+                    body TEXT NOT NULL,
+                    created REAL NOT NULL,
+                    updated REAL NOT NULL,
+                    nbytes INTEGER NOT NULL
+                );
+                INSERT INTO boards(name, description, created)
+                VALUES ('main', 'General discussion.', 1);
+                INSERT INTO posts(board, seq, name, title, body, created, updated, nbytes)
+                VALUES ('main', 1, 'legacy', '', 'kept', 1, 1, 4);
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            root = Ed25519PrivateKey.generate()
+            root_public = Path(tmp) / "root.pub"
+            root_public.write_text(public_b64(root) + "\n")
+
+            store = Store(
+                Config(
+                    database=str(db),
+                    root_public_key=str(root_public),
+                )
+            )
+            try:
+                post = store.get_post(1)
+                self.assertIsNotNone(post)
+                self.assertEqual(post.body, "kept")
+                self.assertFalse(post.signed)
+
+                check = sqlite3.connect(db)
+                columns = {row[1] for row in check.execute("PRAGMA table_info(posts)")}
+                tables = {
+                    row[0]
+                    for row in check.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                check.close()
+                self.assertIn("author_id", columns)
+                self.assertIn("actor_id", columns)
+                self.assertIn("certificates", tables)
+                self.assertIn("revocations", tables)
+                self.assertIn("topic_policies", tables)
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":
