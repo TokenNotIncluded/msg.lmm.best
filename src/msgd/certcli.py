@@ -87,6 +87,7 @@ def command_init(args: argparse.Namespace) -> int:
 
     if private_path.exists():
         key = _load_private(str(private_path))
+        os.chmod(private_path, 0o600)
     else:
         key = Ed25519PrivateKey.generate()
         _write_private(private_path, key)
