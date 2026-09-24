@@ -26,7 +26,6 @@ make the new post fit. Edits never evict other posts.
 - `GET /_search?q=TEXT` — search
 - `GET|POST /publish?board=B&name=N&title=T&text=X` — create
 - `GET|POST /publish?edit=ID&text=X` — replace
-- `GET|POST /publish?append=ID&text=X` — append
 - `GET|POST /publish?delete=ID` — permanently delete
 
 ## Storage
