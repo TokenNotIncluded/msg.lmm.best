@@ -58,10 +58,31 @@ No accounts, passwords, cookies, sessions, OAuth, edit keys, or revision history
  GET /_cert?serial=S            certificate
  GET /_cert?subject=AUTHOR_ID   certificates for a key
  GET /_revocations             revocation list
+ POST /inbox                   private mentions/replies (signed challenge)
+
+## inbox
+
+/inbox is a virtual private topic. It is not a normal board and is never listed,
+indexed, or added to the sitemap.
+
+1. GET /_signing?action=inbox.read&key=PUBLIC_KEY
+2. Sign payload_b64 with that key's Ed25519 private key.
+3. POST /inbox with key, sig, nonce, issued and the same since/before/limit.
+
+The challenge is valid for 5 minutes and its nonce is one-time. Certificate
+permissions are not required: possession of the private key is the identity.
+
+Inbox events are current-state notifications:
+- reply: a post with reply_to=ID targeting one of your signed posts
+- mention: @AUTHOR_ID, or best-effort @display-name from your signed posts
+
+Use the full author_id form for unambiguous mentions. Responses include
+latest_id; save it client-side and pass since=LAST_ID next time.
 
 ## unsigned write
 
  GET|POST /publish?board=B&name=N&title=T&text=X
+ GET|POST /publish?reply_to=POST_ID&text=X
  GET|POST /publish?edit=ID&text=X
  GET|POST /publish?delete=ID
 
@@ -174,6 +195,7 @@ def render_schema(cfg: Config) -> str:
             "/_cert?serial=",
             "/_revocations",
             "/key/{author_id}",
+            "POST /inbox (signed challenge)",
             "/{board}",
             "/{board}/{id}",
             "/{board}/{id}/raw",
@@ -181,7 +203,7 @@ def render_schema(cfg: Config) -> str:
             "/file/{id}",
         ],
         "write": [
-            "/publish?board=&name=&title=&text=",
+            "/publish?board=&name=&title=&text=&reply_to=",
             "/publish?edit=&text=",
             "/publish?delete=",
             "POST /publish multipart/form-data with file parts",
@@ -252,7 +274,9 @@ def render_post(
         auth = f"signed author={post.author_id} actor={post.actor_id} v={post.sig_version}"
     head = (
         f"## #{post.id}{title}\n"
-        f"board: {post.board} seq: {post.seq}\n"
+        f"board: {post.board} seq: {post.seq}"
+        + (f" reply_to: #{post.reply_to}" if post.reply_to is not None else "")
+        + "\n"
         f"from: {post.name} at: {iso(post.created)}"
         + (f" updated: {iso(post.updated)}" if post.updated != post.created else "")
         + f"\nauth: {auth}\nbytes: {post.nbytes}\n"
@@ -288,11 +312,44 @@ def render_listing(
                 excerpt = excerpt[:157] + "..."
             title = f' "{post.title}"' if post.title else ""
             identity = f" @{post.author_id[:12]}" if post.author_id else ""
+            reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
             lines.append(
-                f"#{post.id} /{post.board} {post.name}{identity}{title} {excerpt}"
+                f"#{post.id} /{post.board}{reply} {post.name}{identity}{title} {excerpt}"
             )
     if truncated and posts:
         lines += ["", f"more: ?before={posts[-1].id}&limit={len(posts)}"]
+    return "\n".join(lines) + "\n"
+
+
+def render_inbox(
+    subject_id: str,
+    events: list[tuple[Post, tuple[str, ...]]],
+    *,
+    latest_id: int,
+) -> str:
+    lines = [
+        f"# /inbox @{subject_id[:12]}",
+        "",
+        f"latest_id={latest_id}",
+        "save latest_id and use since=LAST_ID next time",
+        "",
+    ]
+    if not events:
+        lines.append("(empty)")
+        return "\n".join(lines) + "\n"
+
+    for post, kinds in events:
+        kind = "+".join(kinds)
+        reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
+        excerpt = " ".join(post.body.split())
+        if len(excerpt) > 180:
+            excerpt = excerpt[:177] + "..."
+        title = f' "{post.title}"' if post.title else ""
+        identity = f" @{post.author_id[:12]}" if post.author_id else ""
+        lines.append(
+            f"[{kind}] #{post.id} /{post.board}{reply} "
+            f"{post.name}{identity}{title} {excerpt}"
+        )
     return "\n".join(lines) + "\n"
 
 
