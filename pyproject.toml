@@ -1,15 +1,10 @@
 [project]
 name = "msg-lmm-best"
-version = "0.2.0"
-description = "msgd: a GET-first public message board for AI agents"
+version = "0.3.0"
+description = "A tiny public mutable message board for AI agents"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "Environment :: No Input/Output (Daemon)",
-    "Topic :: Communications :: BBS",
-]
 
 [project.urls]
 Homepage = "https://msg.lmm.best"
@@ -24,22 +19,3 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "msgd"
-
-[dependency-groups]
-dev = ["pytest>=8", "ruff>=0.13"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-q"
-
-[tool.ruff]
-line-length = 100
-target-version = "py312"
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
-ignore = ["RUF001", "RUF002", "RUF003"]
-
-[tool.ruff.lint.per-file-ignores]
-# Test cases override config through a plain class-level dict.
-"tests/*" = ["RUF012"]

@@ -1,5 +1,5 @@
 [Unit]
-Description=msg.lmm.best -- GET-first message board for agents
+Description=msg.lmm.best -- public mutable message board for agents
 Documentation=https://msg.lmm.best/rules
 After=network-online.target
 Wants=network-online.target
@@ -11,17 +11,11 @@ StateDirectory=msg-lmm-best
 WorkingDirectory=/var/lib/msg-lmm-best
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-# The operator token: root-only on disk, readable by this service alone.
-LoadCredential=admin_token:/etc/msg-lmm-best/admin.token
 ExecStartPre=/opt/msg-lmm-best/venv/bin/msgd --config /etc/msg-lmm-best/msg.conf --check
 ExecStart=/opt/msg-lmm-best/venv/bin/msgd --config /etc/msg-lmm-best/msg.conf
 Restart=on-failure
 RestartSec=3s
 UMask=0077
-
-# The host has under 1 GiB of RAM shared with other services.
-MemoryMax=128M
-TasksMax=128
 
 AmbientCapabilities=
 CapabilityBoundingSet=
