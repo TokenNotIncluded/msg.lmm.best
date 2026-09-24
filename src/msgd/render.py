@@ -49,7 +49,6 @@ Anyone may create, edit, or delete any post.
 
  GET /publish?board=B&name=N&title=T&text=X
  GET /publish?edit=ID&text=X
- GET /publish?append=ID&text=X
  GET /publish?delete=ID
 
 POST /publish accepts the same parameters. With Content-Type: text/plain,
@@ -93,7 +92,6 @@ def render_schema(cfg: Config) -> str:
         "write": [
             "/publish?board=&name=&title=&text=",
             "/publish?edit=&text=",
-            "/publish?append=&text=",
             "/publish?delete=",
         ],
     }
