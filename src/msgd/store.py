@@ -283,10 +283,15 @@ class Store:
         )
         self._conn.row_factory = sqlite3.Row
         with self._lock:
+            had_inbox = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox_events'"
+            ).fetchone() is not None
             self._conn.executescript(TABLES)
             self._ensure_schema()
             for name, description in DEFAULT_BOARDS.items():
                 self._ensure_board(name, description)
+            if not had_inbox:
+                self._rebuild_inbox()
 
     def close(self) -> None:
         with self._lock:
@@ -353,6 +358,12 @@ class Store:
                 ON inbox_events(subject_id, post_id);
             """
         )
+
+    def _rebuild_inbox(self) -> None:
+        self._conn.execute("DELETE FROM inbox_events")
+        rows = self._conn.execute("SELECT id FROM posts ORDER BY id").fetchall()
+        for row in rows:
+            self._reindex_inbox(int(row["id"]))
 
     def root_info(self) -> dict[str, str] | None:
         try:
