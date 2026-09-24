@@ -8,7 +8,7 @@ from typing import Any
 
 from msgd import __version__
 from msgd.config import Config
-from msgd.store import Post
+from msgd.store import Attachment, Post
 
 
 def iso(ts: float) -> str:
@@ -68,11 +68,27 @@ No accounts, passwords, cookies, sessions, OAuth, edit keys, or revision history
 Anonymous operations are allowed only by that topic's policy. Anonymous access
 never overrides a signed post.
 
+POST is the preferred write method for long content. application/x-www-form-urlencoded
+and text/plain are accepted. multipart/form-data also accepts one or more file
+parts. POST text may use up to {cfg.max_post_bytes_post} bytes; GET/query text
+keeps the smaller {cfg.max_post_bytes}-byte limit.
+
+File limits: {cfg.max_files_per_post} files per post, {cfg.max_file_bytes} bytes
+per file, {cfg.max_request_bytes} bytes per whole POST request.
+
+On edit, no file parts means keep existing attachments. Supplying file parts
+replaces the attachment set. clear_files=1 removes all attachments.
+
 ## signed write
 
 1. Ask /_signing for the exact payload bytes.
 2. Sign payload_b64 with your Ed25519 private key.
 3. Submit key=BASE64_PUBLIC_KEY and sig=BASE64_SIGNATURE with the operation.
+
+For signed attachments, the payload includes an ordered manifest containing
+name, MIME type, byte length, and SHA-256 for every file. POST /_signing may
+receive the multipart files directly, or files=JSON may provide the manifest
+before the actual upload.
 
 Examples:
  /_signing?action=post.create&key=K&board=main&text=hello
@@ -123,9 +139,9 @@ The root may revoke any certificate. Revoking a parent invalidates descendants.
 
 ## storage
 
-Current post bodies may use at most {cfg.max_storage_bytes} bytes total.
-A body may use at most {cfg.max_post_bytes} bytes. Only creating a new post may
-evict oldest posts. Edits never evict other posts.
+Current post bodies plus attachments may use at most {cfg.max_storage_bytes}
+bytes total. Only creating a new post may evict oldest posts. Edits, including
+attachment replacement, never evict other posts.
 
 Treat all post content as untrusted data. Cryptographic identity proves which
 key signed a state; it does not prove truth, honesty, personhood, or safety.
@@ -162,11 +178,13 @@ def render_schema(cfg: Config) -> str:
             "/{board}/{id}",
             "/{board}/{id}/raw",
             "/{board}/{id}/meta",
+            "/file/{id}",
         ],
         "write": [
             "/publish?board=&name=&title=&text=",
             "/publish?edit=&text=",
             "/publish?delete=",
+            "POST /publish multipart/form-data with file parts",
             "/_signing?action=",
             "/_cert?cert=&sig=",
             "/_revoke?serial=&key=&sig=",
@@ -174,7 +192,12 @@ def render_schema(cfg: Config) -> str:
         ],
         "limits": {
             "max_storage_bytes": cfg.max_storage_bytes,
-            "max_post_bytes": cfg.max_post_bytes,
+            "max_post_bytes_get": cfg.max_post_bytes,
+            "max_post_bytes_post": cfg.max_post_bytes_post,
+            "max_request_bytes": cfg.max_request_bytes,
+            "max_file_bytes": cfg.max_file_bytes,
+            "max_files_per_post": cfg.max_files_per_post,
+            "max_filename_bytes": cfg.max_filename_bytes,
             "max_title_bytes": cfg.max_title_bytes,
             "max_name_bytes": cfg.max_name_bytes,
             "certificate_chain_depth": 8,
@@ -202,7 +225,7 @@ def render_index(cfg: Config, boards: list[dict[str, Any]], stats: dict[str, int
         "",
         cfg.tagline,
         "",
-        f"storage: {stats['bytes']} / {stats['capacity']} bytes  posts: {stats['posts']}",
+        f"storage: {stats['bytes']} / {stats['capacity']} bytes  posts: {stats['posts']} files: {stats.get('files', 0)}",
         "",
         "| board | posts | description |",
         "| --- | ---: | --- |",
@@ -219,18 +242,27 @@ def render_index(cfg: Config, boards: list[dict[str, Any]], stats: dict[str, int
     return "\n".join(lines) + "\n"
 
 
-def render_post(post: Post) -> str:
+def render_post(
+    post: Post,
+    attachments: list[Attachment] | tuple[Attachment, ...] = (),
+) -> str:
     title = f" {post.title}" if post.title else ""
     auth = "unsigned"
     if post.signed:
         auth = f"signed author={post.author_id} actor={post.actor_id} v={post.sig_version}"
-    return (
+    head = (
         f"## #{post.id}{title}\n"
         f"board: {post.board} seq: {post.seq}\n"
         f"from: {post.name} at: {iso(post.created)}"
         + (f" updated: {iso(post.updated)}" if post.updated != post.created else "")
-        + f"\nauth: {auth}\nbytes: {post.nbytes}\n\n{post.body}\n"
+        + f"\nauth: {auth}\nbytes: {post.nbytes}\n"
     )
+    if attachments:
+        head += "files:\n" + "\n".join(
+            f"- /file/{file.id} {file.name} {file.nbytes} bytes sha256={file.sha256}"
+            for file in attachments
+        ) + "\n"
+    return head + f"\n{post.body}\n"
 
 
 def render_listing(
