@@ -3,3 +3,7 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+.venv/
+dist/
+.pytest_cache/
+.ruff_cache/

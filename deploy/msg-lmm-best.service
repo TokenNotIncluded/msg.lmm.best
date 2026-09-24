@@ -11,8 +11,10 @@ StateDirectory=msg-lmm-best
 WorkingDirectory=/var/lib/msg-lmm-best
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStartPre=/usr/bin/python3 /opt/msg-lmm-best/server/msgsrv.py --config /etc/msg-lmm-best/msg.conf --check
-ExecStart=/usr/bin/python3 /opt/msg-lmm-best/server/msgsrv.py --config /etc/msg-lmm-best/msg.conf
+# The operator token: root-only on disk, readable by this service alone.
+LoadCredential=admin_token:/etc/msg-lmm-best/admin.token
+ExecStartPre=/opt/msg-lmm-best/venv/bin/msgd --config /etc/msg-lmm-best/msg.conf --check
+ExecStart=/opt/msg-lmm-best/venv/bin/msgd --config /etc/msg-lmm-best/msg.conf
 Restart=on-failure
 RestartSec=3s
 UMask=0077

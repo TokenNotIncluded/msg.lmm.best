@@ -2,24 +2,21 @@
 
 A token bucket per (client, kind) pair, held in memory. Deliberately simple:
 msgd is a small public board, and losing the buckets on restart is acceptable.
-The bucket refills continuously, so a burst of `write_burst` is allowed and then
-sustained traffic settles at `write_per_minute`.
+The bucket refills continuously, so a burst of `burst` is allowed and then
+sustained traffic settles at `per_minute`.
 """
-
-from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
 class Bucket:
     capacity: float
     refill_per_second: float
-    tokens: float = field(default=0.0)
-    updated: float = field(default=0.0)
-    hits: int = 0
+    tokens: float = 0.0
+    updated: float = 0.0
 
     def take(self, now: float, cost: float = 1.0) -> tuple[bool, float]:
         """Consume `cost` tokens. Returns (allowed, seconds_until_next_token)."""
@@ -32,7 +29,6 @@ class Bucket:
 
         if self.tokens >= cost:
             self.tokens -= cost
-            self.hits += 1
             return True, 0.0
 
         shortfall = cost - self.tokens
@@ -41,11 +37,13 @@ class Bucket:
 
 
 class Limiter:
-    """Tracks buckets per client key. `kind` separates read from write budgets."""
+    """Tracks buckets per client key. `kind` separates independent budgets."""
 
-    def __init__(self, *, burst: int, per_minute: int) -> None:
+    def __init__(self, *, burst: int, per_minute: float) -> None:
         self.capacity = float(max(1, burst))
-        self.rate = max(1, per_minute) / 60.0
+        self.rate = max(per_minute, 0.001) / 60.0
+        # An idle bucket is dropped only once it would have refilled anyway.
+        self.idle = max(900.0, self.capacity / self.rate)
         self._buckets: dict[tuple[str, str], Bucket] = {}
         self._lock = threading.Lock()
         self._sweep_at = 0.0
@@ -69,14 +67,7 @@ class Limiter:
         stale = [
             key
             for key, bucket in self._buckets.items()
-            if bucket.updated and now - bucket.updated > 900
+            if bucket.updated and now - bucket.updated > self.idle
         ]
         for key in stale:
             del self._buckets[key]
-
-    def stats(self) -> dict[str, int]:
-        with self._lock:
-            return {
-                "buckets": len(self._buckets),
-                "tracked_clients": len({k[0] for k in self._buckets}),
-            }
