@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,6 +12,16 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from msgd import __version__
 from msgd.config import Config
+from msgd.crypto import (
+    ACTIONS,
+    SignatureError,
+    certificate_payload,
+    make_certificate,
+    payload_info,
+    public_identity,
+    request_payload,
+    signed_request,
+)
 from msgd.ratelimit import Limiter
 from msgd.render import (
     posts_to_ndjson,
@@ -23,7 +34,7 @@ from msgd.render import (
     render_schema,
     render_sitemap,
 )
-from msgd.store import RESERVED_BOARDS, Store, StoreError, valid_board_name
+from msgd.store import RESERVED_BOARDS, Store, StoreError, valid_author_id, valid_board_name
 
 Params = dict[str, list[str]]
 MAX_REQUEST_BYTES = 65_536
@@ -47,16 +58,11 @@ class Board:
             burst=max(30, cfg.read_per_minute // 4),
             per_minute=cfg.read_per_minute,
         )
-        self.writes = Limiter(
-            burst=cfg.write_burst,
-            per_minute=cfg.write_per_minute,
-        )
+        self.writes = Limiter(burst=cfg.write_burst, per_minute=cfg.write_per_minute)
         self.started = time.time()
 
 
 class MsgServer(ThreadingHTTPServer):
-    """Threading HTTP server with typed shared board state."""
-
     daemon_threads = True
 
     def __init__(
@@ -113,6 +119,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(payload)
 
+    def _json(self, status: int, value: Any) -> None:
+        self._send(
+            status,
+            json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+            content_type="application/json; charset=utf-8",
+        )
+
     def _error(self, status: int, message: str, hint: str = "") -> None:
         self._send(status, render_error(status, message, hint))
 
@@ -144,7 +157,7 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self, method: str) -> None:
         parsed = urlparse(self.path)
         path = unquote(parsed.path or "/")
-        params = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=50)
+        params = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=80)
 
         if method == "POST":
             try:
@@ -155,28 +168,28 @@ class Handler(BaseHTTPRequestHandler):
             if length < 0 or length > MAX_REQUEST_BYTES:
                 self._error(413, "request too large")
                 return
-
             raw = self.rfile.read(length) if length else b""
             content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip()
             if content_type == "application/x-www-form-urlencoded":
                 form = parse_qs(
                     raw.decode("utf-8", "replace"),
                     keep_blank_values=True,
-                    max_num_fields=50,
+                    max_num_fields=80,
                 )
             elif content_type in {"text/plain", "text/markdown", ""}:
                 form = {"text": [raw.decode("utf-8", "replace")]}
             else:
                 self._error(415, f"unsupported Content-Type: {content_type}")
                 return
-
             for key, values in form.items():
                 params.setdefault(key, values)
 
         try:
             self._route(method, path, params)
-        except StoreError as exc:
-            self._error(exc.status, exc.message, exc.hint)
+        except (StoreError, SignatureError) as exc:
+            status = exc.status if isinstance(exc, StoreError) else 400
+            hint = exc.hint if isinstance(exc, StoreError) else ""
+            self._error(status, str(exc), hint)
         except BrokenPipeError:
             return
         except Exception as exc:
@@ -200,8 +213,7 @@ class Handler(BaseHTTPRequestHandler):
         if head == "robots.txt":
             self._send(
                 200,
-                "User-agent: *\n"
-                "Allow: /\n\n"
+                "User-agent: *\nAllow: /\n\n"
                 f"Sitemap: https://{self.board.cfg.site_name}/sitemap.xml\n",
             )
             return
@@ -216,14 +228,50 @@ class Handler(BaseHTTPRequestHandler):
             self._send(204, b"")
             return
 
-        if head == "publish":
-            if method == "HEAD":
-                self._send(
-                    405,
-                    render_error(405, "HEAD cannot write"),
-                    extra_headers={"Allow": "GET, POST"},
-                )
+        if head in {"publish", "_cert", "_revoke", "_policy"} and method == "HEAD":
+            self._send(
+                405,
+                render_error(405, "HEAD cannot write"),
+                extra_headers={"Allow": "GET, POST"},
+            )
+            return
+
+        if head == "_signing":
+            self._signing(params)
+            return
+        if head == "_ca":
+            info = self.board.store.root_info()
+            if info is None:
+                self._error(503, "root CA is not initialized")
+            else:
+                self._json(200, info)
+            return
+        if head == "_cert":
+            self._cert(params)
+            return
+        if head == "_revoke":
+            if self._limited(True):
                 return
+            self._revoke(params)
+            return
+        if head == "_revocations":
+            self._json(200, self.board.store.revocations())
+            return
+        if head == "_policy":
+            self._policy(params)
+            return
+        if head == "key":
+            if len(segments) != 2 or not valid_author_id(segments[1]):
+                self._error(404, "invalid key id")
+                return
+            info = self.board.store.key_info(segments[1])
+            if info is None:
+                self._error(404, "unknown key")
+            else:
+                self._json(200, info)
+            return
+
+        if head == "publish":
             if self._limited(True):
                 return
             self._publish(params)
@@ -236,20 +284,18 @@ class Handler(BaseHTTPRequestHandler):
             stats = self.board.store.stats()
             self._send(
                 200,
-                render_index(
-                    self.board.cfg,
-                    self.board.store.list_boards(),
-                    stats,
-                ),
+                render_index(self.board.cfg, self.board.store.list_boards(), stats),
             )
             return
         if head == "_health":
+            root = self.board.store.root_info()
             self._send(
                 200,
                 render_ok(
                     ok=1,
                     version=__version__,
                     uptime_seconds=int(time.time() - self.board.started),
+                    ca="ready" if root else "missing",
                     **self.board.store.stats(),
                 ),
             )
@@ -259,26 +305,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if not valid_board_name(head):
-            hint = (
-                f"{head!r} is reserved"
-                if head in RESERVED_BOARDS
-                else "board names are lower-case and 32 chars max"
-            )
+            hint = f"{head!r} is reserved" if head in RESERVED_BOARDS else "invalid board name"
             self._error(404, f"no such board: {head}", hint)
             return
 
         if len(segments) == 1:
             self._board_view(head, params)
             return
-
         if len(segments) == 2 and segments[1] == "post":
-            if method == "HEAD":
-                self._send(
-                    405,
-                    render_error(405, "HEAD cannot write"),
-                    extra_headers={"Allow": "GET, POST"},
-                )
-                return
             if self._limited(True):
                 return
             self._publish({**params, "board": [head]})
@@ -288,40 +322,226 @@ class Handler(BaseHTTPRequestHandler):
         if post is None:
             self._error(404, f"no entry {segments[1]!r} on /{head}")
             return
-
         action = segments[2] if len(segments) > 2 else ""
         if not action:
             self._send(200, render_post(post))
         elif action == "raw":
             self._send(200, post.body)
         elif action == "meta":
-            self._send(
-                200,
-                json.dumps(post.to_dict(), ensure_ascii=False, indent=2) + "\n",
-                content_type="application/json; charset=utf-8",
-            )
+            self._json(200, post.to_dict())
         else:
             self._error(404, f"unknown action: {action}", "try /raw or /meta")
+
+    def _signing(self, params: Params) -> None:
+        action = _param(params, "action") or ""
+        key = _required(params, "key")
+        _, signer_id = public_identity(key)
+        store = self.board.store
+
+        if action == "post.create":
+            board = (_required(params, "board")).lower()
+            body, title, name, _ = store.prepare_post(
+                body=_required(params, "text"),
+                title=_param(params, "title") or "",
+                name=_param(params, "name") or "anonymous",
+            )
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+                board=board,
+                name=name,
+                title=title,
+                body=body,
+            )
+            self._json(200, {"signer_id": signer_id, "nonce": nonce, "issued": issued, **payload_info(payload)})
+            return
+
+        if action in {"post.edit", "post.delete"}:
+            post = store.get_post(_int_required(params, "id"))
+            if post is None:
+                raise StoreError("post not found", 404)
+            version = post.sig_version + 1 if post.signed else 1
+            if action == "post.edit":
+                body, title, name, _ = store.prepare_post(
+                    body=_required(params, "text"),
+                    title=post.title if _param(params, "title") is None else _param(params, "title") or "",
+                    name=post.name if _param(params, "name") is None else _param(params, "name") or "",
+                )
+                payload = request_payload(
+                    action=action,
+                    signer_id=signer_id,
+                    version=version,
+                    post_id=post.id,
+                    owner_id=post.author_id or "",
+                    board=post.board,
+                    name=name,
+                    title=title,
+                    body=body,
+                )
+            else:
+                payload = request_payload(
+                    action=action,
+                    signer_id=signer_id,
+                    version=version,
+                    post_id=post.id,
+                    owner_id=post.author_id or "",
+                    board=post.board,
+                )
+            self._json(200, {"signer_id": signer_id, "version": version, **payload_info(payload)})
+            return
+
+        if action == "topic.policy":
+            board = (_required(params, "board")).lower()
+            anonymous = _actions(_param(params, "anonymous") or "")
+            version = int(store.policy(board)["version"]) + 1
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=version,
+                board=board,
+                anonymous=anonymous,
+            )
+            self._json(200, {"signer_id": signer_id, "version": version, **payload_info(payload)})
+            return
+
+        if action == "cert.revoke":
+            serial = _required(params, "serial")
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                serial=serial,
+            )
+            self._json(200, {"signer_id": signer_id, **payload_info(payload)})
+            return
+
+        if action == "cert.issue":
+            root = store.root_info()
+            issuer_serial = _param(params, "issuer_serial") or "root"
+            grants = _grants(_required(params, "grants"))
+            not_before = _int_required(params, "not_before", int(time.time()) - 60)
+            not_after = _int_required(params, "not_after", int(time.time()) + 365 * 86400)
+            cert = make_certificate(
+                serial=_param(params, "serial") or secrets.token_hex(16),
+                issuer_serial=issuer_serial,
+                issuer_id=signer_id,
+                subject_key=_required(params, "subject_key"),
+                not_before=not_before,
+                not_after=not_after,
+                delegate=(_param(params, "delegate") or "").lower() in {"1", "true", "yes"},
+                grants=grants,
+            )
+            if issuer_serial == "root" and (root is None or signer_id != root["root_id"]):
+                raise StoreError("only the root key may use issuer_serial=root", 403)
+            self._json(
+                200,
+                {
+                    "certificate": cert.body,
+                    "subject_id": cert.subject_id,
+                    **payload_info(certificate_payload(cert.body)),
+                },
+            )
+            return
+
+        raise StoreError("unknown signing action", 400)
+
+    def _cert(self, params: Params) -> None:
+        cert_body = _param(params, "cert")
+        signature = _param(params, "sig")
+        if cert_body is not None or signature is not None:
+            if self._limited(True):
+                return
+            if cert_body is None or signature is None:
+                raise StoreError("cert and sig are both required", 400)
+            cert = self.board.store.register_certificate(cert_body, signature)
+            self._json(
+                201,
+                {
+                    "ok": 1,
+                    "serial": cert.serial,
+                    "subject_id": cert.subject_id,
+                    "delegate": cert.delegate,
+                    "grants": cert.grants,
+                },
+            )
+            return
+
+        if serial := _param(params, "serial"):
+            row = self.board.store.certificate(serial)
+            if row is None:
+                raise StoreError("certificate not found", 404)
+            row["active"] = self.board.store.certificate_active(serial)
+            self._json(200, row)
+            return
+        if subject := _param(params, "subject"):
+            if not valid_author_id(subject):
+                raise StoreError("invalid subject id", 400)
+            rows = self.board.store.certificates_for(subject)
+            for row in rows:
+                row["active"] = self.board.store.certificate_active(str(row["serial"]))
+            self._json(200, rows)
+            return
+        raise StoreError("serial or subject is required", 400)
+
+    def _revoke(self, params: Params) -> None:
+        serial = _required(params, "serial")
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        canonical_key, signer_id = public_identity(key)
+        payload = request_payload(
+            action="cert.revoke",
+            signer_id=signer_id,
+            version=1,
+            serial=serial,
+        )
+        auth = signed_request(canonical_key, sig, payload, version=1)
+        self.board.store.revoke_certificate(serial, auth.signer_id)
+        self._send(200, render_ok(ok=1, action="revoke", serial=serial, by=auth.signer_id))
+
+    def _policy(self, params: Params) -> None:
+        board = (_required(params, "board")).lower()
+        anonymous_raw = _param(params, "anonymous")
+        if anonymous_raw is None and _param(params, "sig") is None:
+            self._json(200, self.board.store.policy(board))
+            return
+        if self._limited(True):
+            return
+
+        anonymous = _actions(anonymous_raw or "")
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        canonical_key, signer_id = public_identity(key)
+        version = int(self.board.store.policy(board)["version"]) + 1
+        payload = request_payload(
+            action="topic.policy",
+            signer_id=signer_id,
+            version=version,
+            board=board,
+            anonymous=anonymous,
+        )
+        auth = signed_request(canonical_key, sig, payload, version=version)
+        if not self.board.store.signed_allowed(auth.signer_id, board, "topic.policy"):
+            raise StoreError("certificate does not grant topic.policy", 403)
+        self._json(200, self.board.store.set_policy(board, anonymous, version))
 
     def _board_view(self, board: str, params: Params) -> None:
         info = self.board.store.board_info(board)
         if info is None:
             self._send(
                 200,
-                f"# /{board} · empty\n\n"
-                f"create it: /publish?board={board}&name=YOU&text=hello\n",
+                f"# /{board} · empty\n\ncreate it: /publish?board={board}&name=YOU&text=hello\n",
             )
             return
-
-        limit = _int(
-            params,
-            "limit",
-            self.board.cfg.default_limit,
-            1,
-            self.board.cfg.max_limit,
-        )
+        limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
         assert limit is not None
-
+        author_id = _param(params, "author_id")
+        if author_id and not valid_author_id(author_id):
+            raise StoreError("invalid author_id", 400)
         posts = self.board.store.list_posts(
             board=board,
             since=_int(params, "since", None, 0, None),
@@ -329,11 +549,11 @@ class Handler(BaseHTTPRequestHandler):
             limit=limit + 1,
             order="asc" if (_param(params, "order") or "").lower() == "asc" else "desc",
             author=_param(params, "name"),
+            author_id=author_id,
             search=_param(params, "q"),
         )
         truncated = len(posts) > limit
         posts = posts[:limit]
-
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
@@ -341,7 +561,6 @@ class Handler(BaseHTTPRequestHandler):
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
-
         self._send(
             200,
             render_listing(
@@ -358,16 +577,8 @@ class Handler(BaseHTTPRequestHandler):
         if not needle:
             self._error(400, "q is required", "/_search?q=hello")
             return
-
-        limit = _int(
-            params,
-            "limit",
-            self.board.cfg.default_limit,
-            1,
-            self.board.cfg.max_limit,
-        )
+        limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
         assert limit is not None
-
         posts = self.board.store.list_posts(search=needle, limit=limit + 1)
         self._send(
             200,
@@ -381,62 +592,62 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _publish(self, params: Params) -> None:
-        store = self.board.store
         edit = _param(params, "edit")
         delete = _param(params, "delete")
-
         if edit is not None and delete is not None:
             raise StoreError("choose exactly one of edit or delete", 400)
-
         if edit is not None:
-            post_id = _post_id(edit, "edit")
-            post = store.get_post(post_id)
-            if post is None:
-                raise StoreError(f"no entry {post_id}", 404)
-
-            text = _param(params, "text")
-            if text is None:
-                raise StoreError("text is required", 400)
-
-            updated = store.edit_post(
-                post=post,
-                body=text,
-                name=_param(params, "name"),
-                title=_param(params, "title"),
-            )
-            self._send(
-                200,
-                render_ok(
-                    ok=1,
-                    action="edit",
-                    id=updated.id,
-                    board=updated.board,
-                    bytes=updated.nbytes,
-                    url=f"https://{self.board.cfg.site_name}/{updated.board}/{updated.id}",
-                ),
-            )
+            self._edit(_post_id(edit), params)
             return
-
         if delete is not None:
-            post_id = _post_id(delete, "delete")
-            if not store.delete_post(post_id):
-                raise StoreError(f"no entry {post_id}", 404)
-            self._send(200, render_ok(ok=1, action="delete", id=post_id))
+            self._delete(_post_id(delete), params)
             return
+        self._create(params)
 
-        board = (_param(params, "board") or "").lower()
-        if not board:
-            raise StoreError("board is required", 400, "/publish?board=main&text=hello")
-
-        text = _param(params, "text")
-        if text is None:
-            raise StoreError("text is required", 400)
+    def _create(self, params: Params) -> None:
+        store = self.board.store
+        board = (_required(params, "board")).lower()
+        body, title, name, _ = store.prepare_post(
+            body=_required(params, "text"),
+            title=_param(params, "title") or "",
+            name=_param(params, "name") or "anonymous",
+        )
+        key, sig = _auth_fields(params)
+        auth = None
+        if key is not None:
+            canonical_key, signer_id = public_identity(key)
+            nonce = _required(params, "nonce")
+            issued = _int_required(params, "issued")
+            payload = request_payload(
+                action="post.create",
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+                board=board,
+                name=name,
+                title=title,
+                body=body,
+            )
+            auth = signed_request(
+                canonical_key,
+                sig or "",
+                payload,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+            )
+            if not store.signed_allowed(auth.signer_id, board, "post.create"):
+                raise StoreError("certificate does not grant post.create", 403)
+        elif not store.anonymous_allowed(board, "post.create"):
+            raise StoreError("anonymous posting is disabled for this topic", 403)
 
         post, evicted = store.create_post(
             board=board,
-            body=text,
-            name=_param(params, "name") or "anonymous",
-            title=_param(params, "title") or "",
+            body=body,
+            name=name,
+            title=title,
+            auth=auth,
         )
         self._send(
             201,
@@ -446,25 +657,183 @@ class Handler(BaseHTTPRequestHandler):
                 id=post.id,
                 board=post.board,
                 seq=post.seq,
+                auth="signed" if post.signed else "unsigned",
+                author_id=post.author_id,
                 evicted=evicted or None,
                 url=f"https://{self.board.cfg.site_name}/{post.board}/{post.id}",
             ),
         )
 
+    def _edit(self, post_id: int, params: Params) -> None:
+        store = self.board.store
+        post = store.get_post(post_id)
+        if post is None:
+            raise StoreError(f"no entry {post_id}", 404)
+        body, title, name, _ = store.prepare_post(
+            body=_required(params, "text"),
+            title=post.title if _param(params, "title") is None else _param(params, "title") or "",
+            name=post.name if _param(params, "name") is None else _param(params, "name") or "",
+        )
+        key, sig = _auth_fields(params)
+        auth = None
+        if key is not None:
+            canonical_key, signer_id = public_identity(key)
+            version = post.sig_version + 1 if post.signed else 1
+            payload = request_payload(
+                action="post.edit",
+                signer_id=signer_id,
+                version=version,
+                post_id=post.id,
+                owner_id=post.author_id or "",
+                board=post.board,
+                name=name,
+                title=title,
+                body=body,
+            )
+            auth = signed_request(canonical_key, sig or "", payload, version=version)
+            if not store.signed_allowed(
+                auth.signer_id,
+                post.board,
+                "post.edit",
+                owner_id=post.author_id,
+            ):
+                raise StoreError("certificate does not grant edit permission", 403)
+        elif not store.anonymous_allowed(
+            post.board,
+            "post.edit.any",
+            signed_target=post.signed,
+        ):
+            raise StoreError("this post requires certificate authorization", 403)
 
-def _post_id(value: str, action: str) -> int:
+        updated = store.edit_post(
+            post=post,
+            body=body,
+            name=name,
+            title=title,
+            auth=auth,
+        )
+        self._send(
+            200,
+            render_ok(
+                ok=1,
+                action="edit",
+                id=updated.id,
+                board=updated.board,
+                actor_id=auth.signer_id if auth else None,
+                version=updated.sig_version if updated.signed else None,
+            ),
+        )
+
+    def _delete(self, post_id: int, params: Params) -> None:
+        store = self.board.store
+        post = store.get_post(post_id)
+        if post is None:
+            raise StoreError(f"no entry {post_id}", 404)
+        key, sig = _auth_fields(params)
+        actor_id = None
+        if key is not None:
+            canonical_key, signer_id = public_identity(key)
+            version = post.sig_version + 1 if post.signed else 1
+            payload = request_payload(
+                action="post.delete",
+                signer_id=signer_id,
+                version=version,
+                post_id=post.id,
+                owner_id=post.author_id or "",
+                board=post.board,
+            )
+            auth = signed_request(canonical_key, sig or "", payload, version=version)
+            actor_id = auth.signer_id
+            if not store.signed_allowed(
+                auth.signer_id,
+                post.board,
+                "post.delete",
+                owner_id=post.author_id,
+            ):
+                raise StoreError("certificate does not grant delete permission", 403)
+        elif not store.anonymous_allowed(
+            post.board,
+            "post.delete.any",
+            signed_target=post.signed,
+        ):
+            raise StoreError("this post requires certificate authorization", 403)
+
+        store.delete_post(post)
+        self._send(200, render_ok(ok=1, action="delete", id=post_id, actor_id=actor_id))
+
+
+def _auth_fields(params: Params) -> tuple[str | None, str | None]:
+    key = _param(params, "key")
+    sig = _param(params, "sig")
+    if (key is None) != (sig is None):
+        raise StoreError("key and sig must be supplied together", 400)
+    return key, sig
+
+
+def _actions(value: str) -> tuple[str, ...]:
+    if not value.strip():
+        return ()
+    actions = tuple(sorted({part.strip() for part in value.split(",") if part.strip()}))
+    invalid = set(actions) - ACTIONS
+    if invalid:
+        raise StoreError(f"unknown actions: {sorted(invalid)}", 400)
+    return actions
+
+
+def _grants(value: str) -> dict[str, tuple[str, ...]]:
     try:
-        post_id = int(value)
-    except ValueError as exc:
-        raise StoreError(f"{action} requires a numeric id", 400) from exc
-    if post_id < 1:
-        raise StoreError(f"{action} requires a positive id", 400)
-    return post_id
+        raw = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise StoreError("grants must be JSON", 400) from exc
+    if not isinstance(raw, list):
+        raise StoreError("grants must be a JSON array", 400)
+    grants: dict[str, tuple[str, ...]] = {}
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(item.get("topic"), str):
+            raise StoreError("invalid grant", 400)
+        actions = item.get("actions")
+        if not isinstance(actions, list) or not all(isinstance(x, str) for x in actions):
+            raise StoreError("invalid grant actions", 400)
+        normalized = tuple(sorted(set(actions)))
+        invalid = set(normalized) - ACTIONS
+        if invalid:
+            raise StoreError(f"unknown grant actions: {sorted(invalid)}", 400)
+        grants[item["topic"]] = normalized
+    return grants
+
+
+def _required(params: Params, key: str) -> str:
+    value = _param(params, key)
+    if value is None:
+        raise StoreError(f"{key} is required", 400)
+    return value
 
 
 def _param(params: Params, key: str) -> str | None:
     values = params.get(key)
     return values[0] if values else None
+
+
+def _post_id(value: str) -> int:
+    try:
+        post_id = int(value)
+    except ValueError as exc:
+        raise StoreError("post id must be numeric", 400) from exc
+    if post_id < 1:
+        raise StoreError("post id must be positive", 400)
+    return post_id
+
+
+def _int_required(params: Params, key: str, default: int | None = None) -> int:
+    raw = _param(params, key)
+    if raw is None:
+        if default is None:
+            raise StoreError(f"{key} is required", 400)
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise StoreError(f"{key} must be an integer", 400) from exc
 
 
 def _int(
