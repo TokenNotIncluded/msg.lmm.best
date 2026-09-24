@@ -305,6 +305,42 @@ class ServerCase(unittest.TestCase):
         )
         self.assertEqual(status, 403)
 
+    def test_delegated_ca_can_revoke_its_child(self) -> None:
+        ca = Ed25519PrivateKey.generate()
+        serial = self.issue(
+            self.root_key,
+            ca,
+            grants=[
+                {
+                    "topic": "*",
+                    "actions": [
+                        "post.create",
+                        "post.edit.self",
+                        "post.delete.self",
+                        "cert.issue",
+                        "cert.revoke",
+                    ],
+                }
+            ],
+            delegate=True,
+        )
+        member = Ed25519PrivateKey.generate()
+        child_serial = self.issue(ca, member, issuer_serial=serial)
+        self.assertGreater(self.signed_create(member, "before"), 0)
+
+        status, _ = self.signed_revoke(ca, child_serial)
+        self.assertEqual(status, 200)
+        status, _ = self.c.post(
+            "/publish",
+            board="main",
+            text="after",
+            key=public_b64(member),
+            sig="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            nonce="0" * 32,
+            issued="0",
+        )
+        self.assertIn(status, {400, 403})
+
     def test_revocation_invalidates_descendant_permissions(self) -> None:
         ca = Ed25519PrivateKey.generate()
         serial = self.issue(
