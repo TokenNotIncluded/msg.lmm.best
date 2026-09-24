@@ -113,6 +113,7 @@ def request_payload(
     body: str = "",
     anonymous: tuple[str, ...] = (),
     serial: str = "",
+    files: tuple[dict[str, object], ...] = (),
 ) -> bytes:
     if not IDENTITY_RE.fullmatch(signer_id):
         raise SignatureError("invalid signer id")
@@ -136,6 +137,7 @@ def request_payload(
             ("name", name),
             ("title", title),
             ("body", body),
+            ("files", canonical_json(list(files))),
         ]
     elif action == "post.edit":
         if post_id is None or owner_id is None:
@@ -147,6 +149,7 @@ def request_payload(
             ("name", name),
             ("title", title),
             ("body", body),
+            ("files", canonical_json(list(files))),
         ]
     elif action == "post.delete":
         if post_id is None or owner_id is None:
@@ -309,6 +312,47 @@ def make_certificate(
         ],
     }
     return parse_certificate(canonical_json(value))
+
+
+def normalize_file_manifest(value: Any) -> tuple[dict[str, object], ...]:
+    if value in (None, "", []):
+        return ()
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise SignatureError("files must be JSON") from exc
+    if not isinstance(value, list):
+        raise SignatureError("files must be a JSON array")
+
+    result: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise SignatureError("file manifest item must be an object")
+        name = item.get("name")
+        content_type = item.get("type")
+        nbytes = item.get("bytes")
+        sha256 = item.get("sha256")
+        if not isinstance(name, str) or not name:
+            raise SignatureError("file name is required")
+        if not isinstance(content_type, str) or not content_type:
+            raise SignatureError("file type is required")
+        if not isinstance(nbytes, int) or isinstance(nbytes, bool) or nbytes < 0:
+            raise SignatureError("file bytes must be a non-negative integer")
+        if (
+            not isinstance(sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", sha256)
+        ):
+            raise SignatureError("file sha256 must be 64 lowercase hex characters")
+        result.append(
+            {
+                "name": name,
+                "type": content_type,
+                "bytes": nbytes,
+                "sha256": sha256,
+            }
+        )
+    return tuple(result)
 
 
 def payload_info(payload: bytes) -> dict[str, str]:
