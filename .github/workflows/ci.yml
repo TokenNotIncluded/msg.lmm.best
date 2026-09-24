@@ -18,6 +18,7 @@ jobs:
       - run: uv run python -m unittest discover -s tests -q
       - run: uv run msgd-cert init-root --private-key /tmp/msgd-root.key --public-key /tmp/msgd-root.pub
       - run: test -s /tmp/msgd-root.key && test -s /tmp/msgd-root.pub
+      - run: cp /tmp/msgd-root.pub /tmp/msgd-root.before && uv run msgd-cert init-root --private-key /tmp/msgd-root.key --public-key /tmp/msgd-root.pub && cmp /tmp/msgd-root.before /tmp/msgd-root.pub
       - run: uv run python -m compileall -q src tests
       - run: bash -n deploy/deploy.sh deploy/update.sh
       - run: uv build --wheel --quiet
