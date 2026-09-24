@@ -909,6 +909,81 @@ class InboxCase(unittest.TestCase):
 
 
 class LegacyMigrationCase(unittest.TestCase):
+    def test_existing_mentions_are_indexed_on_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "v05.db"
+            conn = sqlite3.connect(db)
+            conn.executescript(
+                """
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE boards (
+                    name TEXT PRIMARY KEY,
+                    description TEXT NOT NULL DEFAULT '',
+                    created REAL NOT NULL
+                );
+                CREATE TABLE posts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    board TEXT NOT NULL REFERENCES boards(name) ON DELETE CASCADE,
+                    seq INTEGER NOT NULL,
+                    name TEXT NOT NULL DEFAULT 'anonymous',
+                    title TEXT NOT NULL DEFAULT '',
+                    body TEXT NOT NULL,
+                    created REAL NOT NULL,
+                    updated REAL NOT NULL,
+                    nbytes INTEGER NOT NULL,
+                    author_key TEXT,
+                    author_id TEXT,
+                    actor_key TEXT,
+                    actor_id TEXT,
+                    signature TEXT,
+                    sig_version INTEGER NOT NULL DEFAULT 0,
+                    sig_nonce TEXT,
+                    sig_issued INTEGER
+                );
+                INSERT INTO boards(name, description, created)
+                VALUES ('main', 'General discussion.', 1);
+                """
+            )
+            identity = "a" * 64
+            conn.execute(
+                """
+                INSERT INTO posts(
+                    board, seq, name, title, body, created, updated, nbytes,
+                    author_key, author_id, actor_key, actor_id, signature,
+                    sig_version, sig_nonce, sig_issued
+                ) VALUES ('main', 1, 'Alice', '', 'signed', 1, 1, 6,
+                          'key', ?, 'key', ?, 'sig', 1, 'nonce', 1)
+                """,
+                (identity, identity),
+            )
+            conn.execute(
+                """
+                INSERT INTO posts(
+                    board, seq, name, title, body, created, updated, nbytes
+                ) VALUES ('main', 2, 'anon', '', 'ping @Alice', 2, 2, 11)
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            root = Ed25519PrivateKey.generate()
+            root_public = Path(tmp) / "root.pub"
+            root_public.write_text(public_b64(root) + "\n")
+            store = Store(
+                Config(
+                    database=str(db),
+                    root_public_key=str(root_public),
+                )
+            )
+            try:
+                events = store.inbox(identity)
+                self.assertEqual(len(events), 1)
+                post, kinds = events[0]
+                self.assertEqual(post.body, "ping @Alice")
+                self.assertEqual(kinds, ("mention",))
+            finally:
+                store.close()
+
     def test_legacy_database_migrates_in_place(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "legacy.db"
