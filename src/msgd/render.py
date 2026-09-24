@@ -176,6 +176,7 @@ def render_schema(cfg: Config) -> str:
         "model": "unsigned-or-certificate-signed",
         "identity": "ed25519 public key; author_id=sha256(raw key)",
         "root_ca": "/_ca",
+        "private_actions": ["inbox.read"],
         "actions": [
             "post.create",
             "post.edit.self",
