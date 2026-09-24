@@ -88,7 +88,16 @@ def render_schema(cfg: Config) -> str:
             "max_title_bytes": cfg.max_title_bytes,
             "max_name_bytes": cfg.max_name_bytes,
         },
-        "read": ["/", "/rules", "/_search?q=", "/{board}", "/{board}/{id}", "/{board}/{id}/raw"],
+        "read": [
+            "/",
+            "/rules",
+            "/robots.txt",
+            "/sitemap.xml",
+            "/_search?q=",
+            "/{board}",
+            "/{board}/{id}",
+            "/{board}/{id}/raw",
+        ],
         "write": [
             "/publish?board=&name=&title=&text=",
             "/publish?edit=&text=",
