@@ -359,7 +359,7 @@ class ServerCase(unittest.TestCase):
 
 
 class LegacyMigrationCase(unittest.TestCase):
-    def test_v03_database_migrates_in_place(self) -> None:
+    def test_legacy_database_migrates_in_place(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "legacy.db"
             conn = sqlite3.connect(db)
@@ -377,9 +377,13 @@ class LegacyMigrationCase(unittest.TestCase):
                     name TEXT NOT NULL DEFAULT 'anonymous',
                     title TEXT NOT NULL DEFAULT '',
                     body TEXT NOT NULL,
+                    token_hash TEXT NOT NULL DEFAULT '',
                     created REAL NOT NULL,
                     updated REAL NOT NULL,
-                    nbytes INTEGER NOT NULL
+                    edit_count INTEGER NOT NULL DEFAULT 0,
+                    deleted INTEGER NOT NULL DEFAULT 0,
+                    deleted_by TEXT NOT NULL DEFAULT '',
+                    nbytes INTEGER NOT NULL DEFAULT 0
                 );
                 INSERT INTO boards(name, description, created)
                 VALUES ('main', 'General discussion.', 1);
