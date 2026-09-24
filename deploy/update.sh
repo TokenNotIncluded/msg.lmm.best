@@ -6,11 +6,11 @@ set -euo pipefail
 HOST="${1:-archczy}"
 DOMAIN="msg.lmm.best"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-REMOTE_WHEEL="/tmp/msg-lmm-best-update.whl"
+STAGE="/tmp/msg-lmm-best-update.$$"
 
 cd "$ROOT"
 
-for cmd in python3 uv ssh scp; do
+for cmd in python3 uv ssh; do
     command -v "$cmd" >/dev/null || {
         echo "error: $cmd is required locally" >&2
         exit 1
@@ -23,19 +23,21 @@ PYTHONPATH=src python3 -m unittest discover -s tests -q
 echo "==> build"
 rm -rf dist
 uv build --wheel --quiet
-WHEEL="$(printf '%s\n' dist/*.whl | head -n1)"
+WHEEL="$(basename dist/*.whl)"
 
 echo "==> upload"
-scp "$WHEEL" "$HOST:$REMOTE_WHEEL"
+ssh "$HOST" "rm -rf '$STAGE' && mkdir -p '$STAGE'"
+tar -C "$ROOT" -cf -     "dist/$WHEEL"     deploy/msg-lmm-best-index.service     deploy/msg-lmm-best-index.timer     | ssh "$HOST" "tar -C '$STAGE' -xf -"
 
 echo "==> update $HOST"
-ssh "$HOST" REMOTE_WHEEL="$REMOTE_WHEEL" 'bash -s' <<'REMOTE'
+ssh "$HOST" STAGE="$STAGE" WHEEL="$WHEEL" 'bash -s' <<'REMOTE'
 set -euo pipefail
-trap 'rm -f "$REMOTE_WHEEL"' EXIT
+trap 'rm -rf "$STAGE"' EXIT
 
 VENV=/opt/msg-lmm-best/venv
 CONFIG=/etc/msg-lmm-best/msg.conf
 SERVICE=msg-lmm-best.service
+D="$STAGE/deploy"
 
 test -x "$VENV/bin/python" || {
     echo "error: msgd venv not found; use deploy/deploy.sh for a fresh install" >&2
@@ -55,10 +57,15 @@ command -v uv >/dev/null || {
 }
 
 echo "==> install package"
-sudo UV_NO_CACHE=1 uv pip install --quiet     --python "$VENV/bin/python"     --reinstall --no-deps --compile-bytecode     "$REMOTE_WHEEL"
+sudo UV_NO_CACHE=1 uv pip install --quiet     --python "$VENV/bin/python"     --reinstall --no-deps --compile-bytecode     "$STAGE/dist/$WHEEL"
 
 echo "==> validate"
 "$VENV/bin/msgd" --config "$CONFIG" --check
+
+echo "==> index timer"
+sudo install -m 0644 "$D/msg-lmm-best-index.service" /etc/systemd/system/msg-lmm-best-index.service
+sudo install -m 0644 "$D/msg-lmm-best-index.timer" /etc/systemd/system/msg-lmm-best-index.timer
+sudo systemctl daemon-reload
 
 echo "==> restart"
 sudo systemctl restart "$SERVICE"
@@ -69,8 +76,10 @@ for _ in $(seq 1 50); do
     fi
     sleep 0.2
 done
-
 curl -fsS http://127.0.0.1:3111/_health
+
+sudo systemctl enable --now msg-lmm-best-index.timer
+sudo systemctl start msg-lmm-best-index.service
 REMOTE
 
 echo "==> public health"
