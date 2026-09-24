@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and deploy msgd. Existing msg.conf is kept unless FORCE_CONFIG=1.
+# Build and deploy msgd.
 set -euo pipefail
 
 HOST="${1:-archczy}"
@@ -20,8 +20,7 @@ echo "==> staging on $HOST:$STAGE"
 ssh "$HOST" "mkdir -p $STAGE"
 tar -C "$ROOT" -cf - "dist/$WHEEL" deploy | ssh "$HOST" "tar -C $STAGE -xf -"
 
-ssh "$HOST" STAGE="$STAGE" WHEEL="$WHEEL" DOMAIN="$DOMAIN" \
-    FORCE_CONFIG="${FORCE_CONFIG:-0}" 'bash -s' <<'REMOTE'
+ssh "$HOST" STAGE="$STAGE" WHEEL="$WHEEL" DOMAIN="$DOMAIN" 'bash -s' <<'REMOTE'
 set -euo pipefail
 trap 'rm -rf "$STAGE"' EXIT
 D="$STAGE/deploy"
@@ -38,11 +37,10 @@ sudo UV_NO_CACHE=1 uv pip install --quiet --python "$VENV/bin/python" \
 
 echo "==> config"
 sudo install -d -m 0755 /etc/msg-lmm-best
-if [[ "$FORCE_CONFIG" == 1 || ! -e /etc/msg-lmm-best/msg.conf ]]; then
-    sudo install -m 0644 "$D/etc/msg-lmm-best/msg.conf" /etc/msg-lmm-best/msg.conf
-else
-    echo "    kept existing msg.conf"
-fi
+sudo install -m 0644 "$D/etc/msg-lmm-best/msg.conf" /etc/msg-lmm-best/msg.conf
+# Removed features leave no live state behind.
+sudo rm -f /etc/msg-lmm-best/rules.md /etc/msg-lmm-best/admin.token
+sudo rm -rf /var/lib/msg-lmm-best/files
 "$VENV/bin/msgd" --config /etc/msg-lmm-best/msg.conf --check
 
 echo "==> systemd"
