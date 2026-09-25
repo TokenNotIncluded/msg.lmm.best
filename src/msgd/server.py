@@ -4121,7 +4121,6 @@ class Handler(BaseHTTPRequestHandler):
         )
 
 
-
 EXCHANGE_ACTIONS = frozenset(
     {
         "outbox.read",
@@ -4290,6 +4289,7 @@ def _exchange_signing_spec(
         "scope": scope or None,
         "limit": limit,
     }
+
 
 def _webhook_fields(
     params: Params,
