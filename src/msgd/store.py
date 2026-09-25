@@ -1159,6 +1159,18 @@ class Store:
                 "INSERT INTO revocations(serial, revoked_at, revoked_by) VALUES (?, ?, ?)",
                 (serial, time.time(), signer_id),
             )
+        self._audit_ca(
+            f"[REVOKED] {serial}",
+            "\n".join(
+                [
+                    f"certificate=/_cert?serial={serial}",
+                    f"serial={serial}",
+                    f"subject={cert.subject_id}",
+                    f"revoked_by={signer_id}",
+                    "revocations=/_revocations",
+                ]
+            ),
+        )
 
     def is_revoked(self, serial: str) -> bool:
         with self._lock:
@@ -1180,7 +1192,7 @@ class Store:
             raise StoreError("signed request requires nonce and issued", 400)
         now = int(time.time())
         if abs(now - auth.issued) > 300:
-            raise StoreError("signed create timestamp is outside the 5 minute window", 400)
+            raise StoreError("signed request timestamp is outside the 5 minute window", 400)
         with self._lock, self._conn:
             self._conn.execute(
                 "DELETE FROM signature_nonces WHERE issued < ?",
@@ -1192,7 +1204,7 @@ class Store:
                     (auth.signer_id, auth.nonce, auth.issued),
                 )
             except sqlite3.IntegrityError as exc:
-                raise StoreError("signed create nonce already used", 409) from exc
+                raise StoreError("signed request nonce already used", 409) from exc
 
     def create_post(
         self,
