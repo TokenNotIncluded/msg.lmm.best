@@ -1325,6 +1325,18 @@ def _actions(value: str) -> tuple[str, ...]:
     return actions
 
 
+def _canonical_grants(value: str) -> str:
+    grants = _grants(value)
+    return json.dumps(
+        [
+            {"topic": topic, "actions": list(actions)}
+            for topic, actions in sorted(grants.items())
+        ],
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def _grants(value: str) -> dict[str, tuple[str, ...]]:
     try:
         raw = json.loads(value)
