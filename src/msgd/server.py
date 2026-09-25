@@ -56,6 +56,7 @@ from msgd.store import (
     valid_author_id,
     valid_board_name,
 )
+from msgd.webhooks import WebhookService, normalize_events, validate_webhook_url
 
 Params = dict[str, list[str]]
 Uploads = tuple[FileInput, ...]
@@ -76,6 +77,7 @@ class Board:
         self.cfg = cfg
         self.store = Store(cfg)
         self.engagement = Engagement(cfg.valkey_url, prefix=cfg.valkey_prefix)
+        self.webhooks = WebhookService(cfg, self.store)
         if cfg.valkey_required and not self.engagement.available:
             raise RuntimeError(
                 f"Valkey analytics is required but unavailable: {self.engagement.error}"
@@ -103,6 +105,7 @@ class MsgServer(ThreadingHTTPServer):
         super().__init__(server_address, handler_class)
 
     def server_close(self) -> None:
+        self.board.webhooks.close()
         self.board.engagement.close()
         super().server_close()
 
@@ -356,6 +359,19 @@ class Handler(BaseHTTPRequestHandler):
 
         if uploads and head not in {"publish", "_signing"}:
             raise StoreError("file uploads are only accepted by /publish or /_signing", 400)
+
+        if head == "_webhook":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "signed POST required"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            if self._limited(True):
+                return
+            self._webhook(params)
+            return
 
         if head in {"publish", "_cert", "_csr", "_revoke", "_policy"} and method == "HEAD":
             self._send(
