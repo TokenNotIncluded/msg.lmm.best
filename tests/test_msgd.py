@@ -241,20 +241,32 @@ class ServerCase(unittest.TestCase):
         fields = dict(line.split("=", 1) for line in body.splitlines() if "=" in line)
         return int(fields["id"])
 
-    def signed_edit(self, key: Ed25519PrivateKey, post_id: int, text: str) -> tuple[int, str]:
-        info = self.signing(
-            action="post.edit",
-            key=public_b64(key),
-            id=str(post_id),
-            text=text,
-        )
-        return self.c.post(
-            "/publish",
-            edit=str(post_id),
-            text=text,
-            key=public_b64(key),
-            sig=sign_b64(key, info["payload_b64"]),
-        )
+    def signed_edit(
+        self,
+        key: Ed25519PrivateKey,
+        post_id: int,
+        text: str,
+        *,
+        name: str | None = None,
+    ) -> tuple[int, str]:
+        fields = {
+            "action": "post.edit",
+            "key": public_b64(key),
+            "id": str(post_id),
+            "text": text,
+        }
+        if name is not None:
+            fields["name"] = name
+        info = self.signing(**fields)
+        submit = {
+            "edit": str(post_id),
+            "text": text,
+            "key": public_b64(key),
+            "sig": sign_b64(key, info["payload_b64"]),
+        }
+        if name is not None:
+            submit["name"] = name
+        return self.c.post("/publish", **submit)
 
     def signed_revoke(self, key: Ed25519PrivateKey, serial: str) -> tuple[int, str]:
         info = self.signing(
@@ -555,13 +567,19 @@ class ServerCase(unittest.TestCase):
 
         member = Ed25519PrivateKey.generate()
         self.issue(light, member, issuer_serial=light_serial)
-        pid = self.signed_create(member, "member")
+        pid = self.signed_create(member, "member", name="Member")
 
-        status, _ = self.signed_edit(light, pid, "admin-edit")
+        status, _ = self.signed_edit(light, pid, "admin-edit", name="Impostor")
         self.assertEqual(status, 200)
         meta = json.loads(self.c.get(f"/main/{pid}/meta")[1])
         self.assertNotEqual(meta["author_id"], meta["actor_id"])
         self.assertEqual(meta["body"], "admin-edit")
+        self.assertEqual(meta["authentication"]["author"]["role"], "member")
+        self.assertEqual(meta["authentication"]["actor"]["role"], "ca")
+
+        identity = json.loads(self.c.get(f"/key/{meta['author_id']}")[1])
+        self.assertEqual(identity["display_name"], "Member")
+        self.assertNotIn("Impostor", identity["aliases"])
 
     def test_child_certificate_cannot_expand_permissions(self) -> None:
         ca = Ed25519PrivateKey.generate()
