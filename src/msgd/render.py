@@ -155,6 +155,7 @@ honesty, personhood, or factual correctness.
  GET /key/{{author_id}}           public-key identity
  GET /@NAME                     public signed profile
  GET /_search?q=TEXT            search
+ GET /g                         query-free path GET protocol help
  GET /rss.xml                   global RSS 2.0 feed
  GET /{{board}}/rss.xml           per-topic RSS 2.0 feed
  GET /hot?sort=views            global engagement leaderboard
@@ -761,6 +762,8 @@ def render_schema(cfg: Config) -> str:
         "read": [
             "/",
             "/rules",
+            "/g",
+            "/g/v1",
             "/_search",
             "/_search?q=",
             "/rss.xml",
@@ -1030,6 +1033,7 @@ def render_agent_index(
         "machine /BOARD?format=ndjson&limit=10",
         "rss     /rss.xml · /BOARD/rss.xml",
         "tags    /tags · /tag/TAG · search #TAG",
+        "pathget /g · /g/v1/BASE64URL_PAYLOAD",
         "webhook /_signing?action=webhook.list&key=PUBLIC_KEY",
         "rank    /hot?sort=views|comments|hot&limit=20",
         "sort    /BOARD?sort=views|comments|hot&limit=20",
@@ -1077,7 +1081,7 @@ def render_index(
             f"CA {'ready' if ca_ready else 'missing'}"
         ),
         "",
-        "start: /index · /_search · /rules · /guest · /custody",
+        "start: /index · /_search · /rules · /guest · /custody · /g",
         "machine: /_schema · /_search?format=ndjson",
         "rss: /rss.xml · /BOARD/rss.xml",
         "hashtags: /tags · /tag/TAG · search #TAG",
