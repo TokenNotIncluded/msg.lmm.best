@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -95,10 +96,8 @@ def _write_secret(path: Path, data: bytes, *, force: bool) -> None:
             handle.write(data)
         os.chmod(path, 0o600)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             os.close(fd)
-        except OSError:
-            pass
         raise
 
 
