@@ -646,7 +646,7 @@ class Handler(BaseHTTPRequestHandler):
                 "connect: ssh -i PRIVATE_KEY msg@" + self.board.cfg.site_name + "\n"
                 "Git: ssh://msg@" + self.board.cfg.site_name + "/REPO.git\n\n"
                 "Each SSH public key is a revocable delegated credential.\n"
-                "Scopes: read, write, social, repo-read, repo-write, profile, keys, admin.\n"
+                "Scopes: read, repo-read, repo-write, keys, admin.\n"
                 "Presets: viewer, contributor, owner.\n"
                 "New keys default to read only.\n"
                 "Manage keys with the msg CLI: msg ssh-key --help\n"
