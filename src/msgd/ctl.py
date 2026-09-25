@@ -530,7 +530,9 @@ def main(argv: list[str] | None = None) -> int:
     policy_set.add_argument("--key", default=DEFAULT_PRIVATE)
     policy_set.set_defaults(func=command_policy_set)
 
-    delete = sub.add_parser("delete-post", help="irreversibly delete a post when the signing key is authorized")
+    delete = sub.add_parser(
+        "delete-post", help="irreversibly delete a post when the signing key is authorized"
+    )
     delete.add_argument("post_id", type=int)
     delete.add_argument("--api", default=DEFAULT_API)
     delete.add_argument("--key", default=DEFAULT_PRIVATE)
