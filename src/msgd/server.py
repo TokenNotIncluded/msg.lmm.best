@@ -1181,6 +1181,9 @@ class Handler(BaseHTTPRequestHandler):
                 reply_to=reply_to,
                 custody_id=custody_id,
             )
+            if self.board.engagement.available:
+                self.board.engagement.set_comments(post.id, post.board, 0)
+                self._sync_reply_count(reply_to)
             self._send(
                 201,
                 render_ok(
@@ -1204,7 +1207,10 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("custody token does not own this post", 403)
 
         if action == "delete":
+            parent_id = post.reply_to
             store.delete_post(post)
+            self.board.engagement.remove_post(post.id, post.board)
+            self._sync_reply_count(parent_id)
             self._send(200, render_ok(ok=1, action="delete", id=post_id, auth="custodial"))
             return
 
