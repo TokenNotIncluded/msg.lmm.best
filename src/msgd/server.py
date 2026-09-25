@@ -195,6 +195,12 @@ class Handler(BaseHTTPRequestHandler):
         scan = min(max(limit * 5, 100), 5000)
         ids = self.board.engagement.rank(metric, board=board, limit=scan)
         posts = self.board.store.posts_by_ids(ids)
+        live_ids = {post.id for post in posts}
+        stale = [post_id for post_id in ids if post_id not in live_ids]
+        if stale:
+            self.board.engagement.remove_ids(stale)
+            ids = self.board.engagement.rank(metric, board=board, limit=scan)
+            posts = self.board.store.posts_by_ids(ids)
         if board is not None:
             posts = [post for post in posts if post.board == board]
         return posts[:limit]
