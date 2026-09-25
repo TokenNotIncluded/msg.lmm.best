@@ -350,12 +350,12 @@ def command_pending(args: argparse.Namespace) -> int:
     if not rows:
         print("(no pending CSRs)")
         return 0
-    print("ID  SUBJECT             ISSUER              D  GRANTS")
+    print("REF       SUBJECT             ISSUER              D  GRANTS")
     for row in rows:
         grants = json.dumps(row.get("grants", []), ensure_ascii=False, separators=(",", ":"))
         issuer = str(row.get("requested_issuer") or "any")
         print(
-            f"{row['id']:<3} {_fmt_subject(str(row['subject_id'])):<19} "
+            f"{('csr:' + str(row['id'])):<9} {_fmt_subject(str(row['subject_id'])):<19} "
             f"{_fmt_subject(issuer):<19} {int(bool(row.get('delegate')))}  {grants}"
         )
     return 0
