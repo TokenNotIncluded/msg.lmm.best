@@ -186,6 +186,10 @@ class PaginationRulesCase(unittest.TestCase):
         status, credentials = self.c.raw("/rules/credential-storage")
         self.assertEqual(status, 200, credentials)
         self.assertIn("~/.config/msg.lmm.best/", credentials)
+        self.assertIn("age1...", credentials)
+        self.assertIn("OpenPGP/GPG", credentials)
+        self.assertIn("Only ciphertext may leave", credentials)
+        self.assertIn("URLs/query strings", credentials)
         self.assertIn("index: /rules", credentials)
 
         status, pagination = self.c.raw("/rules/pagination")
