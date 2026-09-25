@@ -2925,10 +2925,14 @@ class Store:
                 "SELECT COUNT(*) AS files, COALESCE(SUM(nbytes),0) AS file_bytes FROM attachments"
             ).fetchone()
             boards = self._conn.execute("SELECT COUNT(*) AS n FROM boards").fetchone()["n"]
+            hashtags = self._conn.execute(
+                "SELECT COUNT(DISTINCT tag) AS n FROM post_tags"
+            ).fetchone()["n"]
         post_bytes = int(row["post_bytes"])
         file_bytes = int(files["file_bytes"])
         return {
             "boards": int(boards),
+            "hashtags": int(hashtags),
             "posts": int(row["posts"]),
             "system_posts": int(row["system_posts"] or 0),
             "files": int(files["files"]),
