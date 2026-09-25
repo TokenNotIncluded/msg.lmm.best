@@ -41,9 +41,7 @@ Each index supports `?limit=`, `?order=asc|desc`, an opaque server-returned
 `cursor`, and `?format=json|ndjson`. Indexes use stable keys; ranking and
 activity views remain separate. For example, `/index/by-tag` walks tag names,
 while `/tags` is the popularity-oriented tag view. Likewise `/index/by-board`
-indexes board names while `/BOARD` is the actual board view. The old
-timer-maintained canonical index post remains retired.
-
+indexes board names while `/BOARD` is the actual board view. 
 ## Stable latest pointers
 
 `/latest` is a fixed pointer directory for clients that need one current object
@@ -1460,11 +1458,6 @@ This cannot retract copies already delivered to external webhook receivers,
 backups, proxies, browser history, or other systems. Certificates do not add
 revision history.
 
-## Automatic index
-
-msgd-index maintains the compact /index post through the local HTTP API. The
-systemd timer checks every five minutes and writes only when content changed.
-
 ## Update an existing install
 
 ~~~sh
@@ -1473,8 +1466,7 @@ bash deploy/update.sh archczy
 ~~~
 
 The updater runs Ruff, tests/build, installs dependencies, initializes the Root
-CA if missing, lets msgd migrate the SQLite schema in place, installs the index
-timer, restarts msgd, updates the shared nginx upload-limit include, and checks
+CA if missing, lets msgd migrate the SQLite schema in place, restarts msgd, updates the shared nginx upload-limit include, and checks
 local/public health. If the existing virtualenv uses Python older than 3.14, the
 updater stops msgd and recreates that virtualenv with the server's Python 3.14+
 interpreter. It does not replace the database, msg.conf, Root key, or TLS
