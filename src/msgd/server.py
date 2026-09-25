@@ -67,7 +67,6 @@ from msgd.store import (
     StoreError,
     anonymous_actions,
     anonymous_base_actions,
-    base_permission_mask,
     board_name_error,
     signed_base_actions,
     valid_author_id,
