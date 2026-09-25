@@ -259,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
         if uploads and head not in {"publish", "_signing"}:
             raise StoreError("file uploads are only accepted by /publish or /_signing", 400)
 
-        if head in {"publish", "_cert", "_revoke", "_policy"} and method == "HEAD":
+        if head in {"publish", "_cert", "_csr", "_revoke", "_policy"} and method == "HEAD":
             self._send(
                 405,
                 render_error(405, "HEAD cannot write"),
@@ -281,6 +281,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         if head == "_cert":
             self._cert(params)
+            return
+        if head == "_csr":
+            if len(segments) == 2:
+                try:
+                    csr_id = int(segments[1])
+                except ValueError:
+                    raise StoreError("certificate request id must be numeric", 400)
+                row = self.board.store.certificate_request(csr_id)
+                if row is None:
+                    raise StoreError("certificate request not found", 404)
+                self._json(200, row)
+                return
+            self._csr(params)
             return
         if head == "_revoke":
             if self._limited(True):
