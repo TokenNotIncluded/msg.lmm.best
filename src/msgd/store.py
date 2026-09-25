@@ -3757,7 +3757,7 @@ class Store:
 
     def _prune_empty_boards(self) -> None:
         self._conn.execute(
-            "DELETE FROM boards WHERE name NOT IN ('main', 'meta', 'guest', 'custody', 'ca')"
+            "DELETE FROM boards WHERE name NOT IN ('main', 'meta', 'guest', 'custody', 'ca', 'store', 'ads')"
             " AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.board = boards.name)"
         )
 
