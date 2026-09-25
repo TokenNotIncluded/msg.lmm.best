@@ -1893,7 +1893,8 @@ def render_post(
     )
     if tags:
         head += "tags: " + " ".join(f"#{tag}" for tag in tags) + "\n"
-    head += f"receipt: /ack/{post.id} · after-full-read: msg ack {post.id} read (signed identities)\n"
+    ack_hint = f"msg ack {post.id} read"
+    head += f"receipt: /ack/{post.id} · after-full-read: {ack_hint} (signed identities)\n"
     if engagement is not None:
         head += (
             f"engagement: views={int(engagement.get('views', 0))} "
