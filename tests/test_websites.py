@@ -200,7 +200,11 @@ class WebSiteCase(unittest.TestCase):
             nonce=str(signing["nonce"]),
             issued=str(signing["issued"]),
         )
-        return status, json.loads(body.decode())
+        try:
+            parsed = json.loads(body.decode())
+        except json.JSONDecodeError:
+            parsed = {"error": body.decode()}
+        return status, parsed
 
     def delete(self, key: Ed25519PrivateKey, path: str) -> tuple[int, dict]:
         status, signing = self.signing(key, "web.delete", path=path)
