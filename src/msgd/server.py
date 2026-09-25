@@ -22,6 +22,7 @@ from msgd.crypto import (
     certificate_payload,
     make_certificate,
     normalize_file_manifest,
+    parse_certificate,
     payload_info,
     public_identity,
     request_payload,
