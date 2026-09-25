@@ -134,10 +134,8 @@ class SecretBox:
                 data = raw
         if len(data) != 32:
             raise OSError(f"invalid webhook secret key file: {self.path}")
-        try:
+        with suppress(OSError):
             os.chmod(self.path, 0o600)
-        except OSError:
-            pass
         return data
 
     def encrypt(self, webhook_id: str, secret: str) -> tuple[bytes, bytes]:
@@ -200,15 +198,11 @@ def _post_https(url: str, body: bytes, headers: dict[str, str], *, timeout: floa
             last_error = exc
         finally:
             if tls is not None:
-                try:
+                with suppress(OSError):
                     tls.close()
-                except OSError:
-                    pass
             elif sock is not None:
-                try:
+                with suppress(OSError):
                     sock.close()
-                except OSError:
-                    pass
     raise OSError(str(last_error or "webhook delivery failed"))
 
 
