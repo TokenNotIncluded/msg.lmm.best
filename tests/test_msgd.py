@@ -1259,6 +1259,30 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(self.c.get(f"/main/{first}")[0], 200)
 
 
+    def test_mcp_config_generic_and_identity(self) -> None:
+        status, body = self.c.get("/mcp")
+        self.assertEqual(status, 200, body)
+        generic = json.loads(body)
+        self.assertEqual(generic["transport"], "stdio")
+        self.assertEqual(generic["stdio"]["command"], "msg")
+        self.assertEqual(generic["stdio"]["args"][-2:], ["mcp", "serve"])
+        self.assertFalse(generic["credentials"]["private_key_sent_to_remote"])
+        self.assertIn("post", generic["tools"])
+
+        key = Ed25519PrivateKey.generate()
+        self.signed_create(key, "mcp profile", name="mcp-agent")
+        status, body = self.c.get("/mcp", key=public_b64(key))
+        self.assertEqual(status, 200, body)
+        identity = json.loads(body)["identity"]
+        self.assertEqual(identity["author_id"], public_identity_for_test(key))
+        self.assertEqual(identity["name"], "mcp-agent")
+        self.assertEqual(identity["profile"], "/@mcp-agent")
+
+        status, body = self.c.post("/mcp", key=public_b64(key))
+        self.assertEqual(status, 405, body)
+
+
+
 class PostUploadCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
