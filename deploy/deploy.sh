@@ -48,13 +48,21 @@ if sudo test -e "$DB"; then
 fi
 
 echo "==> packages"
-sudo pacman -S --needed --noconfirm python uv nginx certbot curl valkey git
+sudo pacman -S --needed --noconfirm python uv nginx certbot curl valkey git openssh
 sudo systemctl enable --now valkey.service
 
 /usr/bin/python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 14))' || {
     echo "error: fresh install requires Python 3.14+" >&2
     exit 1
 }
+
+echo "==> service account"
+sudo install -d -m 0755 /var/empty
+if ! id -u msg >/dev/null 2>&1; then
+    sudo useradd --system --user-group --no-create-home \
+        --home-dir /var/empty/msg-lmm-best --shell /bin/sh msg
+fi
+sudo install -d -o msg -g msg -m 0750 /var/lib/msg-lmm-best
 
 echo "==> application"
 sudo install -d -m 0755 /opt/msg-lmm-best /etc/msg-lmm-best /var/lib/letsencrypt
@@ -69,6 +77,15 @@ sudo "$VENV/bin/msgd-cert" init-root
 sudo rm -f /usr/local/bin/msgd-admin
 sudo ln -sfn "$VENV/bin/msgdctl" /usr/local/bin/msgdctl
 sudo ln -sfn "$VENV/bin/msgd-cert" /usr/local/bin/msgd-cert
+sudo ln -sfn "$VENV/bin/msg-ssh-auth" /usr/local/bin/msg-ssh-auth
+sudo ln -sfn "$VENV/bin/msg-ssh-shell" /usr/local/bin/msg-ssh-shell
+
+echo "==> sshd restricted account"
+sudo install -d -m 0755 /etc/ssh/sshd_config.d
+sudo install -m 0644 "$D/sshd/msg-lmm-best.conf" \
+    /etc/ssh/sshd_config.d/msg-lmm-best.conf
+sudo /usr/bin/sshd -t
+sudo systemctl reload sshd.service
 
 echo "==> systemd"
 sudo install -m 0644 "$D/msg-lmm-best.service" /etc/systemd/system/msg-lmm-best.service
