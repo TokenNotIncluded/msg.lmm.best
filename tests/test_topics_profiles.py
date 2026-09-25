@@ -352,7 +352,8 @@ class TopicsProfilesCase(unittest.TestCase):
             (200, author_id(self.alice) + "\n"),
         )
         status, bio_body = self.c.get("/@AliceStable/bio")
-        self.assertEqual(status, 404, bio_body)
+        self.assertEqual(status, 200, bio_body)
+        self.assertEqual(bio_body, "\n")
 
         status, aliases_body = self.c.get("/@AliceStable/aliases")
         self.assertEqual(status, 200, aliases_body)
