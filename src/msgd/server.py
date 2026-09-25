@@ -28,6 +28,8 @@ from msgd.crypto import (
     curve25519_public_key,
     make_certificate,
     normalize_file_manifest,
+    normalize_grant_scope,
+    parse_certificate,
     payload_info,
     public_identity,
     request_payload,
@@ -5949,9 +5951,13 @@ def _optional_positive_int(params: Params, key: str) -> int | None:
 def _grant_manifest(
     grants: dict[str, tuple[str, ...]],
 ) -> tuple[dict[str, object], ...]:
-    return tuple(
-        {"topic": topic, "actions": list(actions)} for topic, actions in sorted(grants.items())
-    )
+    result: list[dict[str, object]] = []
+    for scope, actions in sorted(grants.items()):
+        if scope == "*" or valid_board_name(scope):
+            result.append({"topic": scope, "actions": list(actions)})
+        else:
+            result.append({"scope": normalize_grant_scope(scope), "actions": list(actions)})
+    return tuple(result)
 
 
 def _policy_mask(
@@ -6053,19 +6059,67 @@ def _grants(value: str) -> dict[str, tuple[str, ...]]:
         raise StoreError("grants must be a JSON array", 400)
     grants: dict[str, tuple[str, ...]] = {}
     for item in raw:
-        if not isinstance(item, dict) or not isinstance(item.get("topic"), str):
+        if not isinstance(item, dict):
             raise StoreError("invalid grant", 400)
+        has_topic = isinstance(item.get("topic"), str)
+        has_scope = isinstance(item.get("scope"), str)
+        if has_topic == has_scope:
+            raise StoreError("grant requires exactly one of topic or scope", 400)
         actions = item.get("actions")
         if not isinstance(actions, list) or not all(isinstance(x, str) for x in actions):
             raise StoreError("invalid grant actions", 400)
-        normalized = tuple(sorted(set(actions)))
-        invalid = set(normalized) - ACTIONS
+        normalized_actions = tuple(sorted(set(actions)))
+        invalid = set(normalized_actions) - ACTIONS
         if invalid:
             raise StoreError(f"unknown grant actions: {sorted(invalid)}", 400)
-        if item["topic"] != "*" and any(action.startswith("web.") for action in normalized):
-            raise StoreError("web grants require topic='*'", 400)
-        grants[item["topic"]] = normalized
+        try:
+            scope = (
+                str(item["topic"])
+                if has_topic
+                else normalize_grant_scope(str(item["scope"]))
+            )
+            if has_topic:
+                normalize_grant_scope(scope, legacy_topic=True)
+        except SignatureError as exc:
+            raise StoreError(str(exc), 400) from exc
+        grants[scope] = normalized_actions
     return grants
+
+
+def _management_owner(store: Store, signer_id: str, raw: str | None) -> str:
+    if raw is None or not raw.strip() or raw.strip().lower() == "self":
+        return signer_id
+    value = raw.strip()
+    if value.startswith("@"):
+        value = value[1:]
+    if valid_author_id(value):
+        owner_id = value
+    else:
+        profile = store.profile_by_name(value)
+        if profile is None:
+            raise StoreError(f"target profile not found: {value}", 404)
+        owner_id = str(profile["author_id"])
+    if store.profile_by_author(owner_id) is None:
+        raise StoreError("target profile not found", 404)
+    return owner_id
+
+
+def _owner_payload_id(signer_id: str, owner_id: str) -> str | None:
+    return owner_id if owner_id != signer_id else None
+
+
+def _require_owner_capability(
+    store: Store,
+    signer_id: str,
+    owner_id: str,
+    resource: str,
+    action: str,
+) -> None:
+    if not store.owner_action_allowed(signer_id, owner_id, resource, action):
+        raise StoreError(
+            f"certificate does not grant {action} for {resource}:{owner_id}",
+            403,
+        )
 
 
 def _required(params: Params, key: str) -> str:
