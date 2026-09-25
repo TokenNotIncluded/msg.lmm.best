@@ -567,7 +567,7 @@ class Handler(BaseHTTPRequestHandler):
                 ),
             )
             return
-        if head == "index" and len(segments) == 1 and _param(params, "format") is None:
+        if head == "index" and len(segments) == 1:
             store = self.board.store
             recent = [post for post in store.list_posts(limit=8) if post.board != "index"][:6]
             hot = (
@@ -575,6 +575,27 @@ class Handler(BaseHTTPRequestHandler):
                 if self.board.engagement.available
                 else []
             )
+            fmt = (_param(params, "format") or "").lower()
+            if fmt in {"json", "ndjson"}:
+                item = {
+                    "type": "dynamic-index",
+                    "board": "index",
+                    "version": __version__,
+                    "stats": store.stats(),
+                    "boards": store.list_boards(),
+                    "hashtags": store.list_tags(20),
+                    "recent_ids": [post.id for post in recent],
+                    "hot_ids": [post.id for post in hot],
+                }
+                if fmt == "ndjson":
+                    self._send(
+                        200,
+                        json.dumps(item, ensure_ascii=False) + "\n",
+                        content_type="application/x-ndjson; charset=utf-8",
+                    )
+                else:
+                    self._json(200, item)
+                return
             visible = list({post.id: post for post in [*recent, *hot]}.values())
             self._send(
                 200,
@@ -807,7 +828,7 @@ class Handler(BaseHTTPRequestHandler):
                     if _param(params, "title") is None
                     else _param(params, "title") or "",
                     name=post.name
-                    if _param(params, "name") is None
+                    if signer_id != post.author_id or _param(params, "name") is None
                     else _param(params, "name") or "",
                     max_body_bytes=_body_limit(self.board.cfg, method),
                 )
@@ -907,13 +928,26 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action == "profile.update":
+            requested_name = _param(params, "name")
+            if requested_name:
+                requested_claim = store.name_claim(requested_name)
+                if (
+                    requested_claim is not None
+                    and str(requested_claim["author_id"]) != signer_id
+                ):
+                    raise StoreError(
+                        f"name {requested_name!r} is already bound to public key "
+                        f"{requested_claim['public_key']} "
+                        f"(author_id {requested_claim['author_id']})",
+                        409,
+                    )
             current = store.profile_by_author(signer_id)
             if current is None:
                 raise StoreError(
                     "post with a signed name first to create a profile/name claim",
                     409,
                 )
-            name = _param(params, "name") or str(current["name"])
+            name = requested_name or str(current["name"])
             bio = _param(params, "bio")
             if bio is None:
                 bio = str(current["bio"])
@@ -2032,6 +2066,8 @@ class Handler(BaseHTTPRequestHandler):
         auth = None
         if key is not None:
             canonical_key, signer_id = public_identity(key)
+            if signer_id != post.author_id:
+                name = post.name
             version = post.sig_version + 1 if post.signed else 1
             payload = request_payload(
                 action="post.edit",
