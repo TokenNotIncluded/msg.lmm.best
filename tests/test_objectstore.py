@@ -12,6 +12,7 @@ from pathlib import Path
 
 from msgd.config import Config
 from msgd.objectstore import GitObjectStore
+from msgd.search import parse_search_query
 from msgd.store import FileInput, Store
 
 
@@ -135,9 +136,7 @@ class HybridStoreTests(unittest.TestCase):
                 self.assertIn("packed", store.post_tags(post.id))
 
                 found, _ = store.search_posts(
-                    __import__("msgd.search", fromlist=["parse_search_query"]).parse_search_query(
-                        "after edit"
-                    ),
+                    parse_search_query("after edit"),
                     limit=20,
                 )
                 self.assertEqual([item.id for item in found], [post.id])
