@@ -14,8 +14,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from msgd.config import Config
 from msgd.gitrepos import RepoService
 from msgd.sshaccess import (
-    SSHKeyStore,
     SSH_PRESETS,
+    SSHKeyStore,
     _authorized_line,
     _repo_name_from_ssh_path,
     auth_main,
