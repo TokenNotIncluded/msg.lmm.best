@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from msgd.config import Config
+from msgd.exchange import ExchangeService
 from msgd.server import build_server
 from msgd.store import Store
 
@@ -1678,6 +1679,48 @@ class InboxCase(unittest.TestCase):
 
 
 class LegacyMigrationCase(unittest.TestCase):
+    def test_legacy_ack_receipts_gain_read_at_without_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "ack-legacy.db"
+            conn = sqlite3.connect(db)
+            conn.executescript(
+                """
+                CREATE TABLE inbox_receipts (
+                    subject_id TEXT NOT NULL,
+                    post_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    updated REAL NOT NULL,
+                    PRIMARY KEY(subject_id, post_id)
+                );
+                INSERT INTO inbox_receipts(subject_id, post_id, status, updated)
+                VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        7, 'completed', 123.5);
+                """
+            )
+            conn.close()
+
+            root = Ed25519PrivateKey.generate()
+            root_public = Path(tmp) / "root.pub"
+            root_public.write_text(public_b64(root) + "\n")
+            cfg = Config(database=str(db), root_public_key=str(root_public))
+            store = Store(cfg)
+            exchange = ExchangeService(cfg, store)
+            try:
+                check = sqlite3.connect(db)
+                columns = {
+                    row[1] for row in check.execute("PRAGMA table_info(inbox_receipts)")
+                }
+                row = check.execute(
+                    "SELECT read_at, public_key FROM inbox_receipts WHERE post_id = 7"
+                ).fetchone()
+                check.close()
+                self.assertIn("read_at", columns)
+                self.assertIn("public_key", columns)
+                self.assertEqual(row, (123.5, ""))
+            finally:
+                exchange.close()
+                store.close()
+
     def test_existing_mentions_are_indexed_on_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "v05.db"
