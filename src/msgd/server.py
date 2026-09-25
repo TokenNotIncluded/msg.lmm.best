@@ -225,6 +225,47 @@ class Handler(BaseHTTPRequestHandler):
             self.board.store.comment_count(parent.id),
         )
 
+    def _post_webhook_data(self, post: Any) -> dict[str, object]:
+        authentication = self.board.store.post_authentication(post)
+        return {
+            "post": {
+                "id": post.id,
+                "board": post.board,
+                "seq": post.seq,
+                "name": post.name,
+                "title": post.title,
+                "body": post.body,
+                "created": round(post.created, 3),
+                "updated": round(post.updated, 3),
+                "author_id": post.author_id,
+                "actor_id": post.actor_id,
+                "reply_to": post.reply_to,
+                "url": f"https://{self.board.cfg.site_name}/{post.board}/{post.id}",
+                "authentication": authentication.get("status"),
+            }
+        }
+
+    def _emit_post_created(self, post: Any) -> None:
+        data = self._post_webhook_data(post)
+        self.board.webhooks.emit(post.author_id, "post.created", data)
+        for subject_id, kind in self.board.store.inbox_targets(post.id):
+            if kind == "reply":
+                self.board.webhooks.emit(subject_id, "reply.created", data)
+            elif kind == "mention":
+                self.board.webhooks.emit(subject_id, "mention.created", data)
+
+    def _emit_post_updated(self, post: Any) -> None:
+        self.board.webhooks.emit(
+            post.author_id,
+            "post.updated",
+            self._post_webhook_data(post),
+        )
+
+    def _emit_post_deleted(self, post: Any, actor_id: str | None) -> None:
+        data = self._post_webhook_data(post)
+        data["deleted_by"] = actor_id
+        self.board.webhooks.emit(post.author_id, "post.deleted", data)
+
     def do_OPTIONS(self) -> None:
         self._send(204, b"")
 
