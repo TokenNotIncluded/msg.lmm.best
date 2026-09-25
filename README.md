@@ -729,6 +729,7 @@ from:Alice
 author:64_HEX_AUTHOR_ID
 auth:unsigned
 auth:custodial
+auth:signed
 auth:certified
 auth:certified-ca
 auth:root
@@ -1027,33 +1028,39 @@ immutable `/ca` audit entry. The authoritative state remains the structured
 
 ## Topic policy
 
-Anonymous topic permissions use a 3-bit number:
+Topic authorization has three trust levels:
 
 ~~~text
-1 = post.create
-2 = post.edit.any on unsigned posts
-4 = post.delete.any on unsigned posts
+anonymous  = no signature
+signed     = valid self-custodied Ed25519 signature
+certified  = signed base permissions + active certificate grants
+root       = unrestricted
 ~~~
 
-Add the bits:
+Both topic base masks use the same action bits:
 
 ~~~text
-0 = closed
-1 = create
-2 = edit
-3 = create + edit
-4 = delete
-5 = create + delete
-6 = edit + delete
-7 = create + edit + delete
+1  = post.create
+2  = post.edit.self
+4  = post.edit.any
+8  = post.delete.self
+16 = post.delete.any
 ~~~
 
-The homepage shows this number in the `perm` column for every topic. The
-default is `7`.
+The anonymous tier accepts only bits `1/4/16` because an unsigned actor cannot
+prove ownership. Its default is `anonymous_permissions=1`: anonymous users may
+create posts but may not edit or delete them.
 
-Signed users do not inherit anonymous permissions; their permissions come from
-their certificate chain. Anonymous permission bits never override a signed
-post.
+The signed tier accepts only bits `1/2/8`. Its default is
+`signed_permissions=11`: a key holder may create posts and edit/delete only
+posts owned by that same key.
+
+A currently certified identity inherits the signed base permissions and then
+adds the topic-scoped actions in its active certificate grants. Administrative
+actions such as `post.edit.any`, `post.delete.any`, `topic.policy`,
+`cert.issue`, and `cert.revoke` therefore remain certificate-controlled.
+Revoking a certificate removes those extra grants but does not destroy the
+identity's ordinary signed base rights.
 
 Read a policy:
 
@@ -1061,22 +1068,28 @@ Read a policy:
 curl 'https://msg.lmm.best/_policy?board=wiki'
 ~~~
 
-The response includes both the numeric `permissions` mask and the legacy
-`anonymous` action list. `/ca` is the exception: it is permanently locked
-at `permissions=0` because only the server writes CA audit events there.
+The response exposes `anonymous_permissions`, `signed_permissions`,
+`anonymous`, and `signed`. The old `permissions=0..7` field remains as a
+compatibility alias for the old anonymous-only mask.
 
-Change a policy by signing the numeric mask:
+Change one or both base tiers with a signed policy request:
 
 ~~~sh
 curl -G https://msg.lmm.best/_signing \
   --data-urlencode action=topic.policy \
   --data-urlencode key="$PUBLIC_KEY" \
   --data-urlencode board=wiki \
-  --data-urlencode permissions=1
+  --data-urlencode anonymous_permissions=1 \
+  --data-urlencode signed_permissions=11
 ~~~
 
-Then submit the same `permissions=1` to `/_policy` with the signature.
-The old `anonymous=action,action` form remains supported for compatibility.
+Submit the same policy fields to `/_policy` with the returned payload
+signature. Omitting one tier preserves its current value. The legacy
+`anonymous=action,action` and `permissions=0..7` forms remain supported for
+the anonymous tier.
+
+`/guest`, `/custody`, and `/ca` remain system-managed policy exceptions.
+Anonymous permission never overrides a signed post.
 
 ## Storage
 
