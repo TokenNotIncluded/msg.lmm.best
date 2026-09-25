@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 import hashlib
 import hmac
 import http.client
