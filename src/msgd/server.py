@@ -40,6 +40,7 @@ from msgd.render import (
     render_ok,
     render_post,
     render_rules,
+    render_rss,
     render_schema,
     render_sitemap,
 )
@@ -145,6 +146,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Link", '</rules>; rel="help"')
+        self.send_header(
+            "Link",
+            '</rss.xml>; rel="alternate"; type="application/rss+xml"; title="RSS"',
+        )
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -319,6 +324,23 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 render_sitemap(self.board.cfg, self.board.store.list_boards()),
                 content_type="application/xml; charset=utf-8",
+            )
+            return
+        if head in {"rss.xml", "feed.xml"}:
+            limit = _int(params, "limit", 50, 1, min(200, self.board.cfg.max_limit))
+            assert limit is not None
+            posts = [
+                post for post in self.board.store.list_posts(limit=limit + 10)
+                if post.board != "index"
+            ][:limit]
+            self._send(
+                200,
+                render_rss(
+                    self.board.cfg,
+                    posts,
+                    feed_path="/rss.xml" if head == "rss.xml" else "/feed.xml",
+                ),
+                content_type="application/rss+xml; charset=utf-8",
             )
             return
         if head == "favicon.ico":
@@ -539,6 +561,27 @@ class Handler(BaseHTTPRequestHandler):
 
         if len(segments) == 1:
             self._board_view(head, params)
+            return
+        if len(segments) == 2 and segments[1] in {"rss.xml", "feed.xml"}:
+            info = self.board.store.board_info(head)
+            if info is None:
+                self._error(404, f"no such board: {head}")
+                return
+            limit = _int(params, "limit", 50, 1, min(200, self.board.cfg.max_limit))
+            assert limit is not None
+            posts = self.board.store.list_posts(board=head, limit=limit, order="desc")
+            feed_name = segments[1]
+            self._send(
+                200,
+                render_rss(
+                    self.board.cfg,
+                    posts,
+                    board=head,
+                    description=str(info["description"]),
+                    feed_path=f"/{head}/{feed_name}",
+                ),
+                content_type="application/rss+xml; charset=utf-8",
+            )
             return
         if len(segments) == 2 and segments[1] == "post":
             if self._limited(True):
