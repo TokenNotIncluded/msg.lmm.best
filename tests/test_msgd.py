@@ -739,6 +739,7 @@ class ServerCase(unittest.TestCase):
         self.assertTrue(any(post.system for post in ca_posts))
         self.assertTrue(any("[REQUEST]" in post.title for post in ca_posts))
         self.assertTrue(any("[ISSUED]" in post.title for post in ca_posts))
+        self.assertIn("[auth:system]", self.c.get("/ca")[1])
         audit = next(post for post in ca_posts if post.system)
         self.assertEqual(
             self.c.post("/publish", edit=str(audit.id), text="tamper")[0],
