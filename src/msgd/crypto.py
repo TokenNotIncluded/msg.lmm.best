@@ -29,6 +29,7 @@ ACTIONS = frozenset(
         "post.delete.self",
         "post.delete.any",
         "topic.policy",
+        "topic.template",
         "profile.update",
         "ssh.list",
         "ssh.manage",
@@ -210,6 +211,7 @@ def request_payload(
     body: str = "",
     anonymous: tuple[str, ...] | None = None,
     signed: tuple[str, ...] | None = None,
+    topic_template: str = "",
     serial: str = "",
     files: tuple[dict[str, object], ...] = (),
     reply_to: int | None = None,
@@ -300,6 +302,11 @@ def request_payload(
             fields.append(("anonymous", ",".join(sorted(anonymous))))
         if signed is not None:
             fields.append(("signed", ",".join(sorted(signed))))
+    elif action == "topic.template":
+        fields += [
+            ("board", board),
+            ("template", topic_template),
+        ]
     elif action == "cert.revoke":
         if not SERIAL_RE.fullmatch(serial):
             raise SignatureError("invalid certificate serial")
