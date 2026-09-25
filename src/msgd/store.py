@@ -108,6 +108,7 @@ RESERVED_BOARDS = {
     "key",
     "_profile",
     "latest",
+    "like",
     "llms.txt",
     "robots.txt",
     "sitemap.xml",
@@ -337,6 +338,14 @@ CREATE TABLE IF NOT EXISTS post_tags (
     PRIMARY KEY(post_id, tag)
 );
 CREATE INDEX IF NOT EXISTS post_tags_tag_post ON post_tags(tag, post_id DESC);
+
+CREATE TABLE IF NOT EXISTS post_likes (
+    post_id   INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    author_id TEXT NOT NULL,
+    created   REAL NOT NULL,
+    PRIMARY KEY(post_id, author_id)
+);
+CREATE INDEX IF NOT EXISTS post_likes_author_post ON post_likes(author_id, post_id DESC);
 
 CREATE TABLE IF NOT EXISTS webhooks (
     id                TEXT PRIMARY KEY,
@@ -723,6 +732,15 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS post_tags_tag_post
                 ON post_tags(tag, post_id DESC);
+
+            CREATE TABLE IF NOT EXISTS post_likes (
+                post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+                author_id TEXT NOT NULL,
+                created REAL NOT NULL,
+                PRIMARY KEY(post_id, author_id)
+            );
+            CREATE INDEX IF NOT EXISTS post_likes_author_post
+                ON post_likes(author_id, post_id DESC);
 
             CREATE TABLE IF NOT EXISTS webhooks (
                 id TEXT PRIMARY KEY,
@@ -3014,6 +3032,53 @@ class Store:
                 """
             ).fetchall()
         return [(int(row["id"]), str(row["board"]), int(row["comments"])) for row in rows]
+
+    def like_count(self, post_id: int) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM post_likes WHERE post_id = ?",
+                (post_id,),
+            ).fetchone()
+        return int(row["n"] if row is not None else 0)
+
+    def like_counts(self) -> list[tuple[int, str, int]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT p.id, p.board, COUNT(l.author_id) AS likes
+                  FROM posts p
+                  LEFT JOIN post_likes l ON l.post_id = p.id
+                 GROUP BY p.id, p.board
+                 ORDER BY p.id
+                """
+            ).fetchall()
+        return [(int(row["id"]), str(row["board"]), int(row["likes"])) for row in rows]
+
+    def set_post_like(self, post_id: int, author_id: str, liked: bool) -> tuple[bool, int]:
+        if not valid_author_id(author_id):
+            raise StoreError("invalid author id", 400)
+        with self._lock, self._conn:
+            exists = self._conn.execute(
+                "SELECT 1 FROM posts WHERE id = ?",
+                (post_id,),
+            ).fetchone()
+            if exists is None:
+                raise StoreError("post not found", 404)
+            if liked:
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO post_likes(post_id, author_id, created) VALUES (?, ?, ?)",
+                    (post_id, author_id, time.time()),
+                )
+            else:
+                cur = self._conn.execute(
+                    "DELETE FROM post_likes WHERE post_id = ? AND author_id = ?",
+                    (post_id, author_id),
+                )
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM post_likes WHERE post_id = ?",
+                (post_id,),
+            ).fetchone()
+        return cur.rowcount > 0, int(row["n"] if row is not None else 0)
 
     def posts_by_ids(self, post_ids: list[int] | tuple[int, ...]) -> list[Post]:
         if not post_ids:
