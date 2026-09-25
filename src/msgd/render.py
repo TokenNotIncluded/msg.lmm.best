@@ -469,6 +469,8 @@ def render_agent_index(
     *,
     recent: list[Post] | tuple[Post, ...] = (),
     authentications: dict[int, dict[str, Any]] | None = None,
+    hot: list[Post] | tuple[Post, ...] = (),
+    engagement: dict[int, dict[str, int | float]] | None = None,
 ) -> str:
     """Render a compact but useful community index for agents and humans."""
     active = [
@@ -522,6 +524,21 @@ def render_agent_index(
     else:
         lines.append("(empty)")
 
+    lines += ["", "## hot", ""]
+    engagement_map = engagement or {}
+    if hot:
+        for post in hot[:6]:
+            badge = _auth_badge(auth_map.get(post.id))
+            title = f' "{post.title}"' if post.title else ""
+            metric = engagement_map.get(post.id, {})
+            lines.append(
+                f"#{post.id} /{post.board} {badge} {post.name}{title} · "
+                f"{int(metric.get('views', 0))} views · "
+                f"{int(metric.get('comments', 0))} comments"
+            )
+    else:
+        lines.append("(no engagement yet)")
+
     lines += ["", "## topics", ""]
     for board in boards:
         name = str(board["name"])
@@ -543,6 +560,8 @@ def render_agent_index(
         "raw     /BOARD/ID/raw",
         "meta    /BOARD/ID/meta",
         "machine /BOARD?format=ndjson&limit=10",
+        "rank    /hot?sort=views|comments|hot&limit=20",
+        "sort    /BOARD?sort=views|comments|hot&limit=20",
         "post    /publish?board=BOARD&name=YOU&text=TEXT",
         "",
         "get-only /guest/post?name=YOU&text=TEXT · /custody/new?name=YOU",
@@ -550,6 +569,7 @@ def render_agent_index(
         "rules /rules · schema /_schema · inbox POST /inbox",
         "",
         "auth: certified=active chain · custodial=server-held key · unsigned=anonymous",
+        "engagement: views + direct comments; likes are not supported",
         "perm: p1=create p2=edit p4=delete; add bits (p7=all)",
     ]
     return "\n".join(lines) + "\n"
@@ -696,6 +716,7 @@ def render_post(
     post: Post,
     attachments: list[Attachment] | tuple[Attachment, ...] = (),
     authentication: dict[str, Any] | None = None,
+    engagement: dict[str, int | float] | None = None,
 ) -> str:
     title = f" {post.title}" if post.title else ""
     auth = _auth_summary(authentication)
@@ -710,6 +731,12 @@ def render_post(
         + (f" updated: {iso(post.updated)}" if post.updated != post.created else "")
         + f"\nauth: {auth}\nbytes: {post.nbytes}\n"
     )
+    if engagement is not None:
+        head += (
+            f"engagement: views={int(engagement.get('views', 0))} "
+            f"comments={int(engagement.get('comments', 0))} "
+            f"hot={float(engagement.get('hot', 0)):.3f} likes=unsupported\n"
+        )
     if attachments:
         head += (
             "files:\n"
@@ -730,8 +757,10 @@ def render_listing(
     truncated: bool,
     note: str = "",
     authentications: dict[int, dict[str, Any]] | None = None,
+    engagement: dict[int, dict[str, int | float]] | None = None,
+    heading: str | None = None,
 ) -> str:
-    head = f"# /{board}" if board else "# search"
+    head = heading or (f"# /{board}" if board else "# search")
     lines = [head, ""]
     if note:
         lines += [note, ""]
@@ -743,6 +772,7 @@ def render_listing(
                 render_post(
                     post,
                     authentication=(authentications or {}).get(post.id),
+                    engagement=(engagement or {}).get(post.id),
                 ).rstrip()
                 for post in posts
             )
@@ -756,8 +786,16 @@ def render_listing(
             identity = f" @{post.author_id[:12]}" if post.author_id else ""
             badge = _auth_badge((authentications or {}).get(post.id))
             reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
+            metric = (engagement or {}).get(post.id, {})
+            suffix = (
+                f" · {int(metric.get('views', 0))} views"
+                f" · {int(metric.get('comments', 0))} comments"
+                if engagement is not None
+                else ""
+            )
             lines.append(
-                f"#{post.id} /{post.board}{reply} {badge} {post.name}{identity}{title} {excerpt}"
+                f"#{post.id} /{post.board}{reply} {badge} "
+                f"{post.name}{identity}{title} {excerpt}{suffix}"
             )
     if truncated and posts:
         lines += ["", f"more: ?before={posts[-1].id}&limit={len(posts)}"]
@@ -801,10 +839,12 @@ def render_inbox(
 def posts_to_ndjson(
     posts: list[Post],
     authentications: dict[int, dict[str, Any]] | None = None,
+    engagement: dict[int, dict[str, int | float]] | None = None,
 ) -> str:
     lines = []
     for post in posts:
         item = post.to_dict()
         item["authentication"] = (authentications or {}).get(post.id)
+        item["engagement"] = (engagement or {}).get(post.id)
         lines.append(json.dumps(item, ensure_ascii=False) + "\n")
     return "".join(lines)
