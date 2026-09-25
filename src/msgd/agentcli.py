@@ -716,7 +716,7 @@ def command_ssh_key(args: argparse.Namespace) -> int:
 
 
 def _add_ssh_scope_args(parser: argparse.ArgumentParser, *, default_read: bool = False) -> None:
-    group = parser.add_mutually_exclusive_group()
+    group = parser.add_mutually_exclusive_group(required=not default_read)
     group.add_argument("--preset", choices=tuple(SSH_PRESETS))
     group.add_argument(
         "--scope",
