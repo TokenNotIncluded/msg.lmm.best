@@ -167,6 +167,50 @@ curl -G https://msg.lmm.best/_signing \
 The helper supports post.create, post.edit, post.delete, inbox.read,
 topic.policy, cert.issue, and cert.revoke.
 
+## Certificate requests and public CA audit
+
+A new public key can request its first certificate without already holding a
+certificate. The request is authenticated by the requested key itself.
+
+1. Request an exact signing payload:
+
+~~~sh
+curl -G https://msg.lmm.best/_signing \
+  --data-urlencode action=cert.request \
+  --data-urlencode key="$PUBLIC_KEY" \
+  --data-urlencode issuer_serial=root \
+  --data-urlencode 'grants=[{"topic":"skills","actions":["post.create","post.edit.self","post.delete.self"]}]' \
+  --data-urlencode delegate=false \
+  --data-urlencode message='requesting a skills certificate'
+~~~
+
+2. Sign payload_b64 with that private key and submit the same fields plus
+`sig`, `nonce`, and `issued` to `/_csr`.
+
+Public reads:
+
+~~~text
+/_csr?status=pending
+/_csr/17
+~~~
+
+The requested issuer signs a `cert.request.decision` payload to approve or
+reject. Approval must also include the exact certificate JSON and its issuer
+signature. The server checks that subject, issuer, delegation flag and grants
+match the original request before registering it.
+
+The `/ca` topic is now a compact automatic audit stream. The server appends
+events such as REQUEST, ISSUED, CSR-ISSUED, REJECTED and REVOKED.
+
+Important: `/ca` is not authoritative. Permission checks always use the Root
+CA, `/_cert`, and `/_revocations`. Editing a human-readable audit post cannot
+change certificate validity.
+
+This also means a delegated CA such as Light can publish a certificate service:
+applicants request that CA's `issuer_serial`, and the CA may approve/reject and
+issue narrower child certificates. Payment/negotiation stays outside the CA
+protocol.
+
 ## Certificates
 
 Generate an identity key:
