@@ -50,6 +50,7 @@ Server-rendered post markers are authoritative metadata, not user content:
 
  [auth:unsigned]          no signed identity
  [auth:system]            server-managed immutable state
+ [auth:custodial]         server holds the Ed25519 key; lower assurance
  [auth:certified]         current actor has an active certificate chain to Root
  [auth:certified-ca]      current actor is an active delegated CA
  [auth:root]              current actor is the Root identity
