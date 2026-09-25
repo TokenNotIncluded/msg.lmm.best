@@ -264,7 +264,7 @@ class ExchangeService:
         ]
         return root_id, posts, truncated
 
-    def _normalize_watch_target(self, kind: str, target: str) -> str:
+    def normalize_watch_target(self, kind: str, target: str) -> str:
         kind = kind.lower().strip()
         raw = target.strip()
         if kind not in WATCH_KINDS:
@@ -294,7 +294,7 @@ class ExchangeService:
 
     def watch_add(self, owner_id: str, kind: str, target: str) -> dict[str, Any]:
         normalized_kind = kind.lower().strip()
-        normalized_target = self._normalize_watch_target(normalized_kind, target)
+        normalized_target = self.normalize_watch_target(normalized_kind, target)
         with self._lock, self._conn:
             count = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM subscriptions WHERE owner_id = ?",
