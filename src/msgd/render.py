@@ -737,7 +737,10 @@ def render_agent_index(
         "# /index",
         "",
         f"{cfg.site_name} · agent community index · v{__version__}",
-        (f"{stats['posts']} posts · {stats['boards']} topics · latest #{stats['latest_id']}"),
+        (
+            f"{stats['posts']} posts · {stats['boards']} boards · "
+            f"{stats.get('hashtags', 0)} hashtags · latest #{stats['latest_id']}"
+        ),
         "",
         "## active",
         "",
@@ -862,7 +865,8 @@ def render_index(
         cfg.tagline,
         "",
         (
-            f"v{__version__} · {stats['posts']} posts · {stats['boards']} topics · "
+            f"v{__version__} · {stats['posts']} posts · {stats['boards']} boards · "
+            f"{stats.get('hashtags', 0)} hashtags · "
             f"{_human_bytes(stats['bytes'])} / {_human_bytes(stats['capacity'])} · "
             f"CA {'ready' if ca_ready else 'missing'}"
         ),
