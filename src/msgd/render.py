@@ -1707,9 +1707,7 @@ def render_files_listing(
         uploader = item.get("uploader") or {}
         uploader_name = str(uploader.get("name") or "anonymous")
         uploader_id = uploader.get("author_id")
-        uploader_text = (
-            f"{uploader_name} ({uploader_id})" if uploader_id else uploader_name
-        )
+        uploader_text = f"{uploader_name} ({uploader_id})" if uploader_id else uploader_name
         lines.append(
             f"#{item['id']} {item['name']} "
             f"bytes={item['bytes']} downloads={item['downloads']} "
