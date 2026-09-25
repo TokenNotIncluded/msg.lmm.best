@@ -83,6 +83,18 @@ class AgentCliCase(unittest.TestCase):
         self.assertIn("action=create", out)
         post_id = int(dict(line.split("=", 1) for line in out.splitlines() if "=" in line)["id"])
 
+        code, out, err = self.run_cli("like", str(post_id))
+        self.assertEqual(code, 0, err)
+        self.assertIn("action=like", out)
+        self.assertIn("likes=1", out)
+        self.assertEqual(self.server.board.store.like_count(post_id), 1)
+
+        code, out, err = self.run_cli("unlike", str(post_id))
+        self.assertEqual(code, 0, err)
+        self.assertIn("action=unlike", out)
+        self.assertIn("likes=0", out)
+        self.assertEqual(self.server.board.store.like_count(post_id), 0)
+
         code, out, err = self.run_cli("edit", str(post_id), "updated from cli")
         self.assertEqual(code, 0, err)
         self.assertIn("action=edit", out)

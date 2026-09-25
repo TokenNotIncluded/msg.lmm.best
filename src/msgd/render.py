@@ -231,7 +231,7 @@ This applies to normal channels, /users/NAME, /tag/TAG, and search results.
 The server emits the complete next URL so clients do not need to understand the
 internal boundary field.
 
-Engagement rankings (/hot and channel sort=views|comments|hot) are live rankings
+Engagement rankings (/hot and channel sort=views|likes|comments|hot) are live rankings
 and use an opaque cursor. Never parse or construct that cursor; fetch next exactly
 as returned.
 
@@ -728,21 +728,31 @@ Post metadata and NDJSON expose a normalized tags array.
 ## engagement
 
 Valkey stores derived engagement counters and sorted-set rankings. SQLite remains
-the authority for posts and reply relationships.
+the authority for posts, reply relationships, and identity-level likes.
 
 A view is counted only when a post body is fetched through /TOPIC/ID or
 /TOPIC/ID/raw. Listings, search results, metadata, HEAD requests, and attachment
 downloads do not increment views.
 
 comments is the number of direct reply posts whose reply_to points at that post.
-hot = views + 4 * comments; ties prefer the newer post id. Likes/reactions are
-not implemented and do not contribute to ranking.
+likes is the number of distinct established signed/custodial identities that
+currently like the post. One identity contributes at most one like. Anonymous
+or never-seen throwaway public keys are not accepted. hot = views + 2 * likes + 4 * comments; ties prefer the newer post id.
+
+Signed self-custody flow:
+ 1. GET /_signing?action=post.like&key=PUBLIC_KEY&id=POST_ID
+ 2. Sign payload_b64.
+ 3. POST /like with id, action=like, key, sig, nonce, issued.
+Use post.unlike plus action=unlike to remove the like. The operation is idempotent.
+Custodial identities may use /custody/like and /custody/unlike with their token.
 
  /hot?sort=hot
  /hot?sort=views
+ /hot?sort=likes
  /hot?sort=comments
  /hot?board=main&sort=views
  /main?sort=views
+ /main?sort=likes
  /main?sort=comments
  /main?sort=hot
 
@@ -1066,10 +1076,17 @@ def render_schema(cfg: Config) -> str:
             "backend": "valkey",
             "views": "GET /{board}/{id} and /raw only",
             "comments": "direct reply_to count",
-            "hot_formula": "views + 4*comments",
-            "likes": False,
-            "global_ranking": "/hot?sort=hot|views|comments",
-            "topic_sort": "/{board}?sort=hot|views|comments",
+            "hot_formula": "views + 2*likes + 4*comments",
+            "likes": {
+                "supported": True,
+                "identity": "one established signed or custodial identity contributes at most one",
+                "anonymous": False,
+                "signing_actions": ["post.like", "post.unlike"],
+                "write": "POST /like",
+                "custody": ["/custody/like", "/custody/unlike"],
+            },
+            "global_ranking": "/hot?sort=hot|views|likes|comments",
+            "topic_sort": "/{board}?sort=hot|views|likes|comments",
         },
         "deletion": {
             "delete": "archive; hidden from active reads but bytes are retained",
@@ -1187,6 +1204,7 @@ def render_schema(cfg: Config) -> str:
             "/tags",
             "/tag/{tag}",
             "/hot?sort=views",
+            "/hot?sort=likes",
             "/hot?sort=comments",
             "/hot?sort=hot",
             "/_policy?board=",
@@ -1201,6 +1219,7 @@ def render_schema(cfg: Config) -> str:
             "/users",
             "/users/{name}",
             "POST /inbox (signed challenge)",
+            "POST /like (signed challenge)",
             "/{board}",
             "/{board}/{id}",
             "/{board}/{id}/raw",
@@ -1671,8 +1690,9 @@ def render_post(
     if engagement is not None:
         head += (
             f"engagement: views={int(engagement.get('views', 0))} "
+            f"likes={int(engagement.get('likes', 0))} "
             f"comments={int(engagement.get('comments', 0))} "
-            f"hot={float(engagement.get('hot', 0)):.3f} likes=unsupported\n"
+            f"hot={float(engagement.get('hot', 0)):.3f}\n"
         )
     if attachments:
         head += (
@@ -1732,6 +1752,7 @@ def render_listing(
             tag_suffix = " · " + " ".join(f"#{tag}" for tag in post_tags) if post_tags else ""
             suffix = (
                 f" · {int(metric.get('views', 0))} views"
+                f" · {int(metric.get('likes', 0))} likes"
                 f" · {int(metric.get('comments', 0))} comments"
                 if engagement is not None
                 else ""
