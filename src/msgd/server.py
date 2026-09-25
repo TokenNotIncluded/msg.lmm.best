@@ -1920,14 +1920,28 @@ class Handler(BaseHTTPRequestHandler):
         sort = (_param(params, "sort") or "new").lower()
         if sort not in {"new", "newest", "desc", "old", "oldest", "asc"}:
             raise StoreError("user post sort must be new or old", 400)
+        if _param(params, "cursor"):
+            raise StoreError("user time streams use server-returned before/since links", 400)
         order = "asc" if sort in {"old", "oldest", "asc"} else "desc"
         profile, posts = self.board.store.posts_by_username(
             username,
+            since=_int(params, "since", None, 0, None),
+            before=_int(params, "before", None, 0, None),
             limit=limit + 1,
             order=order,
         )
         truncated = len(posts) > limit
         posts = posts[:limit]
+        next_url = _next_time_url(
+            f"/users/{quote(str(profile['name']), safe='')}",
+            params,
+            posts,
+            limit=limit,
+            order=order,
+            has_more=truncated,
+        )
+        page_direction = "newer" if order == "asc" else "older"
+        page = _page_meta(posts, next_url=next_url, direction=page_direction)
         authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
         tags = self.board.store.tags_for_posts([post.id for post in posts])
@@ -1947,12 +1961,13 @@ class Handler(BaseHTTPRequestHandler):
                             }
                             for post in posts
                         ],
+                        "page": page,
                     },
                 )
             else:
                 self._send(
                     200,
-                    posts_to_ndjson(posts, authentications, engagement, tags),
+                    posts_to_ndjson(posts, authentications, engagement, tags, page),
                     content_type="application/x-ndjson; charset=utf-8",
                 )
             return
@@ -1964,6 +1979,8 @@ class Handler(BaseHTTPRequestHandler):
                 posts=posts,
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=truncated,
+                next_url=next_url,
+                page_direction=page_direction,
                 note=(
                     f"signed user @{profile['name']} · "
                     f"author_id={profile['author_id']} · profile=/@{profile['name']}"
@@ -2003,10 +2020,28 @@ class Handler(BaseHTTPRequestHandler):
         sort = (_param(params, "sort") or "new").lower()
         if sort not in {"new", "newest", "desc", "old", "oldest", "asc"}:
             raise StoreError("tag sort must be new or old", 400)
+        if _param(params, "cursor"):
+            raise StoreError("tag time streams use server-returned before/since links", 400)
         order = "asc" if sort in {"old", "oldest", "asc"} else "desc"
-        posts = self.board.store.posts_by_tag(normalized, limit=limit + 1, order=order)
+        posts = self.board.store.posts_by_tag(
+            normalized,
+            since=_int(params, "since", None, 0, None),
+            before=_int(params, "before", None, 0, None),
+            limit=limit + 1,
+            order=order,
+        )
         truncated = len(posts) > limit
         posts = posts[:limit]
+        next_url = _next_time_url(
+            f"/tag/{quote(normalized, safe='')}",
+            params,
+            posts,
+            limit=limit,
+            order=order,
+            has_more=truncated,
+        )
+        page_direction = "newer" if order == "asc" else "older"
+        page = _page_meta(posts, next_url=next_url, direction=page_direction)
         authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
         tags = self.board.store.tags_for_posts([post.id for post in posts])
@@ -2014,7 +2049,7 @@ class Handler(BaseHTTPRequestHandler):
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(posts, authentications, engagement, tags),
+                posts_to_ndjson(posts, authentications, engagement, tags, page),
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
@@ -2026,6 +2061,8 @@ class Handler(BaseHTTPRequestHandler):
                 posts=posts,
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=truncated,
+                next_url=next_url,
+                page_direction=page_direction,
                 note=(
                     f"hashtag #{normalized} · {int(info['posts'])} posts · "
                     f"{int(info['boards'])} boards"
