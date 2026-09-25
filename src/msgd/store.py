@@ -10,10 +10,12 @@ import secrets
 import sqlite3
 import threading
 import time
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -33,9 +35,11 @@ from msgd.crypto import (
 )
 from msgd.search import SearchSpec
 
-BOARD_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+BOARD_RE = re.compile(r"^[a-z][a-z0-9]{1,23}$")
 AUTHOR_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 MENTION_RE = re.compile(r"(?<![A-Za-z0-9._-])@([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?![A-Za-z0-9._-])")
+HASHTAG_RE = re.compile(r"(?<![\w/#])#([\w][\w-]{0,31})(?![\w-])", re.UNICODE)
+MAX_TAGS_PER_POST = 16
 
 ANONYMOUS_PERMISSION_BITS = {
     "post.create": 1,
@@ -58,6 +62,26 @@ def anonymous_actions(mask: int) -> tuple[str, ...]:
 
 
 RESERVED_BOARDS = {
+    "admin",
+    "api",
+    "assets",
+    "auth",
+    "create",
+    "delete",
+    "edit",
+    "feed",
+    "health",
+    "help",
+    "new",
+    "null",
+    "profile",
+    "root",
+    "search",
+    "settings",
+    "static",
+    "system",
+    "undefined",
+    "webhook",
     "rules",
     "_rules",
     "_help",
@@ -65,6 +89,8 @@ RESERVED_BOARDS = {
     "_health",
     "_search",
     "hot",
+    "tags",
+    "tag",
     "_signing",
     "_ca",
     "_cert",
@@ -74,8 +100,10 @@ RESERVED_BOARDS = {
     "_revocations",
     "publish",
     "inbox",
+    "index",
     "file",
     "key",
+    "_profile",
     "llms.txt",
     "robots.txt",
     "sitemap.xml",
@@ -184,6 +212,29 @@ CREATE TABLE IF NOT EXISTS identity_names (
 CREATE INDEX IF NOT EXISTS identity_names_author_last
     ON identity_names(author_id, last_seen DESC);
 
+CREATE TABLE IF NOT EXISTS name_claims (
+    name_key        TEXT PRIMARY KEY,
+    display_name    TEXT NOT NULL,
+    author_id       TEXT NOT NULL,
+    public_key      TEXT NOT NULL,
+    claim_post_id   INTEGER REFERENCES posts(id) ON DELETE SET NULL,
+    claim_signature TEXT NOT NULL DEFAULT '',
+    claimed         REAL NOT NULL,
+    last_used       REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS name_claims_author ON name_claims(author_id, claimed);
+
+CREATE TABLE IF NOT EXISTS profiles (
+    author_id         TEXT PRIMARY KEY,
+    primary_name_key  TEXT NOT NULL,
+    bio               TEXT NOT NULL DEFAULT '',
+    version           INTEGER NOT NULL DEFAULT 0,
+    payload_b64       TEXT NOT NULL DEFAULT '',
+    signature         TEXT NOT NULL DEFAULT '',
+    updated           REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS profiles_name ON profiles(primary_name_key);
+
 CREATE TABLE IF NOT EXISTS revocations (
     serial     TEXT PRIMARY KEY REFERENCES certificates(serial) ON DELETE CASCADE,
     revoked_at REAL NOT NULL,
@@ -226,6 +277,13 @@ CREATE TABLE IF NOT EXISTS inbox_events (
 );
 CREATE INDEX IF NOT EXISTS inbox_subject_post
     ON inbox_events(subject_id, post_id);
+
+CREATE TABLE IF NOT EXISTS post_tags (
+    post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    tag     TEXT NOT NULL,
+    PRIMARY KEY(post_id, tag)
+);
+CREATE INDEX IF NOT EXISTS post_tags_tag_post ON post_tags(tag, post_id DESC);
 
 CREATE TABLE IF NOT EXISTS webhooks (
     id                TEXT PRIMARY KEY,
@@ -378,6 +436,20 @@ def valid_board_name(name: str) -> bool:
     return bool(BOARD_RE.fullmatch(name)) and name not in RESERVED_BOARDS
 
 
+def board_name_error(name: str) -> str:
+    if name != name.lower():
+        return "channel name must be lowercase"
+    if len(name) < 2 or len(name) > 24:
+        return "channel name must be 2..24 characters"
+    if not name or not ("a" <= name[0] <= "z"):
+        return "channel name must start with a lowercase ASCII letter"
+    if any(char not in "abcdefghijklmnopqrstuvwxyz0123456789" for char in name):
+        return "channel name may contain only lowercase ASCII letters and digits"
+    if name in RESERVED_BOARDS:
+        return "channel name is reserved"
+    return "invalid channel name"
+
+
 def valid_author_id(value: str) -> bool:
     return bool(AUTHOR_ID_RE.fullmatch(value))
 
@@ -403,6 +475,18 @@ class Store:
                 ).fetchone()
                 is not None
             )
+            had_tags = (
+                self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='post_tags'"
+                ).fetchone()
+                is not None
+            )
+            had_claims = (
+                self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='name_claims'"
+                ).fetchone()
+                is not None
+            )
             self._conn.executescript(TABLES)
             self._ensure_schema()
             for name, description in DEFAULT_BOARDS.items():
@@ -412,8 +496,11 @@ class Store:
                     "UPDATE boards SET description = ? WHERE name = ?",
                     (DEFAULT_BOARDS[name], name),
                 )
-            if not had_inbox:
+            self._migrate_identity_names()
+            if not had_inbox or not had_claims:
                 self._rebuild_inbox()
+            if not had_tags:
+                self._rebuild_tags()
 
     def close(self) -> None:
         with self._lock:
@@ -490,6 +577,29 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS identity_names_author_last
                 ON identity_names(author_id, last_seen DESC);
+            CREATE TABLE IF NOT EXISTS name_claims (
+                name_key TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                author_id TEXT NOT NULL,
+                public_key TEXT NOT NULL,
+                claim_post_id INTEGER REFERENCES posts(id) ON DELETE SET NULL,
+                claim_signature TEXT NOT NULL DEFAULT '',
+                claimed REAL NOT NULL,
+                last_used REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS name_claims_author
+                ON name_claims(author_id, claimed);
+            CREATE TABLE IF NOT EXISTS profiles (
+                author_id TEXT PRIMARY KEY,
+                primary_name_key TEXT NOT NULL,
+                bio TEXT NOT NULL DEFAULT '',
+                version INTEGER NOT NULL DEFAULT 0,
+                payload_b64 TEXT NOT NULL DEFAULT '',
+                signature TEXT NOT NULL DEFAULT '',
+                updated REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS profiles_name
+                ON profiles(primary_name_key);
             CREATE TABLE IF NOT EXISTS revocations (
                 serial TEXT PRIMARY KEY REFERENCES certificates(serial) ON DELETE CASCADE,
                 revoked_at REAL NOT NULL,
@@ -529,6 +639,14 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS inbox_subject_post
                 ON inbox_events(subject_id, post_id);
+
+            CREATE TABLE IF NOT EXISTS post_tags (
+                post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+                tag TEXT NOT NULL,
+                PRIMARY KEY(post_id, tag)
+            );
+            CREATE INDEX IF NOT EXISTS post_tags_tag_post
+                ON post_tags(tag, post_id DESC);
 
             CREATE TABLE IF NOT EXISTS webhooks (
                 id TEXT PRIMARY KEY,
@@ -572,6 +690,144 @@ class Store:
                 last_seen = MAX(identity_names.last_seen, excluded.last_seen)
             """
         )
+
+    @staticmethod
+    def normalize_tag(value: str) -> str:
+        tag = unicodedata.normalize("NFC", value.strip()).casefold()
+        if not tag or len(tag) > 32 or len(tag.encode("utf-8")) > 96:
+            raise StoreError("tag must be 1..32 characters and at most 96 UTF-8 bytes", 400)
+        if not all(char.isalnum() or char in {"_", "-"} for char in tag):
+            raise StoreError("tag may contain letters, numbers, underscore, or hyphen", 400)
+        if not tag[0].isalnum() and tag[0] != "_":
+            raise StoreError("tag must start with a letter, number, or underscore", 400)
+        return tag
+
+    @classmethod
+    def extract_tags(cls, title: str, body: str) -> tuple[str, ...]:
+        found: list[str] = []
+        seen: set[str] = set()
+        for match in HASHTAG_RE.finditer(title + "\n" + body):
+            try:
+                tag = cls.normalize_tag(match.group(1))
+            except StoreError:
+                continue
+            if tag in seen:
+                continue
+            seen.add(tag)
+            found.append(tag)
+            if len(found) >= MAX_TAGS_PER_POST:
+                break
+        return tuple(found)
+
+    def _reindex_tags(self, post_id: int) -> None:
+        self._conn.execute("DELETE FROM post_tags WHERE post_id = ?", (post_id,))
+        row = self._conn.execute(
+            "SELECT title, body FROM posts WHERE id = ?",
+            (post_id,),
+        ).fetchone()
+        if row is None:
+            return
+        tags = self.extract_tags(str(row["title"]), str(row["body"]))
+        if tags:
+            self._conn.executemany(
+                "INSERT INTO post_tags(post_id, tag) VALUES (?, ?)",
+                [(post_id, tag) for tag in tags],
+            )
+
+    def _rebuild_tags(self) -> None:
+        self._conn.execute("DELETE FROM post_tags")
+        rows = self._conn.execute("SELECT id FROM posts ORDER BY id").fetchall()
+        for row in rows:
+            self._reindex_tags(int(row["id"]))
+
+    def post_tags(self, post_id: int) -> tuple[str, ...]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT tag FROM post_tags WHERE post_id = ? ORDER BY tag",
+                (post_id,),
+            ).fetchall()
+        return tuple(str(row["tag"]) for row in rows)
+
+    def tags_for_posts(
+        self,
+        post_ids: list[int] | tuple[int, ...],
+    ) -> dict[int, tuple[str, ...]]:
+        ids = list(dict.fromkeys(int(post_id) for post_id in post_ids if post_id > 0))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT post_id, tag
+                  FROM post_tags
+                 WHERE post_id IN ({placeholders})
+                 ORDER BY post_id, tag
+                """,
+                ids,
+            ).fetchall()
+        result: dict[int, list[str]] = {post_id: [] for post_id in ids}
+        for row in rows:
+            result.setdefault(int(row["post_id"]), []).append(str(row["tag"]))
+        return {post_id: tuple(tags) for post_id, tags in result.items()}
+
+    def list_tags(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT t.tag, COUNT(*) AS posts,
+                       COUNT(DISTINCT p.board) AS boards,
+                       MAX(p.updated) AS last_ts,
+                       MAX(p.id) AS latest_id
+                  FROM post_tags t
+                  JOIN posts p ON p.id = t.post_id
+                 GROUP BY t.tag
+                 ORDER BY posts DESC, last_ts DESC, t.tag
+                 LIMIT ?
+                """,
+                (max(1, min(limit, self.cfg.max_limit)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def tag_info(self, tag: str) -> dict[str, Any] | None:
+        normalized = self.normalize_tag(tag)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT t.tag, COUNT(*) AS posts,
+                       COUNT(DISTINCT p.board) AS boards,
+                       MAX(p.updated) AS last_ts,
+                       MAX(p.id) AS latest_id
+                  FROM post_tags t
+                  JOIN posts p ON p.id = t.post_id
+                 WHERE t.tag = ?
+                 GROUP BY t.tag
+                """,
+                (normalized,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def posts_by_tag(
+        self,
+        tag: str,
+        *,
+        limit: int = 20,
+        order: str = "desc",
+    ) -> list[Post]:
+        normalized = self.normalize_tag(tag)
+        sql = (
+            self._select_posts().replace(" FROM posts", " FROM posts p")
+            + " JOIN post_tags t ON t.post_id = p.id"
+            + " WHERE t.tag = ? ORDER BY p.id "
+            + ("ASC" if order == "asc" else "DESC")
+            + " LIMIT ?"
+        )
+        with self._lock:
+            rows = self._conn.execute(
+                sql,
+                (normalized, max(1, min(limit, self.cfg.max_limit + 1))),
+            ).fetchall()
+        return [post for row in rows if (post := self._row(row)) is not None]
 
     def _rebuild_inbox(self) -> None:
         self._conn.execute("DELETE FROM inbox_events")
@@ -718,7 +974,7 @@ class Store:
 
     def ensure_board(self, name: str) -> None:
         if not valid_board_name(name):
-            raise StoreError(f"invalid board name: {name!r}", 400)
+            raise StoreError(board_name_error(name), 400)
         with self._lock:
             row = self._conn.execute("SELECT 1 FROM boards WHERE name = ?", (name,)).fetchone()
             if row is None:
@@ -840,8 +1096,8 @@ class Store:
             raise StoreError("certificate grants are required", 400)
         result: list[dict[str, object]] = []
         for topic, actions in sorted(grants.items()):
-            if topic != "*" and not BOARD_RE.fullmatch(topic):
-                raise StoreError(f"invalid grant topic: {topic!r}", 400)
+            if topic != "*" and not valid_board_name(topic):
+                raise StoreError(f"invalid/reserved channel grant: {topic!r}", 400)
             normalized = sorted(set(actions))
             if not normalized:
                 raise StoreError("grant actions are required", 400)
@@ -897,6 +1153,7 @@ class Store:
                 (board, seq, name, title, body, now, now, nbytes),
             )
             post_id = int(cur.lastrowid or 0)
+            self._reindex_tags(post_id)
         post = self.get_post(post_id)
         if post is None:
             raise StoreError("failed to create CA audit post", 500)
@@ -1836,6 +2093,291 @@ class Store:
             except sqlite3.IntegrityError as exc:
                 raise StoreError("signed request nonce already used", 409) from exc
 
+    @staticmethod
+    def normalize_identity_name(value: str) -> str:
+        display = " ".join(unicodedata.normalize("NFKC", value).split())
+        if not display:
+            raise StoreError("name is required", 400)
+        if display.casefold().startswith("[anon]"):
+            raise StoreError("signed names may not use the reserved [anon] prefix", 400)
+        if any(char in display for char in "/?#@"):
+            raise StoreError("name may not contain / ? # or @", 400)
+        if any(unicodedata.category(char).startswith("C") for char in display):
+            raise StoreError("name may not contain control/format characters", 400)
+        return display.casefold()
+
+    @staticmethod
+    def anonymous_base_name(value: str) -> str:
+        display = " ".join(value.split()) or "anonymous"
+        while display.casefold().startswith("[anon]"):
+            display = display[6:].strip()
+        return display or "anonymous"
+
+    def anonymous_display_name(self, value: str, *, check_claim: bool = True) -> str:
+        base = self.anonymous_base_name(value)
+        if check_claim:
+            key = self.normalize_identity_name(base)
+            claim = self.name_claim(key)
+            if claim is not None:
+                raise StoreError(
+                    f"name {base!r} is already bound to public key {claim['public_key']} "
+                    f"(author_id {claim['author_id']})",
+                    409,
+                )
+        return f"[anon] {base}"
+
+    def name_claim(self, name_or_key: str) -> dict[str, Any] | None:
+        try:
+            name_key = self.normalize_identity_name(name_or_key)
+        except StoreError:
+            name_key = name_or_key.casefold()
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT name_key, display_name, author_id, public_key, claim_post_id,
+                       claim_signature, claimed, last_used
+                  FROM name_claims
+                 WHERE name_key = ?
+                """,
+                (name_key,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def _claim_identity_name(
+        self,
+        *,
+        author_id: str,
+        public_key: str,
+        name: str,
+        signature: str,
+        seen: float,
+        post_id: int | None = None,
+    ) -> str:
+        name_key = self.normalize_identity_name(name)
+        if name_key == "anonymous":
+            return name_key
+        row = self._conn.execute(
+            """
+            SELECT display_name, author_id, public_key
+              FROM name_claims
+             WHERE name_key = ?
+            """,
+            (name_key,),
+        ).fetchone()
+        if row is not None and str(row["author_id"]) != author_id:
+            raise StoreError(
+                f"name {name!r} is already bound to public key {row['public_key']} "
+                f"(author_id {row['author_id']})",
+                409,
+            )
+        if row is None:
+            self._conn.execute(
+                """
+                INSERT INTO name_claims(
+                    name_key, display_name, author_id, public_key, claim_post_id,
+                    claim_signature, claimed, last_used
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name_key,
+                    name,
+                    author_id,
+                    public_key,
+                    post_id,
+                    signature,
+                    seen,
+                    seen,
+                ),
+            )
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO profiles(
+                    author_id, primary_name_key, bio, version, payload_b64,
+                    signature, updated
+                ) VALUES (?, ?, '', 0, '', '', ?)
+                """,
+                (author_id, name_key, seen),
+            )
+        else:
+            self._conn.execute(
+                """
+                UPDATE name_claims
+                   SET last_used = ?,
+                       claim_post_id = COALESCE(claim_post_id, ?),
+                       claim_signature = CASE
+                           WHEN claim_signature = '' THEN ?
+                           ELSE claim_signature
+                       END
+                 WHERE name_key = ? AND author_id = ?
+                """,
+                (seen, post_id, signature, name_key, author_id),
+            )
+        return name_key
+
+    def _migrate_identity_names(self) -> None:
+        # Anonymous names are always visibly anonymous after this version.
+        rows = self._conn.execute(
+            """
+            SELECT id, name
+              FROM posts
+             WHERE author_id IS NULL AND system = 0 AND custody_id IS NULL
+            """
+        ).fetchall()
+        for row in rows:
+            current = str(row["name"])
+            prefixed = self.anonymous_display_name(current, check_claim=False)
+            if current != prefixed:
+                self._conn.execute(
+                    "UPDATE posts SET name = ? WHERE id = ?",
+                    (prefixed, int(row["id"])),
+                )
+
+        # Historical self-signed names are claimed oldest-first; earliest proof wins.
+        signed = self._conn.execute(
+            """
+            SELECT id, name, author_id, author_key, signature, created
+              FROM posts
+             WHERE author_id IS NOT NULL
+               AND author_key IS NOT NULL
+               AND actor_id = author_id
+               AND signature IS NOT NULL
+             ORDER BY id
+            """
+        ).fetchall()
+        for row in signed:
+            name = str(row["name"])
+            if self.anonymous_base_name(name).casefold() == "anonymous":
+                continue
+            try:
+                self._claim_identity_name(
+                    author_id=str(row["author_id"]),
+                    public_key=str(row["author_key"]),
+                    name=name,
+                    signature=str(row["signature"]),
+                    seen=float(row["created"]),
+                    post_id=int(row["id"]),
+                )
+            except StoreError as exc:
+                if exc.status not in {400, 409}:
+                    raise
+
+    def profile_by_name(self, name: str) -> dict[str, Any] | None:
+        claim = self.name_claim(name)
+        if claim is None:
+            return None
+        return self.profile_by_author(str(claim["author_id"]))
+
+    def profile_by_author(self, author_id: str) -> dict[str, Any] | None:
+        if not valid_author_id(author_id):
+            return None
+        with self._lock:
+            profile = self._conn.execute(
+                """
+                SELECT author_id, primary_name_key, bio, version, payload_b64,
+                       signature, updated
+                  FROM profiles
+                 WHERE author_id = ?
+                """,
+                (author_id,),
+            ).fetchone()
+            claims = self._conn.execute(
+                """
+                SELECT name_key, display_name, public_key, claim_post_id,
+                       claim_signature, claimed, last_used
+                  FROM name_claims
+                 WHERE author_id = ?
+                 ORDER BY claimed, name_key
+                """,
+                (author_id,),
+            ).fetchall()
+        if profile is None or not claims:
+            return None
+        claim_items = [dict(row) for row in claims]
+        primary_key = str(profile["primary_name_key"])
+        primary = next(
+            (item for item in claim_items if str(item["name_key"]) == primary_key),
+            claim_items[0],
+        )
+        return {
+            "name": str(primary["display_name"]),
+            "name_key": str(primary["name_key"]),
+            "bio": str(profile["bio"]),
+            "public_key": str(primary["public_key"]),
+            "author_id": author_id,
+            "profile_url": f"/@{quote(str(primary['display_name']), safe='')}",
+            "aliases": [str(item["display_name"]) for item in claim_items],
+            "claim_post_id": primary["claim_post_id"],
+            "claim_signature": str(primary["claim_signature"]),
+            "profile_version": int(profile["version"]),
+            "profile_payload_b64": str(profile["payload_b64"]),
+            "profile_signature": str(profile["signature"]),
+            "profile_signed": bool(profile["signature"]),
+            "updated": round(float(profile["updated"]), 3),
+            "certification": self.certification(author_id),
+        }
+
+    def profile_version(self, author_id: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT version FROM profiles WHERE author_id = ?",
+                (author_id,),
+            ).fetchone()
+        return int(row["version"]) if row is not None else 0
+
+    def update_profile(
+        self,
+        *,
+        auth: SignedRequest,
+        name: str,
+        bio: str,
+        payload_b64: str,
+    ) -> dict[str, Any]:
+        if len(bio.encode("utf-8")) > 4096:
+            raise StoreError("profile bio exceeds 4096 UTF-8 bytes", 413)
+        name_key = self.normalize_identity_name(name)
+        self.consume_nonce(auth)
+        with self._lock, self._conn:
+            claim = self._conn.execute(
+                "SELECT author_id FROM name_claims WHERE name_key = ?",
+                (name_key,),
+            ).fetchone()
+            if claim is None or str(claim["author_id"]) != auth.signer_id:
+                raise StoreError("profile name must already be claimed by this public key", 403)
+            current = self._conn.execute(
+                "SELECT version FROM profiles WHERE author_id = ?",
+                (auth.signer_id,),
+            ).fetchone()
+            expected = int(current["version"] if current is not None else 0) + 1
+            if auth.version != expected:
+                raise StoreError("stale profile version", 409)
+            self._conn.execute(
+                """
+                INSERT INTO profiles(
+                    author_id, primary_name_key, bio, version, payload_b64,
+                    signature, updated
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(author_id) DO UPDATE SET
+                    primary_name_key = excluded.primary_name_key,
+                    bio = excluded.bio,
+                    version = excluded.version,
+                    payload_b64 = excluded.payload_b64,
+                    signature = excluded.signature,
+                    updated = excluded.updated
+                """,
+                (
+                    auth.signer_id,
+                    name_key,
+                    bio,
+                    auth.version,
+                    payload_b64,
+                    auth.signature,
+                    time.time(),
+                ),
+            )
+        profile = self.profile_by_author(auth.signer_id)
+        assert profile is not None
+        return profile
+
     def _remember_identity_name(self, author_id: str, name: str, seen: float) -> None:
         self._conn.execute(
             """
@@ -1867,6 +2409,13 @@ class Store:
             name=name,
             max_body_bytes=max_body_bytes,
         )
+        if auth is None:
+            name = self.anonymous_display_name(name, check_claim=False)
+        elif custody_id is not None:
+            base = self.anonymous_base_name(name)
+            name = f"[custody] {base}"
+        else:
+            self.normalize_identity_name(name)
         files = self.prepare_files(files)
         self.ensure_board(board)
         if reply_to is not None:
@@ -1884,6 +2433,28 @@ class Store:
             self.consume_nonce(auth)
 
         with self._lock, self._conn:
+            if auth is None:
+                base_name = self.anonymous_base_name(name)
+                name_key = self.normalize_identity_name(base_name)
+                claim = self._conn.execute(
+                    "SELECT author_id, public_key FROM name_claims WHERE name_key = ?",
+                    (name_key,),
+                ).fetchone()
+                if claim is not None:
+                    raise StoreError(
+                        f"name {base_name!r} is already bound to public key {claim['public_key']} "
+                        f"(author_id {claim['author_id']})",
+                        409,
+                    )
+            elif custody_id is None:
+                self._claim_identity_name(
+                    author_id=auth.signer_id,
+                    public_key=auth.public_key,
+                    name=name,
+                    signature=auth.signature,
+                    seen=now,
+                )
+
             file_bytes = sum(file.nbytes for file in files)
             new_bytes = nbytes + file_bytes
             if new_bytes > self.cfg.max_storage_bytes:
@@ -1950,10 +2521,25 @@ class Store:
                 ),
             )
             post_id = int(cur.lastrowid or 0)
-            if auth is not None:
+            if auth is not None and custody_id is None:
+                self._conn.execute(
+                    """
+                    UPDATE name_claims
+                       SET claim_post_id = COALESCE(claim_post_id, ?),
+                           last_used = ?
+                     WHERE name_key = ? AND author_id = ?
+                    """,
+                    (
+                        post_id,
+                        now,
+                        self.normalize_identity_name(name),
+                        auth.signer_id,
+                    ),
+                )
                 self._remember_identity_name(auth.signer_id, name, now)
             self._insert_attachments(post_id, files)
             self._reindex_inbox(post_id)
+            self._reindex_tags(post_id)
 
         post = self.get_post(post_id)
         assert post is not None
@@ -2001,10 +2587,47 @@ class Store:
         if post.signed:
             if auth is None:
                 raise StoreError("signed post requires a signed request", 403)
+            if post.custody_id is not None:
+                base = new_name
+                while base.casefold().startswith("[custody]"):
+                    base = base[9:].strip()
+                new_name = f"[custody] {base or 'guest'}"
             if auth.version != post.sig_version + 1:
                 raise StoreError("stale signature version", 409)
+            if auth.signer_id != post.author_id and new_name != post.name:
+                raise StoreError("only the post owner may change its bound display name", 403)
+            self.normalize_identity_name(new_name)
+        elif new_name != post.name:
+            new_name = self.anonymous_display_name(new_name, check_claim=False)
 
         with self._lock, self._conn:
+            if (
+                post.signed
+                and post.custody_id is None
+                and auth is not None
+                and auth.signer_id == post.author_id
+            ):
+                self._claim_identity_name(
+                    author_id=auth.signer_id,
+                    public_key=post.author_key or auth.public_key,
+                    name=new_name,
+                    signature=auth.signature,
+                    seen=time.time(),
+                    post_id=post.id,
+                )
+            elif not post.signed and new_name != post.name:
+                base_name = self.anonymous_base_name(new_name)
+                name_key = self.normalize_identity_name(base_name)
+                claim = self._conn.execute(
+                    "SELECT author_id, public_key FROM name_claims WHERE name_key = ?",
+                    (name_key,),
+                ).fetchone()
+                if claim is not None:
+                    raise StoreError(
+                        f"name {base_name!r} is already bound to public key {claim['public_key']} "
+                        f"(author_id {claim['author_id']})",
+                        409,
+                    )
             used = self._storage_bytes()
             old_bytes = self._post_storage_bytes(post.id)
             file_bytes = (
@@ -2053,6 +2676,7 @@ class Store:
             if auth is not None and auth.signer_id == post.author_id:
                 self._remember_identity_name(auth.signer_id, new_name, now)
             self._reindex_inbox(post.id)
+            self._reindex_tags(post.id)
 
         updated = self.get_post(post.id)
         assert updated is not None
@@ -2133,8 +2757,8 @@ class Store:
             where.append("id < ?")
             params.append(before)
         if author:
-            where.append("name = ?")
-            params.append(author)
+            where.append("(name = ? OR name = ?)")
+            params.extend((author, f"[anon] {author}"))
         if author_id:
             where.append("author_id = ?")
             params.append(author_id)
@@ -2170,8 +2794,11 @@ class Store:
             where.append("p.board = ?")
             params.append(spec.board)
         if spec.author_name:
-            where.append("p.name = ?")
-            params.append(spec.author_name)
+            where.append("(p.name = ? OR p.name = ?)")
+            params.extend((spec.author_name, f"[anon] {spec.author_name}"))
+        for tag in spec.tags:
+            where.append("EXISTS (SELECT 1 FROM post_tags t WHERE t.post_id = p.id AND t.tag = ?)")
+            params.append(self.normalize_tag(tag))
         if spec.author_id:
             if not valid_author_id(spec.author_id):
                 raise StoreError("author: must be a 64-character author id", 400)
@@ -2354,11 +2981,11 @@ class Store:
             else:
                 rows = self._conn.execute(
                     """
-                    SELECT DISTINCT author_id
-                      FROM identity_names
-                     WHERE name = ? COLLATE NOCASE
+                    SELECT author_id
+                      FROM name_claims
+                     WHERE name_key = ?
                     """,
-                    (token,),
+                    (self.normalize_identity_name(token),),
                 ).fetchall()
                 targets.update(str(item["author_id"]) for item in rows)
 
@@ -2716,6 +3343,7 @@ class Store:
             "author_id": author_id,
             "algorithm": "ed25519",
             "public_key": public_key,
+            "profile": self.profile_by_author(author_id),
             "display_name": str(aliases[0]["name"]) if aliases else None,
             "aliases": [
                 {
@@ -2751,10 +3379,14 @@ class Store:
                 "SELECT COUNT(*) AS files, COALESCE(SUM(nbytes),0) AS file_bytes FROM attachments"
             ).fetchone()
             boards = self._conn.execute("SELECT COUNT(*) AS n FROM boards").fetchone()["n"]
+            hashtags = self._conn.execute(
+                "SELECT COUNT(DISTINCT tag) AS n FROM post_tags"
+            ).fetchone()["n"]
         post_bytes = int(row["post_bytes"])
         file_bytes = int(files["file_bytes"])
         return {
             "boards": int(boards),
+            "hashtags": int(hashtags),
             "posts": int(row["posts"]),
             "system_posts": int(row["system_posts"] or 0),
             "files": int(files["files"]),

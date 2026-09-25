@@ -7,7 +7,6 @@ import json
 import re
 import sys
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 DEFAULT_BASE_URL = "http://127.0.0.1:3111"
@@ -77,42 +76,13 @@ def _current_index(base_url: str) -> dict[str, object] | None:
 
 
 def refresh_index(base_url: str = DEFAULT_BASE_URL, *, dry_run: bool = False) -> str:
-    base_url = base_url.rstrip("/")
-    boards = _parse_boards(_request(f"{base_url}/"))
-    if not boards:
-        raise RuntimeError("could not parse board index")
+    """Compatibility no-op.
 
-    body = _render_index(boards)
-    current = _current_index(base_url)
-    if (
-        current is not None
-        and current.get("body") == body
-        and current.get("name") == INDEX_NAME
-        and current.get("title") == INDEX_TITLE
-    ):
-        return "unchanged"
-
-    if dry_run:
-        print(body, end="")
-        return "dry-run"
-
-    fields: dict[str, str] = {
-        "name": INDEX_NAME,
-        "title": INDEX_TITLE,
-        "text": body,
-    }
-    if current is None:
-        fields["board"] = INDEX_BOARD
-        action = "created"
-    else:
-        post_id = current.get("id")
-        if not isinstance(post_id, int) or post_id < 1:
-            raise RuntimeError("invalid canonical index post id")
-        fields["edit"] = str(post_id)
-        action = f"updated id={post_id}"
-
-    _request(f"{base_url}/publish", urlencode(fields).encode("utf-8"))
-    return action
+    /index is now rendered dynamically by msgd. The old canonical index post is
+    no longer created or refreshed.
+    """
+    del base_url, dry_run
+    return "dynamic-index; no refresh required"
 
 
 def main(argv: list[str] | None = None) -> int:

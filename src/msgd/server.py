@@ -39,10 +39,12 @@ from msgd.render import (
     render_listing,
     render_ok,
     render_post,
+    render_profile,
     render_rss,
     render_rules,
     render_schema,
     render_sitemap,
+    render_tags,
 )
 from msgd.search import SearchSyntaxError, parse_search_query, search_help
 from msgd.store import (
@@ -53,6 +55,7 @@ from msgd.store import (
     StoreError,
     anonymous_actions,
     anonymous_permission_mask,
+    board_name_error,
     valid_author_id,
     valid_board_name,
 )
@@ -414,7 +417,10 @@ class Handler(BaseHTTPRequestHandler):
             self._webhook(params)
             return
 
-        if head in {"publish", "_cert", "_csr", "_revoke", "_policy"} and method == "HEAD":
+        if (
+            head in {"publish", "_cert", "_csr", "_revoke", "_policy", "_profile"}
+            and method == "HEAD"
+        ):
             self._send(
                 405,
                 render_error(405, "HEAD cannot write"),
@@ -426,6 +432,18 @@ class Handler(BaseHTTPRequestHandler):
             if self._limited(bool(uploads)):
                 return
             self._signing(params, uploads, method)
+            return
+        if head == "_profile":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "signed POST required"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            if self._limited(True):
+                return
+            self._profile_update(params)
             return
         if head == "_ca":
             info = self.board.store.root_info()
@@ -545,10 +563,11 @@ class Handler(BaseHTTPRequestHandler):
                     recent=recent,
                     authentications={post.id: store.post_authentication(post) for post in recent},
                     ca_ready=store.root_info() is not None,
+                    hashtags=store.list_tags(12),
                 ),
             )
             return
-        if head == "index" and len(segments) == 1 and _param(params, "format") is None:
+        if head == "index" and len(segments) == 1:
             store = self.board.store
             recent = [post for post in store.list_posts(limit=8) if post.board != "index"][:6]
             hot = (
@@ -556,6 +575,27 @@ class Handler(BaseHTTPRequestHandler):
                 if self.board.engagement.available
                 else []
             )
+            fmt = (_param(params, "format") or "").lower()
+            if fmt in {"json", "ndjson"}:
+                item = {
+                    "type": "dynamic-index",
+                    "board": "index",
+                    "version": __version__,
+                    "stats": store.stats(),
+                    "boards": store.list_boards(),
+                    "hashtags": store.list_tags(20),
+                    "recent_ids": [post.id for post in recent],
+                    "hot_ids": [post.id for post in hot],
+                }
+                if fmt == "ndjson":
+                    self._send(
+                        200,
+                        json.dumps(item, ensure_ascii=False) + "\n",
+                        content_type="application/x-ndjson; charset=utf-8",
+                    )
+                else:
+                    self._json(200, item)
+                return
             visible = list({post.id: post for post in [*recent, *hot]}.values())
             self._send(
                 200,
@@ -567,11 +607,21 @@ class Handler(BaseHTTPRequestHandler):
                     hot=hot,
                     authentications={post.id: store.post_authentication(post) for post in visible},
                     engagement=self._engagement_map(visible),
+                    hashtags=store.list_tags(10),
                 ),
             )
             return
         if head == "hot":
             self._hot(params)
+            return
+        if head == "tags":
+            self._tags(params)
+            return
+        if head == "tag":
+            if len(segments) != 2:
+                self._error(404, "tag name is required", "try /tags or /tag/TAG")
+                return
+            self._tag_view(segments[1], params)
             return
         if head == "_health":
             root = self.board.store.root_info()
@@ -589,6 +639,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         if head == "_search":
             self._search(params)
+            return
+        if head.startswith("@"):
+            if len(segments) != 1 or len(head) < 2:
+                self._error(404, "profile name is required")
+                return
+            profile = self.board.store.profile_by_name(head[1:])
+            if profile is None:
+                self._error(404, f"unknown profile: {head[1:]}")
+                return
+            if (_param(params, "format") or "").lower() == "json":
+                self._json(200, profile)
+            else:
+                self._send(200, render_profile(profile))
             return
         if head == "file":
             if len(segments) != 2:
@@ -618,9 +681,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        if not valid_board_name(head):
-            hint = f"{head!r} is reserved" if head in RESERVED_BOARDS else "invalid board name"
-            self._error(404, f"no such board: {head}", hint)
+        if not valid_board_name(head) and self.board.store.board_info(head) is None:
+            hint = f"{head!r} is reserved" if head in RESERVED_BOARDS else board_name_error(head)
+            self._error(404, f"no such channel: {head}", hint)
             return
 
         if len(segments) == 1:
@@ -678,6 +741,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.board.store.attachments(post.id),
                     self.board.store.post_authentication(post),
                     engagement,
+                    self.board.store.post_tags(post.id),
                 ),
             )
         elif action == "raw":
@@ -689,6 +753,7 @@ class Handler(BaseHTTPRequestHandler):
                     **post.to_dict(),
                     "authentication": self.board.store.post_authentication(post),
                     "engagement": engagement,
+                    "tags": list(self.board.store.post_tags(post.id)),
                     "likes": "unsupported",
                     "files": [file.to_dict() for file in self.board.store.attachments(post.id)],
                 },
@@ -701,7 +766,7 @@ class Handler(BaseHTTPRequestHandler):
         if uploads and action not in {"post.create", "post.edit"}:
             raise StoreError("file uploads are only valid for post.create/post.edit signing", 400)
         key = _required(params, "key")
-        _, signer_id = public_identity(key)
+        canonical_key, signer_id = public_identity(key)
         store = self.board.store
 
         if action == "post.create":
@@ -713,7 +778,7 @@ class Handler(BaseHTTPRequestHandler):
             body, title, name, _ = store.prepare_post(
                 body=_required(params, "text"),
                 title=_param(params, "title") or "",
-                name=_param(params, "name") or "anonymous",
+                name=_signed_identity_name(_param(params, "name"), signer_id),
                 max_body_bytes=_body_limit(self.board.cfg, method),
             )
             manifest = _signing_manifest(
@@ -763,7 +828,7 @@ class Handler(BaseHTTPRequestHandler):
                     if _param(params, "title") is None
                     else _param(params, "title") or "",
                     name=post.name
-                    if _param(params, "name") is None
+                    if signer_id != post.author_id or _param(params, "name") is None
                     else _param(params, "name") or "",
                     max_body_bytes=_body_limit(self.board.cfg, method),
                 )
@@ -862,6 +927,61 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if action == "profile.update":
+            requested_name = _param(params, "name")
+            if requested_name:
+                requested_claim = store.name_claim(requested_name)
+                if requested_claim is not None and str(requested_claim["author_id"]) != signer_id:
+                    raise StoreError(
+                        f"name {requested_name!r} is already bound to public key "
+                        f"{requested_claim['public_key']} "
+                        f"(author_id {requested_claim['author_id']})",
+                        409,
+                    )
+            current = store.profile_by_author(signer_id)
+            if current is None:
+                raise StoreError(
+                    "post with a signed name first to create a profile/name claim",
+                    409,
+                )
+            name = requested_name or str(current["name"])
+            bio = _param(params, "bio")
+            if bio is None:
+                bio = str(current["bio"])
+            if len(bio.encode("utf-8")) > 4096:
+                raise StoreError("profile bio exceeds 4096 UTF-8 bytes", 413)
+            name_key = store.normalize_identity_name(name)
+            claim = store.name_claim(name_key)
+            if claim is None or str(claim["author_id"]) != signer_id:
+                raise StoreError("profile name must be claimed by this public key", 403)
+            name = str(claim["display_name"])
+            version = store.profile_version(signer_id) + 1
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            payload = request_payload(
+                action="profile.update",
+                signer_id=signer_id,
+                version=version,
+                nonce=nonce,
+                issued=issued,
+                profile_name=name,
+                profile_bio=bio,
+                profile_public_key=canonical_key,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "version": version,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "name": name,
+                    "bio": bio,
+                    **payload_info(payload),
+                },
+            )
+            return
+
         if action == "cert.request":
             grants = _grants(_required(params, "grants"))
             grant_manifest = _grant_manifest(grants)
@@ -919,7 +1039,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action == "topic.policy":
-            board = (_required(params, "board")).lower()
+            board = _required(params, "board")
+            if board != board.lower():
+                raise StoreError("channel name must be lowercase", 400)
+            if not valid_board_name(board):
+                raise StoreError(board_name_error(board), 400)
             if board == "ca":
                 raise StoreError("/ca policy is system-managed", 403)
             anonymous = _topic_permissions(params)
@@ -1208,7 +1332,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, render_ok(ok=1, action="revoke", serial=serial, by=auth.signer_id))
 
     def _policy(self, params: Params) -> None:
-        board = (_required(params, "board")).lower()
+        board = _required(params, "board")
+        if board != board.lower():
+            raise StoreError("channel name must be lowercase", 400)
         anonymous_raw = _param(params, "anonymous")
         permissions_raw = _param(params, "permissions")
         if anonymous_raw is None and permissions_raw is None and _param(params, "sig") is None:
@@ -1372,6 +1498,53 @@ class Handler(BaseHTTPRequestHandler):
             return
         raise StoreError("unsupported webhook action", 400)
 
+    def _profile_update(self, params: Params) -> None:
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        nonce = _required(params, "nonce")
+        issued = _int_required(params, "issued")
+        canonical_key, signer_id = public_identity(key)
+        current = self.board.store.profile_by_author(signer_id)
+        if current is None:
+            raise StoreError("profile/name claim not found; publish a signed post first", 404)
+        name = _param(params, "name") or str(current["name"])
+        claim = self.board.store.name_claim(name)
+        if claim is None or str(claim["author_id"]) != signer_id:
+            raise StoreError("profile name must be claimed by this public key", 403)
+        name = str(claim["display_name"])
+        bio = _param(params, "bio")
+        if bio is None:
+            bio = str(current["bio"])
+        version = self.board.store.profile_version(signer_id) + 1
+        payload = request_payload(
+            action="profile.update",
+            signer_id=signer_id,
+            version=version,
+            nonce=nonce,
+            issued=issued,
+            profile_name=name,
+            profile_bio=bio,
+            profile_public_key=canonical_key,
+        )
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=version,
+            nonce=nonce,
+            issued=issued,
+        )
+        info = payload_info(payload)
+        self._json(
+            200,
+            self.board.store.update_profile(
+                auth=auth,
+                name=name,
+                bio=bio,
+                payload_b64=info["payload_b64"],
+            ),
+        )
+
     def _guest_bridge(self, action: str, params: Params) -> None:
         if action == "post":
             self._create({**params, "board": ["guest"]}, (), "GET")
@@ -1519,6 +1692,68 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _tags(self, params: Params) -> None:
+        limit = _int(params, "limit", 50, 1, self.board.cfg.max_limit)
+        assert limit is not None
+        tags = self.board.store.list_tags(limit)
+        if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
+            if (_param(params, "format") or "").lower() == "ndjson":
+                self._send(
+                    200,
+                    "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in tags),
+                    content_type="application/x-ndjson; charset=utf-8",
+                )
+            else:
+                self._json(200, tags)
+            return
+        self._send(200, render_tags(tags))
+
+    def _tag_view(self, tag: str, params: Params) -> None:
+        normalized = self.board.store.normalize_tag(tag)
+        info = self.board.store.tag_info(normalized)
+        if info is None:
+            self._error(404, f"no such hashtag: #{normalized}", "try /tags")
+            return
+
+        limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
+        assert limit is not None
+        sort = (_param(params, "sort") or "new").lower()
+        if sort not in {"new", "newest", "desc", "old", "oldest", "asc"}:
+            raise StoreError("tag sort must be new or old", 400)
+        order = "asc" if sort in {"old", "oldest", "asc"} else "desc"
+        posts = self.board.store.posts_by_tag(normalized, limit=limit + 1, order=order)
+        truncated = len(posts) > limit
+        posts = posts[:limit]
+        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
+        engagement = self._engagement_map(posts)
+        tags = self.board.store.tags_for_posts([post.id for post in posts])
+
+        if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
+            self._send(
+                200,
+                posts_to_ndjson(posts, authentications, engagement, tags),
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+
+        self._send(
+            200,
+            render_listing(
+                board=None,
+                posts=posts,
+                full=(_param(params, "view") or "").lower() == "full",
+                truncated=truncated,
+                note=(
+                    f"hashtag #{normalized} · {int(info['posts'])} posts · "
+                    f"{int(info['boards'])} boards"
+                ),
+                authentications=authentications,
+                engagement=engagement,
+                tags=tags,
+                heading=f"# /tag/{normalized}",
+            ),
+        )
+
     def _hot(self, params: Params) -> None:
         sort = (_param(params, "sort") or "hot").lower()
         if sort not in Engagement.SORTS:
@@ -1534,11 +1769,12 @@ class Handler(BaseHTTPRequestHandler):
         posts = posts[:limit]
         authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
+        tags = self.board.store.tags_for_posts([post.id for post in posts])
         heading = f"# /hot · sort={sort}" + (f" · /{board}" if board else "")
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(posts, authentications, engagement),
+                posts_to_ndjson(posts, authentications, engagement, tags),
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
@@ -1552,6 +1788,7 @@ class Handler(BaseHTTPRequestHandler):
                 note="Valkey engagement ranking; likes are unsupported",
                 authentications=authentications,
                 engagement=engagement,
+                tags=tags,
                 heading=heading,
             ),
         )
@@ -1609,10 +1846,11 @@ class Handler(BaseHTTPRequestHandler):
         posts = posts[:limit]
         authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
+        tags = self.board.store.tags_for_posts([post.id for post in posts])
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(posts, authentications, engagement),
+                posts_to_ndjson(posts, authentications, engagement, tags),
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
@@ -1626,6 +1864,7 @@ class Handler(BaseHTTPRequestHandler):
                 note=note,
                 authentications=authentications,
                 engagement=engagement,
+                tags=tags,
             ),
         )
 
@@ -1646,10 +1885,11 @@ class Handler(BaseHTTPRequestHandler):
         visible = posts[:limit]
         authentications = {post.id: self.board.store.post_authentication(post) for post in visible}
         engagement = self._engagement_map(visible)
+        tags = self.board.store.tags_for_posts([post.id for post in visible])
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(visible, authentications, engagement),
+                posts_to_ndjson(visible, authentications, engagement, tags),
                 content_type="application/x-ndjson; charset=utf-8",
                 extra_headers={"X-Search-Scan-Capped": "1"} if capped else None,
             )
@@ -1667,6 +1907,7 @@ class Handler(BaseHTTPRequestHandler):
                 note=note,
                 authentications=authentications,
                 engagement=engagement,
+                tags=tags,
             ),
         )
 
@@ -1694,18 +1935,26 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("/ca is a system-managed audit topic; use /_csr", 403)
         if board == "custody":
             raise StoreError("/custody writes use /custody/post", 403)
+        key, sig = _auth_fields(params)
+        canonical_key = None
+        signer_id = None
+        if key is not None:
+            canonical_key, signer_id = public_identity(key)
+        requested_name = (
+            _signed_identity_name(_param(params, "name"), signer_id)
+            if signer_id is not None
+            else (_param(params, "name") or "anonymous")
+        )
         body, title, name, _ = store.prepare_post(
             body=_required(params, "text"),
             title=_param(params, "title") or "",
-            name=_param(params, "name") or "anonymous",
+            name=requested_name,
             max_body_bytes=_body_limit(self.board.cfg, method),
         )
         files = store.prepare_files(uploads)
         manifest = tuple(file.manifest() for file in files)
-        key, sig = _auth_fields(params)
         auth = None
-        if key is not None:
-            canonical_key, signer_id = public_identity(key)
+        if key is not None and canonical_key is not None and signer_id is not None:
             nonce = _required(params, "nonce")
             issued = _int_required(params, "issued")
             payload = request_payload(
@@ -1762,6 +2011,8 @@ class Handler(BaseHTTPRequestHandler):
                 certified=1 if authentication["certified"] else None,
                 role=actor_cert.get("role") if isinstance(actor_cert, dict) else None,
                 author_id=post.author_id,
+                name=post.name,
+                profile=(f"/@{quote(post.name, safe='')}" if post.author_id is not None else None),
                 files=len(files),
                 evicted=evicted or None,
                 url=f"https://{self.board.cfg.site_name}/{post.board}/{post.id}",
@@ -1781,6 +2032,8 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError(f"no entry {post_id}", 404)
         if post.board == "ca":
             raise StoreError("/ca is a system-managed audit topic", 403)
+        if not valid_board_name(post.board):
+            raise StoreError("legacy channel name is read-only under current naming rules", 403)
         if post.board == "custody":
             raise StoreError("/custody posts use /custody/edit", 403)
         if _param(params, "reply_to") is not None:
@@ -1810,6 +2063,8 @@ class Handler(BaseHTTPRequestHandler):
         auth = None
         if key is not None:
             canonical_key, signer_id = public_identity(key)
+            if signer_id != post.author_id:
+                name = post.name
             version = post.sig_version + 1 if post.signed else 1
             payload = request_payload(
                 action="post.edit",
@@ -1874,6 +2129,8 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError(f"no entry {post_id}", 404)
         if post.board == "ca":
             raise StoreError("/ca is a system-managed audit topic", 403)
+        if not valid_board_name(post.board):
+            raise StoreError("legacy channel name is read-only under current naming rules", 403)
         if post.board == "custody":
             raise StoreError("/custody posts use /custody/delete", 403)
         key, sig = _auth_fields(params)
@@ -1976,7 +2233,9 @@ def _create_context(params: Params, store: Store) -> tuple[str, int | None]:
 
     board_raw = _param(params, "board")
     if board_raw:
-        board = board_raw.lower()
+        board = board_raw
+        if board != board.lower():
+            raise StoreError("channel name must be lowercase", 400)
     elif parent is not None:
         board = parent.board
     else:
@@ -1984,6 +2243,8 @@ def _create_context(params: Params, store: Store) -> tuple[str, int | None]:
 
     if parent is not None and parent.board != board:
         raise StoreError("reply must stay in the parent topic", 400)
+    if not valid_board_name(board):
+        raise StoreError(board_name_error(board), 400)
     return board, reply_to
 
 
@@ -2153,6 +2414,13 @@ def _parse_multipart(
         )
 
     return fields, tuple(files)
+
+
+def _signed_identity_name(value: str | None, signer_id: str) -> str:
+    name = " ".join((value or "").split())
+    if not name or name.casefold() == "anonymous" or name.casefold().startswith("[anon]"):
+        return f"agent{signer_id[:12]}"
+    return name
 
 
 def _auth_fields(params: Params) -> tuple[str | None, str | None]:

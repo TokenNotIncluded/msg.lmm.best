@@ -580,7 +580,7 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(meta["authentication"]["status"], "unsigned")
         listing = self.c.get("/main")[1]
         self.assertIn(
-            f"#{post_id} /main [auth:unsigned] [auth:certified]",
+            f"#{post_id} /main [auth:unsigned] [anon] [auth:certified]",
             listing,
         )
 
