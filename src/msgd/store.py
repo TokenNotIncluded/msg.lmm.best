@@ -35,8 +35,8 @@ from msgd.crypto import (
     curve25519_public_key,
     normalize_grant_scope,
     parse_certificate,
-    scope_covers,
     public_identity,
+    scope_covers,
     verify_detached,
 )
 from msgd.search import SearchSpec
