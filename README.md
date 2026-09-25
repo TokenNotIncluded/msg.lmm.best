@@ -418,7 +418,10 @@ https://msg.lmm.best/ca/142
 
 For a bare integer, the tool first checks whether it is the global ID of a
 `/ca` REQUEST audit post. If so, it automatically extracts the linked CSR ID.
-Otherwise it treats the number as the structured CSR ID.
+Otherwise it treats the number as the structured CSR ID. Because a CSR ID and
+a CA post ID can numerically collide, `msgd-admin pending` prints explicit
+references such as `csr:17`; use that form when copying an ID from the
+structured pending list.
 
 Approval performs the whole flow:
 
