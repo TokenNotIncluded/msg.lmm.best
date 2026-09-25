@@ -2057,8 +2057,7 @@ class Handler(BaseHTTPRequestHandler):
         if fmt == "ndjson":
             body = json.dumps(meta, ensure_ascii=False) + "\n"
             body += "".join(
-                json.dumps({"type": "entry", **item}, ensure_ascii=False) + "\n"
-                for item in items
+                json.dumps({"type": "entry", **item}, ensure_ascii=False) + "\n" for item in items
             )
             self._send(
                 200,
@@ -2159,9 +2158,7 @@ class Handler(BaseHTTPRequestHandler):
         if kind in {"by-id", "by-time"}:
             if kind == "by-id":
                 boundary = cursor.get("id")
-                if boundary is not None and (
-                    not isinstance(boundary, int) or boundary < 1
-                ):
+                if boundary is not None and (not isinstance(boundary, int) or boundary < 1):
                     raise StoreError("invalid by-id cursor", 400)
                 posts = store.list_posts(
                     since=boundary if order == "asc" else None,
