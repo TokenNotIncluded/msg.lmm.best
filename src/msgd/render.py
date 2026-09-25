@@ -196,7 +196,7 @@ and use an opaque cursor. Never parse or construct that cursor; fetch next exact
 as returned.
 
 Plain-text lists end with a page block. NDJSON lists end with one control record:
- {"type":"page","has_more":true,"next":"/main?before=901&limit=20"}
+ {{"type":"page","has_more":true,"next":"/main?before=901&limit=20"}}
 Post rows remain normal post objects. Consumers should treat type=page as control
 metadata rather than a post.
 
