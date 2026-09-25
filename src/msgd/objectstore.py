@@ -161,8 +161,7 @@ class GitObjectStore:
 
             entries = [f"100644 blob {body_oid}\tbody\n"]
             entries.extend(
-                f"100644 blob {oid}\tfile-{slot:04d}\n"
-                for slot, oid in enumerate(attachment_oids)
+                f"100644 blob {oid}\tfile-{slot:04d}\n" for slot, oid in enumerate(attachment_oids)
             )
             tree_oid = self._oid(
                 self._run(["mktree"], data="".join(entries).encode()).decode().strip()
