@@ -428,6 +428,51 @@ CREATE INDEX IF NOT EXISTS webhook_due
     ON webhook_deliveries(delivered, next_attempt, created);
 
 
+CREATE TABLE IF NOT EXISTS websub_subscriptions (
+    id                TEXT PRIMARY KEY,
+    topic             TEXT NOT NULL,
+    callback          TEXT NOT NULL,
+    secret_nonce      BLOB NOT NULL DEFAULT X'',
+    secret_ciphertext BLOB NOT NULL DEFAULT X'',
+    created           REAL NOT NULL,
+    updated           REAL NOT NULL,
+    expires           REAL NOT NULL,
+    UNIQUE(topic, callback)
+);
+CREATE INDEX IF NOT EXISTS websub_subscriptions_topic
+    ON websub_subscriptions(topic, expires);
+
+CREATE TABLE IF NOT EXISTS websub_verifications (
+    id                TEXT PRIMARY KEY,
+    mode              TEXT NOT NULL,
+    topic             TEXT NOT NULL,
+    callback          TEXT NOT NULL,
+    lease_seconds     INTEGER NOT NULL,
+    challenge         TEXT NOT NULL,
+    secret_nonce      BLOB NOT NULL DEFAULT X'',
+    secret_ciphertext BLOB NOT NULL DEFAULT X'',
+    created           REAL NOT NULL,
+    attempts          INTEGER NOT NULL DEFAULT 0,
+    next_attempt      REAL NOT NULL,
+    last_error        TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS websub_verifications_due
+    ON websub_verifications(next_attempt, created);
+
+CREATE TABLE IF NOT EXISTS websub_deliveries (
+    id              TEXT PRIMARY KEY,
+    subscription_id TEXT NOT NULL REFERENCES websub_subscriptions(id) ON DELETE CASCADE,
+    topic           TEXT NOT NULL,
+    created         REAL NOT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt    REAL NOT NULL,
+    delivered       REAL,
+    last_error      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS websub_deliveries_due
+    ON websub_deliveries(delivered, next_attempt, created);
+
+
 CREATE TABLE IF NOT EXISTS path_get_receipts (
     request_id     TEXT PRIMARY KEY,
     payload_sha256 TEXT NOT NULL,
@@ -4246,6 +4291,291 @@ class Store:
                     "UPDATE webhooks SET last_error = ? WHERE id = ?",
                     (error[:500], str(row["webhook_id"])),
                 )
+
+    def upsert_websub_verification(
+        self,
+        *,
+        verification_id: str,
+        mode: str,
+        topic: str,
+        callback: str,
+        lease_seconds: int,
+        challenge: str,
+        secret_nonce: bytes,
+        secret_ciphertext: bytes,
+    ) -> None:
+        now = time.time()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO websub_verifications(
+                    id, mode, topic, callback, lease_seconds, challenge,
+                    secret_nonce, secret_ciphertext, created, attempts, next_attempt, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, '')
+                ON CONFLICT(id) DO UPDATE SET
+                    mode = excluded.mode,
+                    topic = excluded.topic,
+                    callback = excluded.callback,
+                    lease_seconds = excluded.lease_seconds,
+                    challenge = excluded.challenge,
+                    secret_nonce = excluded.secret_nonce,
+                    secret_ciphertext = excluded.secret_ciphertext,
+                    created = excluded.created,
+                    attempts = 0,
+                    next_attempt = excluded.next_attempt,
+                    last_error = ''
+                """,
+                (
+                    verification_id,
+                    mode,
+                    topic,
+                    callback,
+                    lease_seconds,
+                    challenge,
+                    secret_nonce,
+                    secret_ciphertext,
+                    now,
+                    now,
+                ),
+            )
+
+    def due_websub_verifications(self, limit: int = 20) -> list[dict[str, Any]]:
+        now = time.time()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, mode, topic, callback, lease_seconds, challenge,
+                       secret_nonce, secret_ciphertext, created, attempts,
+                       next_attempt, last_error
+                  FROM websub_verifications
+                 WHERE attempts < 3 AND next_attempt <= ?
+                 ORDER BY next_attempt, created
+                 LIMIT ?
+                """,
+                (now, max(1, min(limit, 100))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def finish_websub_verification(
+        self,
+        verification_id: str,
+        *,
+        success: bool,
+        error: str = "",
+        retry_after: float = 0,
+    ) -> None:
+        with self._lock, self._conn:
+            if success:
+                self._conn.execute(
+                    "DELETE FROM websub_verifications WHERE id = ?",
+                    (verification_id,),
+                )
+                return
+            row = self._conn.execute(
+                "SELECT attempts FROM websub_verifications WHERE id = ?",
+                (verification_id,),
+            ).fetchone()
+            if row is None:
+                return
+            self._conn.execute(
+                """
+                UPDATE websub_verifications
+                   SET attempts = ?, next_attempt = ?, last_error = ?
+                 WHERE id = ?
+                """,
+                (
+                    int(row["attempts"]) + 1,
+                    time.time() + retry_after,
+                    error[:500],
+                    verification_id,
+                ),
+            )
+
+    def delete_websub_verification(self, verification_id: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM websub_verifications WHERE id = ?",
+                (verification_id,),
+            )
+
+    def activate_websub_subscription(
+        self,
+        *,
+        subscription_id: str,
+        topic: str,
+        callback: str,
+        lease_seconds: int,
+        secret_nonce: bytes,
+        secret_ciphertext: bytes,
+    ) -> None:
+        now = time.time()
+        expires = now + lease_seconds
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO websub_subscriptions(
+                    id, topic, callback, secret_nonce, secret_ciphertext,
+                    created, updated, expires
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    topic = excluded.topic,
+                    callback = excluded.callback,
+                    secret_nonce = excluded.secret_nonce,
+                    secret_ciphertext = excluded.secret_ciphertext,
+                    updated = excluded.updated,
+                    expires = excluded.expires
+                """,
+                (
+                    subscription_id,
+                    topic,
+                    callback,
+                    secret_nonce,
+                    secret_ciphertext,
+                    now,
+                    now,
+                    expires,
+                ),
+            )
+
+    def websub_subscription(self, topic: str, callback: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, topic, callback, secret_nonce, secret_ciphertext,
+                       created, updated, expires
+                  FROM websub_subscriptions
+                 WHERE topic = ? AND callback = ?
+                """,
+                (topic, callback),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def delete_websub_subscription(self, topic: str, callback: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM websub_subscriptions WHERE topic = ? AND callback = ?",
+                (topic, callback),
+            )
+
+    def queue_websub_topic(self, topic: str) -> list[str]:
+        now = time.time()
+        queued: list[str] = []
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                """
+                SELECT id
+                  FROM websub_subscriptions
+                 WHERE topic = ? AND expires > ?
+                """,
+                (topic, now),
+            ).fetchall()
+            for row in rows:
+                subscription_id = str(row["id"])
+                pending = self._conn.execute(
+                    """
+                    SELECT 1
+                      FROM websub_deliveries
+                     WHERE subscription_id = ?
+                       AND delivered IS NULL
+                       AND attempts < 6
+                     LIMIT 1
+                    """,
+                    (subscription_id,),
+                ).fetchone()
+                if pending is not None:
+                    continue
+                delivery_id = secrets.token_hex(16)
+                self._conn.execute(
+                    """
+                    INSERT INTO websub_deliveries(
+                        id, subscription_id, topic, created, next_attempt
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (delivery_id, subscription_id, topic, now, now),
+                )
+                queued.append(delivery_id)
+        return queued
+
+    def due_websub_deliveries(self, limit: int = 20) -> list[dict[str, Any]]:
+        now = time.time()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT d.id, d.subscription_id, d.topic, d.created, d.attempts,
+                       d.next_attempt, s.callback, s.secret_nonce,
+                       s.secret_ciphertext, s.expires
+                  FROM websub_deliveries d
+                  JOIN websub_subscriptions s ON s.id = d.subscription_id
+                 WHERE d.delivered IS NULL
+                   AND d.attempts < 6
+                   AND d.next_attempt <= ?
+                   AND s.expires > ?
+                 ORDER BY d.next_attempt, d.created
+                 LIMIT ?
+                """,
+                (now, now, max(1, min(limit, 100))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def finish_websub_delivery(
+        self,
+        delivery_id: str,
+        *,
+        success: bool,
+        error: str = "",
+        retry_after: float = 0,
+    ) -> None:
+        now = time.time()
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT attempts FROM websub_deliveries WHERE id = ?",
+                (delivery_id,),
+            ).fetchone()
+            if row is None:
+                return
+            attempts = int(row["attempts"]) + 1
+            if success:
+                self._conn.execute(
+                    """
+                    UPDATE websub_deliveries
+                       SET attempts = ?, delivered = ?, last_error = ''
+                     WHERE id = ?
+                    """,
+                    (attempts, now, delivery_id),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE websub_deliveries
+                       SET attempts = ?, next_attempt = ?, last_error = ?
+                     WHERE id = ?
+                    """,
+                    (attempts, now + retry_after, error[:500], delivery_id),
+                )
+
+    def prune_websub(self) -> None:
+        now = time.time()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM websub_subscriptions WHERE expires <= ?",
+                (now,),
+            )
+            self._conn.execute(
+                """
+                DELETE FROM websub_verifications
+                 WHERE (attempts >= 3 AND created < ?)
+                    OR created < ?
+                """,
+                (now - 86400, now - 7 * 86400),
+            )
+            self._conn.execute(
+                """
+                DELETE FROM websub_deliveries
+                 WHERE (delivered IS NOT NULL AND delivered < ?)
+                    OR (delivered IS NULL AND attempts >= 6 AND created < ?)
+                """,
+                (now - 7 * 86400, now - 30 * 86400),
+            )
 
     def path_get_receipt(self, request_id: str) -> dict[str, Any] | None:
         with self._lock:

@@ -27,6 +27,10 @@ class Config:
     webhook_max_per_identity: int = 8
     webhook_delivery_enabled: bool = True
 
+    websub_delivery_enabled: bool = True
+    websub_default_lease_seconds: int = 864_000
+    websub_max_lease_seconds: int = 2_592_000
+
     # Public Git repositories. Empty root derives from the database directory.
     repo_root: str = ""
     repo_max_blob_bytes: int = 1_048_576
@@ -105,6 +109,13 @@ class Config:
             webhook_delivery_enabled=get(
                 "webhooks", "delivery_enabled", base.webhook_delivery_enabled
             ),
+            websub_delivery_enabled=get("websub", "delivery_enabled", base.websub_delivery_enabled),
+            websub_default_lease_seconds=get(
+                "websub", "default_lease_seconds", base.websub_default_lease_seconds
+            ),
+            websub_max_lease_seconds=get(
+                "websub", "max_lease_seconds", base.websub_max_lease_seconds
+            ),
             repo_root=get("repos", "root", base.repo_root),
             repo_max_blob_bytes=get("repos", "max_blob_bytes", base.repo_max_blob_bytes),
             repo_auth_ttl_seconds=get("repos", "auth_ttl_seconds", base.repo_auth_ttl_seconds),
@@ -167,6 +178,8 @@ class Config:
             "write_per_minute",
             "read_per_minute",
             "webhook_max_per_identity",
+            "websub_default_lease_seconds",
+            "websub_max_lease_seconds",
             "repo_max_blob_bytes",
             "repo_auth_ttl_seconds",
             "repo_max_request_bytes",
@@ -175,5 +188,9 @@ class Config:
                 raise SystemExit(f"{key} must be >= 1")
         if self.default_limit > self.max_limit:
             raise SystemExit("default_limit must not exceed max_limit")
+        if self.websub_default_lease_seconds > self.websub_max_lease_seconds:
+            raise SystemExit(
+                "websub_default_lease_seconds must not exceed websub_max_lease_seconds"
+            )
         if not self.valkey_prefix.strip():
             raise SystemExit("valkey_prefix must not be empty")
