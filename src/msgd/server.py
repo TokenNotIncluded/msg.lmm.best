@@ -3750,9 +3750,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         assert limit is not None
 
-        path = path_override or (
-            "/files" if len(segments) == 1 else f"/files/{segments[1]}"
-        )
+        path = path_override or ("/files" if len(segments) == 1 else f"/files/{segments[1]}")
         scope = _pagination_scope(path, params, exclude={"format"})
         cursor_data = _decode_cursor(
             _param(params, "cursor"),
@@ -3827,10 +3825,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if fmt == "ndjson":
-            lines = [
-                json.dumps({"kind": "file", **item}, ensure_ascii=False)
-                for item in files
-            ]
+            lines = [json.dumps({"kind": "file", **item}, ensure_ascii=False) for item in files]
             lines.append(
                 json.dumps(
                     {
