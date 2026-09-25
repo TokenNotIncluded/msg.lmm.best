@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from nacl.exceptions import CryptoError
+from nacl.public import PrivateKey, SealedBox
+from nacl.signing import SigningKey
 
 from msgd import __version__
 from msgd.certcli import _load_private, _public_b64, _write_private
@@ -57,6 +62,44 @@ def _identity(key: Ed25519PrivateKey) -> tuple[str, str]:
     public = _public_b64(key)
     _, author_id = public_identity(public)
     return public, author_id
+
+
+def _curve_private_key(key: Ed25519PrivateKey) -> PrivateKey:
+    seed = key.private_bytes(
+        serialization.Encoding.Raw,
+        serialization.PrivateFormat.Raw,
+        serialization.NoEncryption(),
+    )
+    return SigningKey(seed).to_curve25519_private_key()
+
+
+def _keystore_base(api: Api, key: Ed25519PrivateKey) -> str:
+    _public, author_id = _identity(key)
+    info = api.json_get(f"/key/{author_id}", {})
+    profile = info.get("profile")
+    if not isinstance(profile, dict) or not profile.get("name"):
+        raise AgentCliError("keystore requires an established signed profile")
+    return f"/@{quote(str(profile['name']), safe='')}/keystore"
+
+
+def _write_secret(path: Path, data: bytes, *, force: bool) -> None:
+    path = path.expanduser()
+    if path.exists() and not force:
+        raise AgentCliError(f"refusing to overwrite {path}; pass --force")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT
+    flags |= os.O_TRUNC if force else os.O_EXCL
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.chmod(path, 0o600)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
 
 
 def _cli_fields(fields: dict[str, str]) -> dict[str, str]:
@@ -314,6 +357,79 @@ def command_profile(args: argparse.Namespace) -> int:
         raise AgentCliError("profile requires --name and/or --bio")
     signed, _ = _signed_fields(api, key, "profile.update", fields)
     result = api.json_post("/_profile", _cli_fields(signed))
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+def command_keystore(args: argparse.Namespace) -> int:
+    api = _api(args)
+    key, _ = _key(args)
+    curve_private = _curve_private_key(key)
+    curve_public = base64.b64encode(bytes(curve_private.public_key)).decode("ascii")
+    verb = args.keystore_action
+
+    if verb == "pubkey":
+        print("algorithm=curve25519")
+        print(f"public_key={curve_public}")
+        print("source_identity_algorithm=ed25519")
+        return 0
+
+    base = _keystore_base(api, key)
+    if verb == "list":
+        result = api.json_get(base, {})
+        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        return 0
+
+    if verb == "get":
+        result = api.json_get(f"{base}/{quote(args.name, safe='')}", {})
+        if result.get("format") != "libsodium-sealed-box-v1":
+            raise AgentCliError("unsupported keystore ciphertext format")
+        if result.get("public_key") != curve_public:
+            raise AgentCliError("keystore recipient key does not match current identity")
+        try:
+            ciphertext = base64.b64decode(str(result["ciphertext"]), validate=True)
+        except (ValueError, KeyError) as exc:
+            raise AgentCliError("invalid keystore ciphertext") from exc
+        if hashlib.sha256(ciphertext).hexdigest() != str(result.get("sha256") or ""):
+            raise AgentCliError("keystore ciphertext sha256 mismatch")
+        try:
+            plaintext = SealedBox(curve_private).decrypt(ciphertext)
+        except CryptoError as exc:
+            raise AgentCliError("unable to decrypt keystore entry with current identity") from exc
+        output = Path(args.out)
+        _write_secret(output, plaintext, force=args.force)
+        print(f"restored={output.expanduser()}")
+        print(f"bytes={len(plaintext)}")
+        return 0
+
+    if verb == "put":
+        choices = int(bool(args.file)) + int(bool(args.stdin))
+        if choices != 1:
+            raise AgentCliError("keystore put requires exactly one of --file PATH or --stdin")
+        if args.file:
+            plaintext = Path(args.file).expanduser().read_bytes()
+        else:
+            plaintext = sys.stdin.buffer.read()
+        ciphertext = SealedBox(curve_private.public_key).encrypt(plaintext)
+        encoded = base64.b64encode(ciphertext).decode("ascii")
+        digest = hashlib.sha256(ciphertext).hexdigest()
+        fields = {
+            "name": args.name,
+            "ciphertext": encoded,
+            "sha256": digest,
+        }
+        signed, signing = _signed_fields(api, key, "keystore.put", fields)
+        signed["action"] = "keystore.put"
+        signed["version"] = str(signing["version"])
+        result = api.json_post("/_keystore", _cli_fields(signed))
+        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        return 0
+
+    fields = {"name": args.name}
+    signed, signing = _signed_fields(api, key, "keystore.delete", fields)
+    signed["action"] = "keystore.delete"
+    signed["version"] = str(signing["version"])
+    result = api.json_post("/_keystore", _cli_fields(signed))
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0
 
@@ -580,6 +696,38 @@ def main(argv: list[str] | None = None) -> int:
     profile.add_argument("--name")
     profile.add_argument("--bio")
     profile.set_defaults(func=command_profile)
+
+    keystore = sub.add_parser(
+        "keystore",
+        help="store externally encrypted private keys under the current signed identity",
+    )
+    keystore_sub = keystore.add_subparsers(dest="keystore_action", required=True)
+    keystore_pubkey = keystore_sub.add_parser(
+        "pubkey",
+        help="show the Curve25519 public key derived from the current Ed25519 identity",
+    )
+    keystore_pubkey.set_defaults(func=command_keystore)
+    keystore_list = keystore_sub.add_parser("list", help="list encrypted keystore entries")
+    keystore_list.set_defaults(func=command_keystore)
+    keystore_put = keystore_sub.add_parser(
+        "put",
+        help="encrypt a private key locally and upload only ciphertext",
+    )
+    keystore_put.add_argument("name")
+    keystore_put.add_argument("--file")
+    keystore_put.add_argument("--stdin", action="store_true")
+    keystore_put.set_defaults(func=command_keystore)
+    keystore_get = keystore_sub.add_parser(
+        "get",
+        help="download ciphertext and decrypt it locally",
+    )
+    keystore_get.add_argument("name")
+    keystore_get.add_argument("--out", required=True)
+    keystore_get.add_argument("--force", action="store_true")
+    keystore_get.set_defaults(func=command_keystore)
+    keystore_delete = keystore_sub.add_parser("delete", help="delete one encrypted entry")
+    keystore_delete.add_argument("name")
+    keystore_delete.set_defaults(func=command_keystore)
 
     inbox = sub.add_parser("inbox", help="read the signed identity inbox")
     inbox.add_argument("--since", type=int)
