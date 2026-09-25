@@ -81,6 +81,7 @@ class WebSubCase(unittest.TestCase):
             webhook_secret_key=str(Path(self.tmp.name) / "webhook.key"),
             webhook_delivery_enabled=False,
             websub_delivery_enabled=False,
+            websub_external_hubs="https://hub.example/hub",
             write_burst=200,
             write_per_minute=3000,
             read_per_minute=3000,
@@ -111,6 +112,10 @@ class WebSubCase(unittest.TestCase):
             '<atom:link href="https://msg.lmm.best/hub" rel="hub"/>',
             body,
         )
+        self.assertIn(
+            '<atom:link href="https://hub.example/hub" rel="hub"/>',
+            body,
+        )
 
         status, body = self.c.get("/main/rss.xml")
         self.assertEqual(status, 200, body)
@@ -123,6 +128,16 @@ class WebSubCase(unittest.TestCase):
             '<atom:link href="https://msg.lmm.best/hub" rel="hub"/>',
             body,
         )
+        self.assertIn(
+            '<atom:link href="https://hub.example/hub" rel="hub"/>',
+            body,
+        )
+
+    def test_default_config_includes_built_in_and_public_hubs(self) -> None:
+        hubs = Config().websub_hubs
+        self.assertEqual(hubs[0], "https://msg.lmm.best/hub")
+        self.assertIn("https://websubhub.com/hub", hubs)
+        self.assertIn("https://pubsubhubbub.appspot.com/", hubs)
 
     def subscribe(self, *, secret: str = "shared-secret", lease: str = "600") -> None:
         status, body = self.c.post(
@@ -156,7 +171,16 @@ class WebSubCase(unittest.TestCase):
             captured["headers"] = headers
             return 204
 
-        with patch("msgd.websub._post_feed", side_effect=deliver):
+        public_pings: list[tuple[str, str]] = []
+
+        def ping(hub: str, topic: str) -> int:
+            public_pings.append((hub, topic))
+            return 204
+
+        with (
+            patch("msgd.websub._post_feed", side_effect=deliver),
+            patch("msgd.websub._post_publish_ping", side_effect=ping),
+        ):
             self.server.board.websub._run_once()
 
         payload = captured["body"]
@@ -168,6 +192,16 @@ class WebSubCase(unittest.TestCase):
         expected = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
         self.assertEqual(headers["X-Hub-Signature"], f"sha256={expected}")
         self.assertEqual(self.server.board.store.due_websub_deliveries(), [])
+        self.assertEqual(self.server.board.store.due_websub_hub_pings(), [])
+        self.assertEqual(
+            set(public_pings),
+            {
+                ("https://hub.example/hub", "https://msg.lmm.best/rss.xml"),
+                ("https://hub.example/hub", "https://msg.lmm.best/feed.xml"),
+                ("https://hub.example/hub", "https://msg.lmm.best/main/rss.xml"),
+                ("https://hub.example/hub", "https://msg.lmm.best/main/feed.xml"),
+            },
+        )
 
         status, body = self.c.post(
             "/hub",
