@@ -553,6 +553,60 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if action == "cert.request":
+            issuer_serial = _param(params, "issuer_serial") or "root"
+            grants_value = _canonical_grants(_required(params, "grants"))
+            delegate = _truthy(_param(params, "delegate"))
+            message = _param(params, "message") or ""
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+                issuer_serial=issuer_serial,
+                subject_key=key,
+                delegate=delegate,
+                grants=grants_value,
+                message=message,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "issuer_serial": issuer_serial,
+                    "delegate": delegate,
+                    "grants": json.loads(grants_value),
+                    **payload_info(payload),
+                },
+            )
+            return
+
+        if action == "cert.request.decision":
+            csr_id = _int_required(params, "csr_id")
+            decision = (_required(params, "decision")).lower()
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                csr_id=csr_id,
+                decision=decision,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "csr_id": csr_id,
+                    "decision": decision,
+                    **payload_info(payload),
+                },
+            )
+            return
+
         if action == "topic.policy":
             board = (_required(params, "board")).lower()
             anonymous = _topic_permissions(params)
