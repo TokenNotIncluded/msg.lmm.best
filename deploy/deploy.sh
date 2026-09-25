@@ -58,6 +58,8 @@ sudo install -m 0644 "$D/etc/msg-lmm-best/msg.conf" /etc/msg-lmm-best/msg.conf
 echo "==> root CA"
 sudo "$VENV/bin/msgd-cert" init-root
 "$VENV/bin/msgd" --config /etc/msg-lmm-best/msg.conf --check
+sudo ln -sfn "$VENV/bin/msgd-admin" /usr/local/bin/msgd-admin
+sudo ln -sfn "$VENV/bin/msgd-cert" /usr/local/bin/msgd-cert
 
 echo "==> systemd"
 sudo install -m 0644 "$D/msg-lmm-best.service" /etc/systemd/system/msg-lmm-best.service
