@@ -931,10 +931,7 @@ class Handler(BaseHTTPRequestHandler):
             requested_name = _param(params, "name")
             if requested_name:
                 requested_claim = store.name_claim(requested_name)
-                if (
-                    requested_claim is not None
-                    and str(requested_claim["author_id"]) != signer_id
-                ):
+                if requested_claim is not None and str(requested_claim["author_id"]) != signer_id:
                     raise StoreError(
                         f"name {requested_name!r} is already bound to public key "
                         f"{requested_claim['public_key']} "
