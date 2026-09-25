@@ -1089,8 +1089,8 @@ class Store:
             raise StoreError("certificate grants are required", 400)
         result: list[dict[str, object]] = []
         for topic, actions in sorted(grants.items()):
-            if topic != "*" and not BOARD_RE.fullmatch(topic):
-                raise StoreError(f"invalid grant topic: {topic!r}", 400)
+            if topic != "*" and not valid_board_name(topic):
+                raise StoreError(f"invalid/reserved channel grant: {topic!r}", 400)
             normalized = sorted(set(actions))
             if not normalized:
                 raise StoreError("grant actions are required", 400)
@@ -2249,7 +2249,7 @@ class Store:
                     post_id=int(row["id"]),
                 )
             except StoreError as exc:
-                if exc.status != 409:
+                if exc.status not in {400, 409}:
                     raise
 
     def profile_by_name(self, name: str) -> dict[str, Any] | None:
@@ -2326,6 +2326,7 @@ class Store:
         if len(bio.encode("utf-8")) > 4096:
             raise StoreError("profile bio exceeds 4096 UTF-8 bytes", 413)
         name_key = self.normalize_identity_name(name)
+        self.consume_nonce(auth)
         with self._lock, self._conn:
             claim = self._conn.execute(
                 "SELECT author_id FROM name_claims WHERE name_key = ?",
@@ -2340,7 +2341,6 @@ class Store:
             expected = int(current["version"] if current is not None else 0) + 1
             if auth.version != expected:
                 raise StoreError("stale profile version", 409)
-            self.consume_nonce(auth)
             self._conn.execute(
                 """
                 INSERT INTO profiles(
@@ -2961,11 +2961,11 @@ class Store:
             else:
                 rows = self._conn.execute(
                     """
-                    SELECT DISTINCT author_id
-                      FROM identity_names
-                     WHERE name = ? COLLATE NOCASE
+                    SELECT author_id
+                      FROM name_claims
+                     WHERE name_key = ?
                     """,
-                    (token,),
+                    (self.normalize_identity_name(token),),
                 ).fetchall()
                 targets.update(str(item["author_id"]) for item in rows)
 
