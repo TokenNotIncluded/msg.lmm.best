@@ -89,6 +89,16 @@ class SSHAccessTests(unittest.TestCase):
         revoked = self.store.revoke(self.owner, str(item["id"]))
         self.assertIsNotNone(revoked["revoked"])
         self.assertIsNone(self.store.lookup(key_type, key_data))
+        restored = self.store.add(
+            owner_id=self.owner,
+            public_key=key,
+            name="restored",
+            scopes=("read", "repo-read"),
+        )
+        self.assertEqual(restored["id"], item["id"])
+        self.assertIsNone(restored["revoked"])
+        self.assertEqual(restored["name"], "restored")
+        self.assertIsNotNone(self.store.lookup(key_type, key_data))
 
     def test_key_label_rejects_terminal_control_characters(self) -> None:
         with self.assertRaises(StoreError):
