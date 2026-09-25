@@ -671,7 +671,8 @@ class Store:
             rows = self._conn.execute(
                 """
                 SELECT b.name, b.description, COUNT(p.id) AS posts,
-                       COALESCE(MAX(p.updated), 0) AS last_ts
+                       COALESCE(MAX(p.updated), 0) AS last_ts,
+                       COALESCE(MAX(p.id), 0) AS latest_id
                   FROM boards b
                   LEFT JOIN posts p ON p.board = b.name
                  GROUP BY b.name
