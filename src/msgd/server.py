@@ -19,6 +19,7 @@ from msgd.config import Config
 from msgd.crypto import (
     ACTIONS,
     SignatureError,
+    canonical_json,
     certificate_payload,
     make_certificate,
     normalize_file_manifest,
@@ -615,13 +616,18 @@ class Handler(BaseHTTPRequestHandler):
 
         if action == "cert.revoke":
             serial = _required(params, "serial")
+            reason = _param(params, "reason") or ""
             payload = request_payload(
                 action=action,
                 signer_id=signer_id,
                 version=1,
                 serial=serial,
+                reason=reason,
             )
-            self._json(200, {"signer_id": signer_id, **payload_info(payload)})
+            self._json(
+                200,
+                {"signer_id": signer_id, "reason": reason, **payload_info(payload)},
+            )
             return
 
         if action == "cert.issue":
@@ -719,6 +725,108 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, rows)
             return
         raise StoreError("serial or subject is required", 400)
+
+    def _csr(self, params: Params, method: str) -> None:
+        store = self.board.store
+
+        if method == "GET":
+            if self._limited(False):
+                return
+            csr_id = _optional_positive_int(params, "id")
+            if csr_id is not None:
+                csr = store.csr(csr_id)
+                if csr is None:
+                    raise StoreError("CSR not found", 404)
+                self._json(200, csr)
+                return
+            limit = _int(params, "limit", 50, 1, self.board.cfg.max_limit)
+            assert limit is not None
+            self._json(
+                200,
+                store.list_csrs(
+                    status=_param(params, "status"),
+                    subject_id=_param(params, "subject"),
+                    requested_issuer=_param(params, "requested_issuer"),
+                    limit=limit,
+                ),
+            )
+            return
+
+        if method != "POST":
+            raise StoreError("POST required", 405)
+        if self._limited(True):
+            return
+
+        cancel_id = _optional_positive_int(params, "cancel")
+        reject_id = _optional_positive_int(params, "reject")
+        if cancel_id is not None and reject_id is not None:
+            raise StoreError("choose cancel or reject", 400)
+
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        canonical_key, signer_id = public_identity(key)
+        reason = _param(params, "reason") or ""
+
+        if cancel_id is not None:
+            payload = request_payload(
+                action="cert.request.cancel",
+                signer_id=signer_id,
+                version=1,
+                csr_id=cancel_id,
+                reason=reason,
+            )
+            auth = signed_request(canonical_key, sig, payload, version=1)
+            self._json(200, store.cancel_csr(cancel_id, auth.signer_id, reason))
+            return
+
+        if reject_id is not None:
+            payload = request_payload(
+                action="cert.request.reject",
+                signer_id=signer_id,
+                version=1,
+                csr_id=reject_id,
+                reason=reason,
+            )
+            auth = signed_request(canonical_key, sig, payload, version=1)
+            self._json(200, store.reject_csr(reject_id, auth.signer_id, reason))
+            return
+
+        grants = _grants(_required(params, "grants"))
+        grant_manifest = _grant_manifest(grants)
+        requested_issuer = (_param(params, "requested_issuer") or "").lower()
+        delegate = _truthy(_param(params, "delegate"))
+        message = _param(params, "message") or ""
+        nonce = _required(params, "nonce")
+        issued = _int_required(params, "issued")
+        payload = request_payload(
+            action="cert.request",
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            requested_issuer=requested_issuer,
+            delegate=delegate,
+            csr_grants=grant_manifest,
+            message=message,
+        )
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        self._json(
+            201,
+            store.create_csr(
+                auth=auth,
+                grants=grants,
+                delegate=delegate,
+                requested_issuer=requested_issuer,
+                message=message,
+            ),
+        )
 
     def _revoke(self, params: Params) -> None:
         serial = _required(params, "serial")
@@ -1306,6 +1414,28 @@ def _auth_fields(params: Params) -> tuple[str | None, str | None]:
     if (key is None) != (sig is None):
         raise StoreError("key and sig must be supplied together", 400)
     return key, sig
+
+
+def _optional_positive_int(params: Params, key: str) -> int | None:
+    raw = _param(params, key)
+    if raw in {None, ""}:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise StoreError(f"{key} must be an integer", 400) from exc
+    if value < 1:
+        raise StoreError(f"{key} must be positive", 400)
+    return value
+
+
+def _grant_manifest(
+    grants: dict[str, tuple[str, ...]],
+) -> tuple[dict[str, object], ...]:
+    return tuple(
+        {"topic": topic, "actions": list(actions)}
+        for topic, actions in sorted(grants.items())
+    )
 
 
 def _topic_permissions(params: Params) -> tuple[str, ...]:
