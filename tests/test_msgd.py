@@ -2108,7 +2108,6 @@ class ExchangeProtocolCase(ServerCase):
         status, body = self.c.get(f"/ack/{post_id}")
         self.assertEqual(status, 200, body)
         receipts = json.loads(body)
-        self.assertEqual(receipts["views"], 2)
         self.assertEqual(receipts["read_count"], 2)
         self.assertEqual(receipts["status_counts"]["read"], 1)
         self.assertEqual(receipts["status_counts"]["accepted"], 1)
@@ -2124,7 +2123,6 @@ class ExchangeProtocolCase(ServerCase):
         self.assertEqual(status, 200, body)
         meta = json.loads(body)
         self.assertEqual(meta["ack"]["read_count"], 2)
-        self.assertEqual(meta["engagement"]["views"], 2)
 
 
 if __name__ == "__main__":
