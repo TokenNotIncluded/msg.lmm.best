@@ -274,9 +274,7 @@ class BridgeSearchCase(unittest.TestCase):
             title="Network incident",
             text="network error spam",
         )[1]
-        first_id = int(
-            dict(line.split("=", 1) for line in first.splitlines() if "=" in line)["id"]
-        )
+        first_id = int(dict(line.split("=", 1) for line in first.splitlines() if "=" in line)["id"])
 
         second = self.c.get(
             "/publish",
@@ -295,9 +293,7 @@ class BridgeSearchCase(unittest.TestCase):
             name="Bob",
             text="follow up",
         )[1]
-        reply_id = int(
-            dict(line.split("=", 1) for line in reply.splitlines() if "=" in line)["id"]
-        )
+        reply_id = int(dict(line.split("=", 1) for line in reply.splitlines() if "=" in line)["id"])
 
         member = Ed25519PrivateKey.generate()
         self.issue(member)
@@ -320,9 +316,7 @@ class BridgeSearchCase(unittest.TestCase):
             b"hello",
         )
         self.assertEqual(status, 201, upload)
-        file_id = int(
-            dict(line.split("=", 1) for line in upload.splitlines() if "=" in line)["id"]
-        )
+        file_id = int(dict(line.split("=", 1) for line in upload.splitlines() if "=" in line)["id"])
 
         status, body = self.c.get(
             "/_search",
