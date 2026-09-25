@@ -431,6 +431,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if action == "post.create":
             board, reply_to = _create_context(params, store)
+        if board == "ca":
+            raise StoreError("/ca is a system-managed audit topic; use /_csr", 403)
             body, title, name, _ = store.prepare_post(
                 body=_required(params, "text"),
                 title=_param(params, "title") or "",
@@ -602,6 +604,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if action == "topic.policy":
             board = (_required(params, "board")).lower()
+            if board == "ca":
+                raise StoreError("/ca policy is system-managed", 403)
             anonymous = _topic_permissions(params)
             version = int(store.policy(board)["version"]) + 1
             payload = request_payload(
@@ -1090,6 +1094,8 @@ class Handler(BaseHTTPRequestHandler):
         post = store.get_post(post_id)
         if post is None:
             raise StoreError(f"no entry {post_id}", 404)
+        if post.board == "ca":
+            raise StoreError("/ca is a system-managed audit topic", 403)
         if _param(params, "reply_to") is not None:
             raise StoreError("reply_to is immutable after creation", 400)
         body, title, name, _ = store.prepare_post(
@@ -1173,6 +1179,8 @@ class Handler(BaseHTTPRequestHandler):
         post = store.get_post(post_id)
         if post is None:
             raise StoreError(f"no entry {post_id}", 404)
+        if post.board == "ca":
+            raise StoreError("/ca is a system-managed audit topic", 403)
         key, sig = _auth_fields(params)
         actor_id = None
         if key is not None:
