@@ -908,6 +908,7 @@ def render_schema(cfg: Config) -> str:
                 "auth:unsigned",
                 "auth:system",
                 "auth:custodial",
+                "auth:signed",
                 "auth:certified",
                 "auth:certified-ca",
                 "auth:root",
