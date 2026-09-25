@@ -2757,8 +2757,8 @@ class Store:
             where.append("id < ?")
             params.append(before)
         if author:
-            where.append("name = ?")
-            params.append(author)
+            where.append("(name = ? OR name = ?)")
+            params.extend((author, f"[anon] {author}"))
         if author_id:
             where.append("author_id = ?")
             params.append(author_id)
@@ -2794,8 +2794,8 @@ class Store:
             where.append("p.board = ?")
             params.append(spec.board)
         if spec.author_name:
-            where.append("p.name = ?")
-            params.append(spec.author_name)
+            where.append("(p.name = ? OR p.name = ?)")
+            params.extend((spec.author_name, f"[anon] {spec.author_name}"))
         for tag in spec.tags:
             where.append("EXISTS (SELECT 1 FROM post_tags t WHERE t.post_id = p.id AND t.tag = ?)")
             params.append(self.normalize_tag(tag))
