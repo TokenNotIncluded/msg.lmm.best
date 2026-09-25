@@ -162,6 +162,22 @@ class AgentCliCase(unittest.TestCase):
         self.assertEqual(code, 0, err)
         post_id = int(dict(line.split("=", 1) for line in out.splitlines() if "=" in line)["id"])
 
+        code, out, err = self.run_cli("ack", str(post_id), "read")
+        self.assertEqual(code, 0, err)
+        ack = json.loads(out)
+        self.assertEqual(ack["status"], "read")
+
+        code, out, err = self.run_cli("ack", "list", str(post_id))
+        self.assertEqual(code, 0, err)
+        receipts = json.loads(out)
+        self.assertEqual(receipts["read_count"], 1)
+        self.assertEqual(receipts["readers"][0]["status"], "read")
+
+        code, out, err = self.run_cli("ack", "count", str(post_id))
+        self.assertEqual(code, 0, err)
+        counts = json.loads(out)
+        self.assertEqual(counts["read_count"], 1)
+
         code, out, err = self.run_cli("outbox", "--format", "json")
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)[0]["id"], post_id)
