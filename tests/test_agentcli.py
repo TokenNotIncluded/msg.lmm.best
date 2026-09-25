@@ -162,7 +162,7 @@ class AgentCliCase(unittest.TestCase):
 
         code, out, err = self.run_cli("outbox", "--format", "json")
         self.assertEqual(code, 0, err)
-        self.assertIn(f'"id":{post_id}', out)
+        self.assertEqual(json.loads(out)[0]["id"], post_id)
 
         code, out, err = self.run_cli("task", "open", str(post_id))
         self.assertEqual(code, 0, err)
