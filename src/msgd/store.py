@@ -162,6 +162,7 @@ RESERVED_BOARDS = {
     "ref",
     "index",
     "file",
+    "files",
     "key",
     "keystore",
     "_keystore",
@@ -223,14 +224,18 @@ CREATE INDEX IF NOT EXISTS posts_board_id ON posts(board, id);
 CREATE INDEX IF NOT EXISTS posts_created ON posts(id);
 
 CREATE TABLE IF NOT EXISTS attachments (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    post_id      INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-    slot         INTEGER NOT NULL,
-    name         TEXT NOT NULL,
-    content_type TEXT NOT NULL,
-    data         BLOB NOT NULL,
-    nbytes       INTEGER NOT NULL,
-    sha256       TEXT NOT NULL,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id       INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    slot          INTEGER NOT NULL,
+    name          TEXT NOT NULL,
+    content_type  TEXT NOT NULL,
+    data          BLOB NOT NULL,
+    nbytes        INTEGER NOT NULL,
+    sha256        TEXT NOT NULL,
+    created       REAL NOT NULL,
+    uploader_name TEXT NOT NULL DEFAULT 'anonymous',
+    uploader_id   TEXT,
+    downloads     INTEGER NOT NULL DEFAULT 0,
     UNIQUE(post_id, slot)
 );
 CREATE INDEX IF NOT EXISTS attachments_post ON attachments(post_id);
@@ -263,14 +268,18 @@ CREATE INDEX IF NOT EXISTS archived_posts_time ON archived_posts(archived_at, id
 CREATE INDEX IF NOT EXISTS archived_posts_board ON archived_posts(board, id);
 
 CREATE TABLE IF NOT EXISTS archived_attachments (
-    id           INTEGER PRIMARY KEY,
-    post_id      INTEGER NOT NULL REFERENCES archived_posts(id) ON DELETE CASCADE,
-    slot         INTEGER NOT NULL,
-    name         TEXT NOT NULL,
-    content_type TEXT NOT NULL,
-    data         BLOB NOT NULL,
-    nbytes       INTEGER NOT NULL,
-    sha256       TEXT NOT NULL,
+    id            INTEGER PRIMARY KEY,
+    post_id       INTEGER NOT NULL REFERENCES archived_posts(id) ON DELETE CASCADE,
+    slot          INTEGER NOT NULL,
+    name          TEXT NOT NULL,
+    content_type  TEXT NOT NULL,
+    data          BLOB NOT NULL,
+    nbytes        INTEGER NOT NULL,
+    sha256        TEXT NOT NULL,
+    created       REAL NOT NULL,
+    uploader_name TEXT NOT NULL DEFAULT 'anonymous',
+    uploader_id   TEXT,
+    downloads     INTEGER NOT NULL DEFAULT 0,
     UNIQUE(post_id, slot)
 );
 CREATE INDEX IF NOT EXISTS archived_attachments_post ON archived_attachments(post_id);
@@ -572,6 +581,10 @@ class Attachment:
     data: bytes
     nbytes: int
     sha256: str
+    created: float
+    uploader_name: str
+    uploader_id: str | None
+    downloads: int
 
     def manifest(self) -> dict[str, object]:
         return {
@@ -584,9 +597,18 @@ class Attachment:
     def to_dict(self) -> dict[str, object]:
         return {
             "id": self.id,
+            "post_id": self.post_id,
             "slot": self.slot,
             **self.manifest(),
+            "uploaded_at": round(self.created, 3),
+            "downloads": self.downloads,
+            "uploader": {
+                "name": self.uploader_name,
+                "author_id": self.uploader_id,
+                "signed": self.uploader_id is not None,
+            },
             "url": f"/file/{self.id}",
+            "meta": f"/file/{self.id}/meta",
         }
 
 
@@ -745,6 +767,63 @@ class Store:
         for name, definition in additions.items():
             if name not in columns:
                 self._conn.execute(f"ALTER TABLE posts ADD COLUMN {name} {definition}")
+
+        attachment_additions = {
+            "created": "REAL NOT NULL DEFAULT 0",
+            "uploader_name": "TEXT NOT NULL DEFAULT 'anonymous'",
+            "uploader_id": "TEXT",
+            "downloads": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for table, post_table in (
+            ("attachments", "posts"),
+            ("archived_attachments", "archived_posts"),
+        ):
+            attachment_columns = {
+                str(row["name"])
+                for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for name, definition in attachment_additions.items():
+                if name not in attachment_columns:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+            self._conn.execute(
+                f"""
+                UPDATE {table}
+                   SET created = COALESCE(
+                       (SELECT updated FROM {post_table} p WHERE p.id = {table}.post_id),
+                       0
+                   )
+                 WHERE created = 0
+                """
+            )
+            self._conn.execute(
+                f"""
+                UPDATE {table}
+                   SET uploader_name = COALESCE(
+                       NULLIF(uploader_name, ''),
+                       (SELECT name FROM {post_table} p WHERE p.id = {table}.post_id),
+                       'anonymous'
+                   )
+                 WHERE uploader_name IN ('', 'anonymous') OR uploader_name IS NULL
+                """
+            )
+            self._conn.execute(
+                f"""
+                UPDATE {table}
+                   SET uploader_id = (
+                       SELECT author_id FROM {post_table} p WHERE p.id = {table}.post_id
+                   )
+                 WHERE uploader_id IS NULL
+                """
+            )
+
+        self._conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS attachments_created ON attachments(created, id);
+            CREATE INDEX IF NOT EXISTS attachments_name ON attachments(name, id);
+            CREATE INDEX IF NOT EXISTS attachments_uploader ON attachments(uploader_id, id);
+            CREATE INDEX IF NOT EXISTS attachments_downloads ON attachments(downloads, id);
+            """
+        )
 
         revocation_columns = {
             str(row["name"])
@@ -1202,7 +1281,8 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256
+                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256,
+                       created, uploader_name, uploader_id, downloads
                   FROM attachments
                  WHERE post_id = ?
                  ORDER BY slot
@@ -1215,7 +1295,8 @@ class Store:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256
+                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256,
+                       created, uploader_name, uploader_id, downloads
                   FROM attachments
                  WHERE id = ?
                 """,
@@ -1225,6 +1306,114 @@ class Store:
 
     def attachment_manifest(self, post_id: int) -> tuple[dict[str, object], ...]:
         return tuple(file.manifest() for file in self.attachments(post_id))
+
+    @staticmethod
+    def _attachment_metadata_row(row: sqlite3.Row) -> dict[str, Any]:
+        uploader_id = str(row["uploader_id"]) if row["uploader_id"] is not None else None
+        uploader_name = str(row["uploader_name"] or "anonymous")
+        file_id = int(row["id"])
+        post_id = int(row["post_id"])
+        board = str(row["board"])
+        return {
+            "id": file_id,
+            "post_id": post_id,
+            "slot": int(row["slot"]),
+            "name": str(row["name"]),
+            "type": str(row["content_type"]),
+            "bytes": int(row["nbytes"]),
+            "sha256": str(row["sha256"]),
+            "uploaded_at": float(row["created"]),
+            "downloads": int(row["downloads"]),
+            "uploader": {
+                "name": uploader_name,
+                "author_id": uploader_id,
+                "signed": uploader_id is not None,
+            },
+            "board": board,
+            "url": f"/file/{file_id}",
+            "meta": f"/file/{file_id}/meta",
+            "post": f"/{board}/{post_id}",
+        }
+
+    def attachment_metadata(self, file_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT a.id, a.post_id, a.slot, a.name, a.content_type, a.nbytes,
+                       a.sha256, a.created, a.uploader_name, a.uploader_id,
+                       a.downloads, p.board
+                  FROM attachments a
+                  JOIN posts p ON p.id = a.post_id
+                 WHERE a.id = ? AND p.system = 0
+                """,
+                (file_id,),
+            ).fetchone()
+        return self._attachment_metadata_row(row) if row is not None else None
+
+    def list_attachment_metadata(
+        self,
+        *,
+        sort: str = "time",
+        cursor: tuple[object, int] | None = None,
+        limit: int = 20,
+        order: str = "desc",
+        uploader_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if sort not in {"id", "time", "name", "uploader", "downloads"}:
+            raise StoreError("unsupported file index", 500)
+        if order not in {"asc", "desc"}:
+            raise StoreError("order must be asc or desc", 400)
+
+        expressions = {
+            "id": "a.id",
+            "time": "a.created",
+            "name": "a.name",
+            "uploader": "a.uploader_name",
+            "downloads": "a.downloads",
+        }
+        expression = expressions[sort]
+        where = ["p.system = 0"]
+        params: list[Any] = []
+        if uploader_id is not None:
+            where.append("a.uploader_id = ?")
+            params.append(uploader_id)
+        if cursor is not None:
+            value, file_id = cursor
+            operator = ">" if order == "asc" else "<"
+            where.append(f"({expression} {operator} ? OR ({expression} = ? AND a.id {operator} ?))")
+            params.extend((value, value, file_id))
+
+        direction = "ASC" if order == "asc" else "DESC"
+        params.append(max(1, min(limit, self.cfg.max_limit + 1)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT a.id, a.post_id, a.slot, a.name, a.content_type, a.nbytes,
+                       a.sha256, a.created, a.uploader_name, a.uploader_id,
+                       a.downloads, p.board
+                  FROM attachments a
+                  JOIN posts p ON p.id = a.post_id
+                 WHERE {" AND ".join(where)}
+                 ORDER BY {expression} {direction}, a.id {direction}
+                 LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._attachment_metadata_row(row) for row in rows]
+
+    def record_attachment_download(self, file_id: int) -> int | None:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE attachments SET downloads = downloads + 1 WHERE id = ?",
+                (file_id,),
+            )
+            if cur.rowcount != 1:
+                return None
+            row = self._conn.execute(
+                "SELECT downloads FROM attachments WHERE id = ?",
+                (file_id,),
+            ).fetchone()
+        return int(row["downloads"]) if row is not None else None
 
     def _storage_bytes(self) -> int:
         row = self._conn.execute(
@@ -1251,13 +1440,22 @@ class Store:
         ).fetchone()
         return int(row["n"]) if row else 0
 
-    def _insert_attachments(self, post_id: int, files: tuple[FileInput, ...]) -> None:
+    def _insert_attachments(
+        self,
+        post_id: int,
+        files: tuple[FileInput, ...],
+        *,
+        uploaded_at: float,
+        uploader_name: str,
+        uploader_id: str | None,
+    ) -> None:
         for slot, file in enumerate(files):
             self._conn.execute(
                 """
                 INSERT INTO attachments(
-                    post_id, slot, name, content_type, data, nbytes, sha256
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    post_id, slot, name, content_type, data, nbytes, sha256,
+                    created, uploader_name, uploader_id, downloads
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (
                     post_id,
@@ -1267,6 +1465,9 @@ class Store:
                     file.data,
                     file.nbytes,
                     file.sha256,
+                    uploaded_at,
+                    uploader_name,
+                    uploader_id,
                 ),
             )
 
@@ -3133,7 +3334,13 @@ class Store:
                     ),
                 )
                 self._remember_identity_name(auth.signer_id, name, now)
-            self._insert_attachments(post_id, files)
+            self._insert_attachments(
+                post_id,
+                files,
+                uploaded_at=now,
+                uploader_name=name,
+                uploader_id=auth.signer_id if auth is not None else None,
+            )
             self._reindex_inbox(post_id)
             self._reindex_tags(post_id)
 
@@ -3208,6 +3415,13 @@ class Store:
         elif new_name != post.name:
             new_name = self.anonymous_display_name(new_name, check_claim=False)
 
+        file_uploader_name = new_name
+        if files is not None and auth is not None:
+            uploader_profile = self.profile_by_author(auth.signer_id)
+            file_uploader_name = (
+                str(uploader_profile["name"]) if uploader_profile is not None else auth.signer_id
+            )
+
         with self._lock, self._conn:
             if (
                 post.signed
@@ -3280,7 +3494,13 @@ class Store:
 
             if files is not None:
                 self._conn.execute("DELETE FROM attachments WHERE post_id = ?", (post.id,))
-                self._insert_attachments(post.id, files)
+                self._insert_attachments(
+                    post.id,
+                    files,
+                    uploaded_at=now,
+                    uploader_name=file_uploader_name,
+                    uploader_id=auth.signer_id if auth is not None else None,
+                )
             if auth is not None and auth.signer_id == post.author_id:
                 self._remember_identity_name(auth.signer_id, new_name, now)
             self._reindex_inbox(post.id)
@@ -3319,9 +3539,11 @@ class Store:
             self._conn.execute(
                 """
                 INSERT INTO archived_attachments(
-                    id, post_id, slot, name, content_type, data, nbytes, sha256
+                    id, post_id, slot, name, content_type, data, nbytes, sha256,
+                    created, uploader_name, uploader_id, downloads
                 )
-                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256
+                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256,
+                       created, uploader_name, uploader_id, downloads
                   FROM attachments
                  WHERE post_id = ?
                 """,
@@ -3955,31 +4177,25 @@ class Store:
             }
 
         if kind == "file":
-            with self._lock:
-                row = self._conn.execute(
-                    """
-                    SELECT a.id, a.post_id, a.name, a.content_type,
-                           a.nbytes, a.sha256, p.board
-                      FROM attachments a
-                      JOIN posts p ON p.id = a.post_id
-                     WHERE p.system = 0
-                     ORDER BY a.id DESC
-                     LIMIT 1
-                    """
-                ).fetchone()
-            if row is None:
+            rows = self.list_attachment_metadata(sort="id", limit=1, order="desc")
+            if not rows:
                 return None
+            item = rows[0]
             return {
                 "type": "file",
-                "id": int(row["id"]),
-                "post_id": int(row["post_id"]),
-                "board": str(row["board"]),
-                "name": str(row["name"]),
-                "content_type": str(row["content_type"]),
-                "bytes": int(row["nbytes"]),
-                "sha256": str(row["sha256"]),
-                "post": f"/{row['board']}/{row['post_id']}",
-                "target": f"/file/{row['id']}",
+                "id": item["id"],
+                "post_id": item["post_id"],
+                "board": item["board"],
+                "name": item["name"],
+                "content_type": item["type"],
+                "bytes": item["bytes"],
+                "sha256": item["sha256"],
+                "uploaded_at": item["uploaded_at"],
+                "downloads": item["downloads"],
+                "uploader": item["uploader"],
+                "post": item["post"],
+                "meta": item["meta"],
+                "target": item["url"],
             }
 
         raise StoreError(f"unknown latest kind: {kind}", 404)
@@ -5309,6 +5525,10 @@ class Store:
             data=bytes(row["data"]),
             nbytes=int(row["nbytes"]),
             sha256=str(row["sha256"]),
+            created=float(row["created"]),
+            uploader_name=str(row["uploader_name"] or "anonymous"),
+            uploader_id=str(row["uploader_id"]) if row["uploader_id"] is not None else None,
+            downloads=int(row["downloads"]),
         )
 
     @staticmethod

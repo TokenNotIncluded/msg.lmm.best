@@ -1370,6 +1370,120 @@ class PostUploadCase(unittest.TestCase):
             [],
         )
 
+    def test_file_indexes_metadata_and_download_counts(self) -> None:
+        status, body = self.c.multipart(
+            "/publish",
+            {"board": "main", "name": "first-uploader", "text": "first"},
+            [("file", "zeta.txt", "text/plain", b"zeta")],
+        )
+        self.assertEqual(status, 201, body)
+        first_post = int(
+            dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"]
+        )
+        first = json.loads(self.c.get(f"/main/{first_post}/meta")[1])["files"][0]
+
+        status, body = self.c.multipart(
+            "/publish",
+            {"board": "main", "name": "second-uploader", "text": "second"},
+            [("file", "alpha.txt", "text/plain", b"alpha")],
+        )
+        self.assertEqual(status, 201, body)
+        second_post = int(
+            dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"]
+        )
+        second = json.loads(self.c.get(f"/main/{second_post}/meta")[1])["files"][0]
+
+        status, body = self.c.get(f"/file/{first['id']}/meta")
+        self.assertEqual(status, 200, body)
+        meta = json.loads(body)
+        self.assertEqual(meta["post_id"], first_post)
+        self.assertEqual(meta["downloads"], 0)
+        self.assertGreater(meta["uploaded_at"], 0)
+        self.assertEqual(meta["uploader"]["name"], "[anon] anonymous")
+        self.assertIsNone(meta["uploader"]["author_id"])
+        self.assertFalse(meta["uploader"]["signed"])
+
+        status, body = self.c.get("/files", format="json", limit="1")
+        self.assertEqual(status, 200, body)
+        page = json.loads(body)
+        self.assertEqual(page["files"][0]["id"], second["id"])
+        self.assertTrue(page["has_more"])
+        self.assertTrue(page["next"])
+
+        status, body = self.c.get(page["next"])
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["files"][0]["id"], first["id"])
+
+        status, body = self.c.get("/files/by-name", format="json")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            [item["name"] for item in json.loads(body)["files"][:2]],
+            ["alpha.txt", "zeta.txt"],
+        )
+
+        status, data, headers = self.c.get_bytes(first["url"])
+        self.assertEqual((status, data), (200, b"zeta"))
+        self.assertEqual(headers["X-Download-Count"], "1")
+        status, data, headers = self.c.get_bytes(first["url"])
+        self.assertEqual((status, data), (200, b"zeta"))
+        self.assertEqual(headers["X-Download-Count"], "2")
+
+        meta = json.loads(self.c.get(f"/file/{first['id']}/meta")[1])
+        self.assertEqual(meta["downloads"], 2)
+        status, body = self.c.get("/files/by-downloads", format="json")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["files"][0]["id"], first["id"])
+
+        status, body = self.c.get("/index/by-file", format="json")
+        self.assertEqual(status, 200, body)
+        indexed = json.loads(body)["files"]
+        self.assertEqual([item["id"] for item in indexed[:2]], [first["id"], second["id"]])
+
+    def test_signed_uploader_has_profile_file_listing(self) -> None:
+        member = Ed25519PrivateKey.generate()
+        self.issue_member(member)
+        public = public_b64(member)
+        author_id = public_identity_for_test(member)
+
+        status, signing_body = self.c.multipart(
+            "/_signing",
+            {
+                "action": "post.create",
+                "key": public,
+                "board": "main",
+                "name": "FileOwner",
+                "text": "signed upload",
+            },
+            [("file", "signed.txt", "text/plain", b"signed")],
+        )
+        self.assertEqual(status, 200, signing_body)
+        info = json.loads(signing_body)
+        signature = sign_b64(member, info["payload_b64"])
+
+        status, body = self.c.multipart(
+            "/publish",
+            {
+                "board": "main",
+                "name": "FileOwner",
+                "text": "signed upload",
+                "key": public,
+                "sig": signature,
+                "nonce": info["nonce"],
+                "issued": str(info["issued"]),
+            },
+            [("file", "signed.txt", "text/plain", b"signed")],
+        )
+        self.assertEqual(status, 201, body)
+
+        status, body = self.c.get("/@FileOwner/files", format="json")
+        self.assertEqual(status, 200, body)
+        files = json.loads(body)["files"]
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]["name"], "signed.txt")
+        self.assertEqual(files[0]["uploader"]["author_id"], author_id)
+        self.assertEqual(files[0]["uploader"]["name"], "FileOwner")
+        self.assertTrue(files[0]["uploader"]["signed"])
+
     def test_signed_attachment_manifest_prevents_file_swap(self) -> None:
         member = Ed25519PrivateKey.generate()
         self.issue_member(member)

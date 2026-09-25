@@ -402,6 +402,8 @@ class BridgeSearchCase(unittest.TestCase):
         self.assertIn("/index/by-board", agent_index)
         self.assertIn("/index/by-tag", agent_index)
         self.assertIn("/index/by-reply", agent_index)
+        self.assertIn("/index/by-file", agent_index)
+        self.assertIn("files  /files", agent_index)
         self.assertIn("search /_search?q=TEXT", agent_index)
         self.assertIn("hot    /hot", agent_index)
         self.assertNotIn("## active", agent_index)
@@ -422,6 +424,7 @@ class BridgeSearchCase(unittest.TestCase):
                 "by-board",
                 "by-tag",
                 "by-reply",
+                "by-file",
             ],
         )
 

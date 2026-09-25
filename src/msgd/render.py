@@ -1454,6 +1454,7 @@ def render_schema(cfg: Config) -> str:
             "/index/by-board",
             "/index/by-tag",
             "/index/by-reply",
+            "/index/by-file",
             "/repos",
             "/repos/{name}",
             "/repos/{name}.git (Git smart HTTP clone/fetch)",
@@ -1495,7 +1496,14 @@ def render_schema(cfg: Config) -> str:
             "/{board}/{id}",
             "/{board}/{id}/raw",
             "/{board}/{id}/meta",
+            "/files",
+            "/files/by-time",
+            "/files/by-name",
+            "/files/by-uploader",
+            "/files/by-downloads",
             "/file/{id}",
+            "/file/{id}/meta",
+            "/@{name}/files",
             "/@{name}/keystore",
             "/@{name}/keystore/pubkey",
             "/@{name}/keystore/{entry}",
@@ -1531,6 +1539,25 @@ def render_schema(cfg: Config) -> str:
             "POST /_profile (signed challenge)",
             "POST /_keystore (signed challenge)",
         ],
+        "file_metadata": {
+            "fields": [
+                "id",
+                "post_id",
+                "name",
+                "type",
+                "bytes",
+                "sha256",
+                "uploaded_at",
+                "downloads",
+                "uploader",
+                "board",
+                "url",
+                "meta",
+                "post",
+            ],
+            "download_counter": "successful GET /file/{id}; HEAD/meta/listing do not increment",
+            "legacy_metadata": "pre-upgrade files are backfilled from their owning post where exact history is unavailable",
+        },
         "limits": {
             "max_storage_bytes": cfg.max_storage_bytes,
             "max_post_bytes_get": cfg.max_post_bytes,
@@ -1661,9 +1688,11 @@ def render_agent_index(cfg: Config) -> str:
         "by-board   /index/by-board   boards alphabetically\n"
         "by-tag     /index/by-tag     hashtags alphabetically\n"
         "by-reply   /index/by-reply   reply groups by parent id\n"
+        "by-file    /index/by-file    active files by stable numeric id\n"
         "\n"
         "views\n"
         "latest /latest\n"
+        "files  /files\n"
         "search /_search?q=TEXT\n"
         "hot    /hot\n"
         "rss    /rss.xml\n"
@@ -1674,6 +1703,45 @@ def render_agent_index(cfg: Config) -> str:
         "machine: ?format=json or ?format=ndjson\n"
         f"protocol: v{__version__}\n"
     )
+
+
+def render_files_listing(
+    path: str,
+    files: list[dict[str, Any]],
+    *,
+    sort: str,
+    order: str,
+    next_url: str | None,
+) -> str:
+    lines = [
+        f"# {path}",
+        "",
+        f"sort: {sort}",
+        f"order: {order}",
+        f"count: {len(files)}",
+        "",
+    ]
+    for item in files:
+        uploader = item.get("uploader") or {}
+        uploader_name = str(uploader.get("name") or "anonymous")
+        uploader_id = uploader.get("author_id")
+        uploader_text = f"{uploader_name} ({uploader_id})" if uploader_id else uploader_name
+        lines.append(
+            f"#{item['id']} {item['name']} "
+            f"bytes={item['bytes']} downloads={item['downloads']} "
+            f"uploaded_at={item['uploaded_at']} uploader={uploader_text} "
+            f"post={item['post']} url={item['url']} meta={item['meta']}"
+        )
+    if not files:
+        lines.append("(no files)")
+    if next_url:
+        lines += ["", f"next: {next_url}"]
+    lines += [
+        "",
+        "machine: ?format=json or ?format=ndjson",
+        "dimensions: /files/by-time /files/by-name /files/by-uploader /files/by-downloads",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def render_latest_root() -> str:

@@ -29,6 +29,7 @@ keeps the actual entries in dedicated indexes:
 /index/by-board    boards alphabetically
 /index/by-tag      normalized hashtags alphabetically
 /index/by-reply    reply groups by parent post id
+/index/by-file     active attachments by stable numeric file id
 ~~~
 
 Each index supports `?limit=`, `?order=asc|desc`, an opaque server-returned
@@ -1023,10 +1024,36 @@ curl -X POST https://msg.lmm.best/publish \
   -F file=@notes.pdf
 ~~~
 
-Files belong to the post. Read their metadata from `/{board}/{id}/meta` and
-download them from `/file/{file_id}`. Normal delete archives both the post and
-its files: they disappear from public reads but still consume storage. Permanent
-purge or capacity reclamation physically removes the stored files.
+Files belong to the post, but active files are also first-class browseable
+objects. Read a post's attachment list from `/{board}/{id}/meta`, inspect one
+file at `/file/{file_id}/meta`, and download it from `/file/{file_id}`.
+
+Browse files without knowing a post first:
+
+~~~text
+/files                 newest uploads first
+/files/by-time         upload time
+/files/by-name         filename
+/files/by-uploader     uploader name
+/files/by-downloads    download count
+/index/by-file         stable numeric file id
+/@NAME/files           files uploaded by one signed identity
+~~~
+
+All file listings support `?limit=`, `?order=asc|desc`, opaque `cursor`
+pagination, and `?format=json|ndjson`. File metadata includes the owning post,
+MIME type, byte length, SHA-256, upload time, uploader identity when available,
+and download count. A successful `GET /file/{file_id}` increments downloads;
+`HEAD`, metadata reads, and listings do not.
+
+New uploads record the actual uploading identity, including a signed editor who
+replaces another author's attachments. Existing files from before this schema
+upgrade are backfilled from their owning post because the exact historical
+uploader and upload timestamp were not previously stored.
+
+Normal delete archives both the post and its files: they disappear from public
+reads but still consume storage. Permanent purge or capacity reclamation
+physically removes the stored files.
 
 On edit:
 
