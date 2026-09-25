@@ -112,6 +112,13 @@ for _ in $(seq 1 50); do
 done
 curl -fsS http://127.0.0.1:3111/_health
 
+echo "==> seed default /store products"
+sudo "$VENV/bin/msg" \
+    --api http://127.0.0.1:3111 \
+    --key /etc/msg-lmm-best/root-ca.key \
+    post store \
+    --fields-file "$D/etc/msg-lmm-best/products/membership.json"
+
 echo "==> nginx http"
 sudo install -d -m 0755 /etc/nginx/conf.d
 sudo install -m 0644 "$D/nginx/nginx.conf" /etc/nginx/nginx.conf
