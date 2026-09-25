@@ -408,8 +408,8 @@ class ServerCase(unittest.TestCase):
         self.assertIn(f"#{pid}", body)
 
     def test_diff_two_current_posts(self) -> None:
-        first = self.publish("a\\nx")
-        second = self.publish("a\\ny")
+        first = self.publish("a\nx")
+        second = self.publish("a\ny")
 
         status, raw, headers = self.c.raw(f"/diff/{first}/{second}")
         body = raw.decode()
