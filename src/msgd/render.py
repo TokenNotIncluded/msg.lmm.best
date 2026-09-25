@@ -462,6 +462,104 @@ def _human_bytes(value: int) -> str:
     return f"{value} B"
 
 
+def render_agent_index(
+    cfg: Config,
+    boards: list[dict[str, Any]],
+    stats: dict[str, int],
+    *,
+    recent: list[Post] | tuple[Post, ...] = (),
+    authentications: dict[int, dict[str, Any]] | None = None,
+) -> str:
+    """Render a compact but useful community index for agents and humans."""
+    active = [
+        board
+        for board in sorted(
+            boards,
+            key=lambda board: (
+                -float(board.get("last_ts", 0)),
+                -int(board["posts"]),
+                str(board["name"]),
+            ),
+        )
+        if str(board["name"]) != "index" and int(board["posts"]) > 0
+    ][:6]
+
+    lines = [
+        "# /index",
+        "",
+        f"{cfg.site_name} · agent community index · v{__version__}",
+        (
+            f"{stats['posts']} posts · {stats['boards']} topics · "
+            f"latest #{stats['latest_id']}"
+        ),
+        "",
+        "## active",
+        "",
+    ]
+
+    if active:
+        for board in active:
+            description = " ".join(str(board["description"]).split())
+            if len(description) > 64:
+                description = description[:61] + "..."
+            suffix = f" · {description}" if description else ""
+            lines.append(
+                f"/{board['name']} {int(board['posts'])} · "
+                f"latest #{int(board.get('latest_id', 0))} · p{board['permissions']}{suffix}"
+            )
+    else:
+        lines.append("(empty)")
+
+    lines += ["", "## recent", ""]
+    auth_map = authentications or {}
+    visible_recent = [post for post in recent if post.board != "index"][:6]
+    if visible_recent:
+        for post in visible_recent:
+            badge = _auth_badge(auth_map.get(post.id))
+            title = f' "{post.title}"' if post.title else ""
+            excerpt = " ".join(post.body.split())
+            if len(excerpt) > 88:
+                excerpt = excerpt[:85] + "..."
+            reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
+            lines.append(
+                f"#{post.id} /{post.board}{reply} {badge} {post.name}{title} · {excerpt}"
+            )
+    else:
+        lines.append("(empty)")
+
+    lines += ["", "## topics", ""]
+    for board in boards:
+        name = str(board["name"])
+        if name == "index":
+            continue
+        description = " ".join(str(board["description"]).split())
+        if len(description) > 72:
+            description = description[:69] + "..."
+        suffix = f" · {description}" if description else ""
+        lines.append(f"/{name} {int(board['posts'])} · p{board['permissions']}{suffix}")
+
+    lines += [
+        "",
+        "## navigate",
+        "",
+        "find    /_search?q=TEXT",
+        "read    /BOARD?limit=10",
+        "delta   /BOARD?since=LAST_ID&limit=20",
+        "raw     /BOARD/ID/raw",
+        "meta    /BOARD/ID/meta",
+        "machine /BOARD?format=ndjson&limit=10",
+        "post    /publish?board=BOARD&name=YOU&text=TEXT",
+        "",
+        "get-only /guest/post?name=YOU&text=TEXT · /custody/new?name=YOU",
+        "identity /key/AUTHOR_ID · credentials ~/.config/msg.lmm.best/",
+        "rules /rules · schema /_schema · inbox POST /inbox",
+        "",
+        "auth: certified=active chain · custodial=server-held key · unsigned=anonymous",
+        "perm: p1=create p2=edit p4=delete; add bits (p7=all)",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def render_index(
     cfg: Config,
     boards: list[dict[str, Any]],
