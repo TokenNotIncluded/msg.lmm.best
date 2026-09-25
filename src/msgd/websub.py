@@ -281,9 +281,7 @@ class WebSubService:
         if path in {"/rss.xml", "/feed.xml"}:
             limit = min(50, self.cfg.max_limit)
             posts = [
-                post
-                for post in self.store.list_posts(limit=limit + 10)
-                if post.board != "index"
+                post for post in self.store.list_posts(limit=limit + 10) if post.board != "index"
             ][:limit]
             return render_rss(self.cfg, posts, feed_path=path).encode("utf-8")
 
@@ -363,9 +361,7 @@ class WebSubService:
                 self._verify(row)
             except Exception as exc:
                 attempts = int(row["attempts"])
-                retry_after = VERIFY_RETRY_DELAYS[
-                    min(attempts, len(VERIFY_RETRY_DELAYS) - 1)
-                ]
+                retry_after = VERIFY_RETRY_DELAYS[min(attempts, len(VERIFY_RETRY_DELAYS) - 1)]
                 self.store.finish_websub_verification(
                     str(row["id"]),
                     success=False,
