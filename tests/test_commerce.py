@@ -12,7 +12,6 @@ from msgd.config import Config
 from msgd.store import Store, StoreError
 from msgd.templates import TopicTemplateService
 
-
 STORE_TEMPLATE = {
     "v": 1,
     "scope": "root",
