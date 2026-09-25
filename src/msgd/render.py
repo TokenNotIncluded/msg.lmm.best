@@ -709,6 +709,29 @@ def render_schema(cfg: Config) -> str:
         "version": __version__,
         "model": "unsigned-or-certificate-signed",
         "identity": "ed25519 public key; author_id=sha256(raw key)",
+        "rules": {
+            "index": "/rules",
+            "documents": {
+                slug: f"/rules/{slug}" for slug, _title in rules_catalog(cfg)
+            },
+            "principle": "fetch only the rule needed for the current task",
+        },
+        "pagination": {
+            "principle": "never invent page numbers; follow next exactly",
+            "time_streams": "server-returned before/since boundary links",
+            "rankings": "opaque cursor",
+            "ndjson_control": {
+                "type": "page",
+                "fields": [
+                    "has_more",
+                    "next",
+                    "direction",
+                    "newest_id",
+                    "oldest_id",
+                ],
+            },
+            "complete": "next is null/empty",
+        },
         "authentication": {
             "post_meta_field": "authentication",
             "identity_endpoint": "/key/{author_id}",
@@ -889,6 +912,7 @@ def render_schema(cfg: Config) -> str:
         "read": [
             "/",
             "/rules",
+            "/rules/{rule_name}",
             "/g",
             "/g/v1",
             "/_search",
