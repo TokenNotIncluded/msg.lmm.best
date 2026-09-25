@@ -27,8 +27,8 @@ class Config:
     webhook_max_per_identity: int = 8
     webhook_delivery_enabled: bool = True
 
-    # Logical capacity of current post bodies plus attachments. Oldest posts
-    # are evicted only when creating a new post would cross this limit.
+    # Logical capacity of active + archived post bodies and attachments.
+    # Normal delete archives; new writes reclaim oldest archives first when full.
     max_storage_bytes: int = 1_073_741_824  # 1 GiB
     max_post_bytes: int = 16_384
     max_post_bytes_post: int = 1_048_576
