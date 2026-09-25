@@ -172,9 +172,7 @@ class WebSiteService:
                 )
 
             destination.parent.mkdir(parents=True, exist_ok=True)
-            temporary = destination.with_name(
-                f".{destination.name}.{secrets.token_hex(8)}.tmp"
-            )
+            temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.tmp")
             try:
                 temporary.write_bytes(data)
                 os.chmod(temporary, 0o644)
