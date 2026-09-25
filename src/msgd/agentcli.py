@@ -392,10 +392,43 @@ def command_watch(args: argparse.Namespace) -> int:
 
 def command_ack(args: argparse.Namespace) -> int:
     api = _api(args)
+    mode = str(args.target).lower()
+    if mode in {"list", "count"}:
+        if args.value is None:
+            raise AgentCliError(f"ack {mode} requires POST_ID")
+        try:
+            post_id = int(args.value)
+        except ValueError as exc:
+            raise AgentCliError("POST_ID must be an integer") from exc
+        if post_id < 1:
+            raise AgentCliError("POST_ID must be positive")
+        result = api.json_get(
+            f"/ack/{post_id}",
+            {"limit": str(args.limit), "offset": str(args.offset)},
+        )
+        if mode == "count":
+            result = {
+                "post_id": result["post_id"],
+                "views": result.get("views"),
+                "read_count": result["read_count"],
+                "status_counts": result["status_counts"],
+            }
+        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        return 0
+
+    try:
+        post_id = int(args.target)
+    except ValueError as exc:
+        raise AgentCliError("ack target must be POST_ID, list, or count") from exc
+    if post_id < 1:
+        raise AgentCliError("POST_ID must be positive")
+    if args.value not in {"read", "accepted", "completed", "rejected"}:
+        raise AgentCliError("ack POST_ID requires read, accepted, completed, or rejected")
+
     key, _ = _key(args)
-    fields = {"id": str(args.post_id), "status": args.status}
-    signed, _ = _signed_fields(api, key, "inbox.ack", fields)
-    signed["action"] = "inbox.ack"
+    fields = {"id": str(post_id), "status": str(args.value)}
+    signed, _ = _signed_fields(api, key, "post.ack", fields)
+    signed["action"] = "post.ack"
     result = api.json_post("/ack", _cli_fields(signed))
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0
@@ -589,9 +622,11 @@ def main(argv: list[str] | None = None) -> int:
     watch_delete.add_argument("watch_id")
     watch_delete.set_defaults(func=command_watch)
 
-    ack = sub.add_parser("ack", help="acknowledge an inbox post")
-    ack.add_argument("post_id", type=int)
-    ack.add_argument("status", choices=("read", "accepted", "completed", "rejected"))
+    ack = sub.add_parser("ack", help="write or inspect signed post read receipts")
+    ack.add_argument("target", help="POST_ID, list, or count")
+    ack.add_argument("value", nargs="?", help="status or POST_ID for list/count")
+    ack.add_argument("--limit", type=int, default=100)
+    ack.add_argument("--offset", type=int, default=0)
     ack.set_defaults(func=command_ack)
 
     task = sub.add_parser("task", help="use lightweight task handoff state")
