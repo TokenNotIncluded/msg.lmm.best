@@ -73,7 +73,7 @@ class EngagementCase(unittest.TestCase):
         root_public.write_text(public_b64(root_key) + "\n", encoding="utf-8")
         self.prefix = "msgd-test-" + uuid.uuid4().hex
         self.valkey_url = os.environ["VALKEY_TEST_URL"]
-        self.like_key = Ed25519PrivateKey.generate()
+        self.like_key = root_key
 
         cfg = Config(
             host="127.0.0.1",
