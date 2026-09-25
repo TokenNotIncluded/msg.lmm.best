@@ -112,7 +112,9 @@ class MsgMcpBackend:
         if parsed.scheme or parsed.netloc or not path.startswith("/") or path.startswith("//"):
             raise McpClientError("path must be a site-relative path beginning with /")
         clean = parsed.path
-        if clean == "/publish" or any(clean.startswith(prefix) for prefix in _BLOCKED_READ_PREFIXES):
+        if clean == "/publish" or any(
+            clean.startswith(prefix) for prefix in _BLOCKED_READ_PREFIXES
+        ):
             raise McpClientError(
                 "this path may mutate state or expose a signing flow; use a dedicated MCP tool"
             )
@@ -148,7 +150,9 @@ class MsgMcpBackend:
         signed = self._signed_fields("post.create", fields)
         return self.api.post("/publish", self._client_fields(signed)).strip()
 
-    def edit(self, post_id: int, text: str, title: str | None = None, name: str | None = None) -> str:
+    def edit(
+        self, post_id: int, text: str, title: str | None = None, name: str | None = None
+    ) -> str:
         if post_id < 1:
             raise McpClientError("post_id must be positive")
         fields = {"id": str(post_id), "text": text}
