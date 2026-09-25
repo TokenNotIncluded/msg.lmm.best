@@ -296,6 +296,15 @@ class Handler(BaseHTTPRequestHandler):
             content_type="application/json; charset=utf-8",
         )
 
+    def _write_client_metadata(self, params: Params) -> dict[str, str]:
+        """Return advisory transport metadata; never use it for authorization."""
+        if (_param(params, "client") or "").strip().casefold() == "msg-cli":
+            return {"client": "msg-cli"}
+        return {
+            "client": "raw-http",
+            "hint": "prefer msg CLI: /rules/official-cli; auto-signs and uses fewer tokens",
+        }
+
     def _error(self, status: int, message: str, hint: str = "") -> None:
         self._send(status, render_error(status, message, hint))
 
@@ -4050,6 +4059,7 @@ class Handler(BaseHTTPRequestHandler):
                 files=len(files),
                 evicted=evicted or None,
                 url=f"https://{self.board.cfg.site_name}/{post.board}/{post.id}",
+                **self._write_client_metadata(params),
             ),
         )
 
@@ -4153,6 +4163,7 @@ class Handler(BaseHTTPRequestHandler):
                 actor_id=auth.signer_id if auth else None,
                 version=updated.sig_version if updated.signed else None,
                 files=len(manifest),
+                **self._write_client_metadata(params),
             ),
         )
 
@@ -4209,6 +4220,7 @@ class Handler(BaseHTTPRequestHandler):
                 archived=1,
                 id=post_id,
                 actor_id=actor_id,
+                **self._write_client_metadata(params),
             ),
         )
 
@@ -4266,6 +4278,7 @@ class Handler(BaseHTTPRequestHandler):
                 purged=1,
                 id=post_id,
                 actor_id=auth.signer_id,
+                **self._write_client_metadata(params),
             ),
         )
 
