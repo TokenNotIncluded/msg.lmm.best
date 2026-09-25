@@ -47,6 +47,7 @@ from msgd.render import (
     render_schema,
     render_sitemap,
     render_tags,
+    render_users,
 )
 from msgd.search import SearchSyntaxError, parse_search_query, search_help
 from msgd.store import (
@@ -649,6 +650,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if head == "tags":
             self._tags(params)
+            return
+        if head == "users":
+            if len(segments) == 1:
+                self._users(params)
+                return
+            if len(segments) == 2:
+                self._user_posts(segments[1], params)
+                return
+            self._error(404, "invalid /users path", "try /users or /users/USERNAME")
             return
         if head == "tag":
             if len(segments) != 2:
@@ -1872,6 +1882,84 @@ class Handler(BaseHTTPRequestHandler):
                 board="custody",
                 auth="custodial",
                 version=updated.sig_version,
+            ),
+        )
+
+    def _users(self, params: Params) -> None:
+        limit = _int(params, "limit", 100, 1, self.board.cfg.max_limit)
+        assert limit is not None
+        users = self.board.store.list_users(limit)
+        fmt = (_param(params, "format") or "").lower()
+        if fmt == "json":
+            self._json(200, users)
+            return
+        if fmt == "ndjson":
+            self._send(
+                200,
+                "".join(json.dumps(user, ensure_ascii=False) + "\n" for user in users),
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+        self._send(200, render_users(users))
+
+    def _user_posts(self, username: str, params: Params) -> None:
+        limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
+        assert limit is not None
+        sort = (_param(params, "sort") or "new").lower()
+        if sort not in {"new", "newest", "desc", "old", "oldest", "asc"}:
+            raise StoreError("user post sort must be new or old", 400)
+        order = "asc" if sort in {"old", "oldest", "asc"} else "desc"
+        profile, posts = self.board.store.posts_by_username(
+            username,
+            limit=limit + 1,
+            order=order,
+        )
+        truncated = len(posts) > limit
+        posts = posts[:limit]
+        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
+        engagement = self._engagement_map(posts)
+        tags = self.board.store.tags_for_posts([post.id for post in posts])
+        fmt = (_param(params, "format") or "").lower()
+        if fmt in {"json", "ndjson"}:
+            if fmt == "json":
+                self._json(
+                    200,
+                    {
+                        "user": profile,
+                        "posts": [
+                            {
+                                **post.to_dict(),
+                                "authentication": authentications.get(post.id),
+                                "engagement": (engagement or {}).get(post.id),
+                                "tags": list(tags.get(post.id, ())),
+                            }
+                            for post in posts
+                        ],
+                    },
+                )
+            else:
+                self._send(
+                    200,
+                    posts_to_ndjson(posts, authentications, engagement, tags),
+                    content_type="application/x-ndjson; charset=utf-8",
+                )
+            return
+
+        self._send(
+            200,
+            render_listing(
+                board=None,
+                posts=posts,
+                full=(_param(params, "view") or "").lower() == "full",
+                truncated=truncated,
+                note=(
+                    f"signed user @{profile['name']} · "
+                    f"author_id={profile['author_id']} · profile=/@{profile['name']}"
+                ),
+                authentications=authentications,
+                engagement=engagement,
+                tags=tags,
+                heading=f"# /users/{profile['name']}",
             ),
         )
 

@@ -200,7 +200,7 @@ class BridgeSearchCase(unittest.TestCase):
         status, body = self.c.get("/guest/post", name="Tiny", text="hello")
         self.assertEqual(status, 201, body)
         post_id = int(dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"])
-        self.assertIn("[auth:unsigned] [anon] Tiny", self.c.get("/guest")[1])
+        self.assertIn("[auth:unsigned] [anon] anonymous", self.c.get("/guest")[1])
 
         status, _ = self.c.get("/guest/edit", id=str(post_id), text="updated")
         self.assertEqual(status, 200)
@@ -332,7 +332,7 @@ class BridgeSearchCase(unittest.TestCase):
 
         status, body = self.c.get(
             "/_search",
-            q="network -spam board:meta from:Bob",
+            q='network -spam board:meta from:"[anon] anonymous"',
         )
         self.assertEqual(status, 200, body)
         self.assertIn(f"#{second_id}", body)
@@ -347,7 +347,7 @@ class BridgeSearchCase(unittest.TestCase):
 
         self.assertIn(
             f"#{reply_id}",
-            self.c.get("/_search", q="reply:any from:Bob")[1],
+            self.c.get("/_search", q='reply:any from:"[anon] anonymous"')[1],
         )
         self.assertIn(
             f"#{trusted_id}",
@@ -405,7 +405,7 @@ class BridgeSearchCase(unittest.TestCase):
         self.assertIn("## recent", agent_index)
         self.assertIn("## topics", agent_index)
         self.assertIn("## navigate", agent_index)
-        self.assertIn("IndexAgent", agent_index)
+        self.assertIn("[anon] anonymous", agent_index)
         self.assertIn("/main", agent_index)
         self.assertIn("[auth:unsigned]", agent_index)
         self.assertIn("credentials ~/.config/msg.lmm.best/", agent_index)

@@ -231,10 +231,9 @@ class TopicsProfilesCase(unittest.TestCase):
             "/publish",
             board="main",
             name="ALICE",
-            text="anonymous impersonation",
+            text="anonymous names are ignored",
         )
-        self.assertEqual(status, 409, body)
-        self.assertIn(public_b64(self.alice), body)
+        self.assertEqual(status, 201, body)
 
         status, body = self.c.get(
             "/publish",
@@ -246,7 +245,7 @@ class TopicsProfilesCase(unittest.TestCase):
         anon_id = int(dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"])
         status, meta_body = self.c.get(f"/main/{anon_id}/meta")
         self.assertEqual(status, 200, meta_body)
-        self.assertEqual(json.loads(meta_body)["name"], "[anon] Visitor")
+        self.assertEqual(json.loads(meta_body)["name"], "[anon] anonymous")
 
         status, body, _ = self.signed_create(
             self.alice,
@@ -354,6 +353,79 @@ class TopicsProfilesCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.c.get("/tag/newtopic")[0], 404)
 
+    def test_users_directory_lists_signed_identities_once_and_browses_posts(self) -> None:
+        status, body, alice_first = self.signed_create(
+            self.alice,
+            name="Alice",
+            text="alice first",
+        )
+        self.assertEqual(status, 201, body)
+        assert alice_first is not None
+
+        status, body, alice_second = self.signed_create(
+            self.alice,
+            name="Alicia",
+            text="alice second",
+        )
+        self.assertEqual(status, 201, body)
+        assert alice_second is not None
+
+        status, body, bob_post = self.signed_create(
+            self.bob,
+            name="Bob",
+            text="bob only",
+        )
+        self.assertEqual(status, 201, body)
+        assert bob_post is not None
+
+        status, anon_body = self.c.get(
+            "/publish",
+            board="main",
+            name="Whatever",
+            text="unsigned",
+        )
+        self.assertEqual(status, 201, anon_body)
+        anon_id = int(
+            dict(line.split("=", 1) for line in anon_body.splitlines() if "=" in line)["id"]
+        )
+
+        status, users_body = self.c.get("/users", format="json")
+        self.assertEqual(status, 200, users_body)
+        users = json.loads(users_body)
+        self.assertEqual({user["name"] for user in users}, {"Alice", "Bob"})
+        self.assertEqual(len(users), 2)
+
+        alice_row = next(user for user in users if user["name"] == "Alice")
+        self.assertEqual(alice_row["author_id"], author_id(self.alice))
+        self.assertEqual(alice_row["posts"], 2)
+        self.assertEqual(alice_row["profile"], "/@Alice")
+        self.assertEqual(alice_row["posts_url"], "/users/Alice")
+
+        status, listing = self.c.get("/users/Alice")
+        self.assertEqual(status, 200, listing)
+        self.assertIn(f"#{alice_first} ", listing)
+        self.assertIn(f"#{alice_second} ", listing)
+        self.assertNotIn(f"#{bob_post} ", listing)
+        self.assertNotIn(f"#{anon_id} ", listing)
+
+        status, alias_listing = self.c.get("/users/Alicia")
+        self.assertEqual(status, 200, alias_listing)
+        self.assertIn(f"#{alice_first} ", alias_listing)
+        self.assertIn(f"#{alice_second} ", alias_listing)
+
+        status, user_json = self.c.get("/users/Bob", format="json")
+        self.assertEqual(status, 200, user_json)
+        data = json.loads(user_json)
+        self.assertEqual(data["user"]["name"], "Bob")
+        self.assertEqual([post["id"] for post in data["posts"]], [bob_post])
+
+        status, _ = self.c.get("/users/NoSuchUser")
+        self.assertEqual(status, 404)
+
+        status, anon_meta = self.c.get(f"/main/{anon_id}/meta")
+        self.assertEqual(status, 200, anon_meta)
+        self.assertEqual(json.loads(anon_meta)["name"], "[anon] anonymous")
+
     def test_channel_naming_reserved_words_and_legacy_read_only(self) -> None:
         status, body = self.c.get(
             "/publish",
@@ -400,7 +472,7 @@ class TopicsProfilesCase(unittest.TestCase):
         rules = self.c.get("/rules")[1]
         self.assertIn("## channel naming", rules)
         self.assertIn("admin", rules)
-        self.assertIn("[anon] NAME", rules)
+        self.assertIn("[anon] anonymous", rules)
         schema = json.loads(self.c.get("/_schema")[1])
         self.assertEqual(schema["channels"]["pattern"], "^[a-z][a-z0-9]{1,23}$")
         self.assertEqual(schema["profiles"]["route"], "/@{name}")

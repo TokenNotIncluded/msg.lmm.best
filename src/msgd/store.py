@@ -82,6 +82,7 @@ RESERVED_BOARDS = {
     "system",
     "undefined",
     "webhook",
+    "users",
     "rules",
     "_rules",
     "_help",
@@ -2134,20 +2135,13 @@ class Store:
         display = " ".join(value.split()) or "anonymous"
         while display.casefold().startswith("[anon]"):
             display = display[6:].strip()
+        while display.casefold().startswith("[custody]"):
+            display = display[9:].strip()
         return display or "anonymous"
 
     def anonymous_display_name(self, value: str, *, check_claim: bool = True) -> str:
-        base = self.anonymous_base_name(value)
-        if check_claim:
-            key = self.normalize_identity_name(base)
-            claim = self.name_claim(key)
-            if claim is not None:
-                raise StoreError(
-                    f"name {base!r} is already bound to public key {claim['public_key']} "
-                    f"(author_id {claim['author_id']})",
-                    409,
-                )
-        return f"[anon] {base}"
+        del value, check_claim
+        return "[anon] anonymous"
 
     def name_claim(self, name_or_key: str) -> dict[str, Any] | None:
         try:
@@ -2238,22 +2232,14 @@ class Store:
         return name_key
 
     def _migrate_identity_names(self) -> None:
-        # Anonymous names are always visibly anonymous after this version.
-        rows = self._conn.execute(
+        # Every unsigned author is intentionally one indistinguishable identity.
+        self._conn.execute(
             """
-            SELECT id, name
-              FROM posts
+            UPDATE posts
+               SET name = '[anon] anonymous'
              WHERE author_id IS NULL AND system = 0 AND custody_id IS NULL
             """
-        ).fetchall()
-        for row in rows:
-            current = str(row["name"])
-            prefixed = self.anonymous_display_name(current, check_claim=False)
-            if current != prefixed:
-                self._conn.execute(
-                    "UPDATE posts SET name = ? WHERE id = ?",
-                    (prefixed, int(row["id"])),
-                )
+        )
 
         # Historical self-signed names are claimed oldest-first; earliest proof wins.
         signed = self._conn.execute(
@@ -2283,6 +2269,67 @@ class Store:
             except StoreError as exc:
                 if exc.status not in {400, 409}:
                     raise
+
+    def list_users(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT p.author_id,
+                       pr.primary_name_key,
+                       nc.display_name AS name,
+                       nc.public_key,
+                       pr.bio,
+                       COUNT(p.id) AS posts,
+                       MIN(p.created) AS first_post,
+                       MAX(p.updated) AS last_post
+                  FROM posts p
+                  JOIN profiles pr ON pr.author_id = p.author_id
+                  JOIN name_claims nc
+                    ON nc.author_id = pr.author_id
+                   AND nc.name_key = pr.primary_name_key
+                 WHERE p.author_id IS NOT NULL
+                   AND p.system = 0
+                   AND p.custody_id IS NULL
+                 GROUP BY p.author_id, pr.primary_name_key, nc.display_name,
+                          nc.public_key, pr.bio
+                 ORDER BY last_post DESC, nc.display_name COLLATE NOCASE
+                 LIMIT ?
+                """,
+                (max(1, min(limit, self.cfg.max_limit)),),
+            ).fetchall()
+        return [
+            {
+                "name": str(row["name"]),
+                "author_id": str(row["author_id"]),
+                "public_key": str(row["public_key"]),
+                "bio": str(row["bio"]),
+                "posts": int(row["posts"]),
+                "first_post": round(float(row["first_post"]), 3),
+                "last_post": round(float(row["last_post"]), 3),
+                "profile": f"/@{quote(str(row['name']), safe='')}",
+                "posts_url": f"/users/{quote(str(row['name']), safe='')}",
+            }
+            for row in rows
+        ]
+
+    def posts_by_username(
+        self,
+        name: str,
+        *,
+        limit: int = 20,
+        order: str = "desc",
+    ) -> tuple[dict[str, Any], list[Post]]:
+        profile = self.profile_by_name(name)
+        if profile is None:
+            raise StoreError(f"unknown signed username: {name}", 404)
+        author_id = str(profile["author_id"])
+        posts = self.list_posts(
+            author_id=author_id,
+            limit=limit,
+            order=order,
+        )
+        posts = [post for post in posts if post.custody_id is None and post.system is False]
+        return profile, posts
 
     def profile_by_name(self, name: str) -> dict[str, Any] | None:
         claim = self.name_claim(name)
@@ -2780,8 +2827,8 @@ class Store:
             where.append("id < ?")
             params.append(before)
         if author:
-            where.append("(name = ? OR name = ?)")
-            params.extend((author, f"[anon] {author}"))
+            where.append("name = ?")
+            params.append(author)
         if author_id:
             where.append("author_id = ?")
             params.append(author_id)
@@ -2817,8 +2864,8 @@ class Store:
             where.append("p.board = ?")
             params.append(spec.board)
         if spec.author_name:
-            where.append("(p.name = ? OR p.name = ?)")
-            params.extend((spec.author_name, f"[anon] {spec.author_name}"))
+            where.append("p.name = ?")
+            params.append(spec.author_name)
         for tag in spec.tags:
             where.append("EXISTS (SELECT 1 FROM post_tags t WHERE t.post_id = p.id AND t.tag = ?)")
             params.append(self.normalize_tag(tag))
