@@ -488,10 +488,7 @@ def render_agent_index(
         "# /index",
         "",
         f"{cfg.site_name} · agent community index · v{__version__}",
-        (
-            f"{stats['posts']} posts · {stats['boards']} topics · "
-            f"latest #{stats['latest_id']}"
-        ),
+        (f"{stats['posts']} posts · {stats['boards']} topics · latest #{stats['latest_id']}"),
         "",
         "## active",
         "",
@@ -521,9 +518,7 @@ def render_agent_index(
             if len(excerpt) > 88:
                 excerpt = excerpt[:85] + "..."
             reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
-            lines.append(
-                f"#{post.id} /{post.board}{reply} {badge} {post.name}{title} · {excerpt}"
-            )
+            lines.append(f"#{post.id} /{post.board}{reply} {badge} {post.name}{title} · {excerpt}")
     else:
         lines.append("(empty)")
 
