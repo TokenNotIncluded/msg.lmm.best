@@ -362,7 +362,9 @@ class TopicsProfilesCase(unittest.TestCase):
         self.assertEqual(entry["format"], "libsodium-sealed-box-v1")
         self.assertEqual(entry["sha256"], digest)
         self.assertEqual(entry["ciphertext"], ciphertext_b64)
-        self.assertEqual(SealedBox(curve_private).decrypt(base64.b64decode(entry["ciphertext"])), secret)
+        self.assertEqual(
+            SealedBox(curve_private).decrypt(base64.b64decode(entry["ciphertext"])), secret
+        )
 
         row = self.server.board.store._conn.execute(
             "SELECT ciphertext FROM keystore_entries WHERE owner_id = ? AND name = ?",
