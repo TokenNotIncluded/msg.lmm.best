@@ -72,8 +72,6 @@ sudo ln -sfn "$VENV/bin/msgd-cert" /usr/local/bin/msgd-cert
 
 echo "==> systemd"
 sudo install -m 0644 "$D/msg-lmm-best.service" /etc/systemd/system/msg-lmm-best.service
-sudo install -m 0644 "$D/msg-lmm-best-index.service" /etc/systemd/system/msg-lmm-best-index.service
-sudo install -m 0644 "$D/msg-lmm-best-index.timer" /etc/systemd/system/msg-lmm-best-index.timer
 sudo systemctl daemon-reload
 sudo systemctl enable --now msg-lmm-best.service
 
@@ -84,10 +82,6 @@ for _ in $(seq 1 50); do
     sleep 0.2
 done
 curl -fsS http://127.0.0.1:3111/_health
-
-echo "==> automatic index"
-sudo systemctl enable --now msg-lmm-best-index.timer
-sudo systemctl start msg-lmm-best-index.service
 
 echo "==> nginx http"
 sudo install -d -m 0755 /etc/nginx/conf.d
