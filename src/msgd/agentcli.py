@@ -134,7 +134,11 @@ def _post_content(args: argparse.Namespace) -> dict[str, str]:
             raise AgentCliError(
                 "use exactly one structured source (--fields/--fields-file) or one text source"
             )
-        raw = args.fields if args.fields is not None else Path(args.fields_file).read_text(encoding="utf-8")
+        raw = (
+            args.fields
+            if args.fields is not None
+            else Path(args.fields_file).read_text(encoding="utf-8")
+        )
         try:
             value = json.loads(raw)
         except json.JSONDecodeError as exc:
