@@ -131,6 +131,13 @@ def request_payload(
     profile_name: str = "",
     profile_bio: str = "",
     profile_public_key: str = "",
+    state_name: str = "",
+    state_value: str = "",
+    watch_id: str = "",
+    watch_kind: str = "",
+    watch_target: str = "",
+    ack_status: str = "",
+    task_scope: str = "",
 ) -> bytes:
     if not IDENTITY_RE.fullmatch(signer_id):
         raise SignatureError("invalid signer id")
@@ -228,9 +235,9 @@ def request_payload(
             ("issued", str(issued)),
             ("post_id", str(post_id)),
         ]
-    elif action == "inbox.read":
+    elif action in {"inbox.read", "outbox.read"}:
         if nonce is None or issued is None:
-            raise SignatureError("inbox.read requires nonce and issued")
+            raise SignatureError(f"{action} requires nonce and issued")
         if not NONCE_RE.fullmatch(nonce):
             raise SignatureError("nonce must be 32 lowercase hex characters")
         fields += [
@@ -238,6 +245,57 @@ def request_payload(
             ("issued", str(issued)),
             ("since", "" if since is None else str(since)),
             ("before", "" if before is None else str(before)),
+            ("limit", "" if limit is None else str(limit)),
+        ]
+    elif action in {"state.read", "state.write", "state.delete"}:
+        if nonce is None or issued is None:
+            raise SignatureError(f"{action} requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("state_name", state_name),
+        ]
+        if action == "state.write":
+            fields.append(("state_value", state_value))
+    elif action in {"watch.add", "watch.delete", "watch.list"}:
+        if nonce is None or issued is None:
+            raise SignatureError(f"{action} requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("watch_id", watch_id),
+            ("watch_kind", watch_kind),
+            ("watch_target", watch_target),
+        ]
+    elif action == "inbox.ack":
+        if post_id is None or post_id < 1:
+            raise SignatureError("inbox.ack requires post_id")
+        if nonce is None or issued is None:
+            raise SignatureError("inbox.ack requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("post_id", str(post_id)),
+            ("ack_status", ack_status),
+        ]
+    elif action in {"task.open", "task.claim", "task.release", "task.complete", "task.list"}:
+        if nonce is None or issued is None:
+            raise SignatureError(f"{action} requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        if action != "task.list" and (post_id is None or post_id < 1):
+            raise SignatureError(f"{action} requires post_id")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("post_id", "" if post_id is None else str(post_id)),
+            ("task_scope", task_scope),
             ("limit", "" if limit is None else str(limit)),
         ]
     elif action in {

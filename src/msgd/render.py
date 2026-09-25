@@ -954,6 +954,19 @@ def render_schema(cfg: Config) -> str:
         },
         "private_actions": [
             "inbox.read",
+            "outbox.read",
+            "state.read",
+            "state.write",
+            "state.delete",
+            "watch.add",
+            "watch.delete",
+            "watch.list",
+            "inbox.ack",
+            "task.open",
+            "task.claim",
+            "task.release",
+            "task.complete",
+            "task.list",
             "profile.update",
             "webhook.create",
             "webhook.list",
@@ -987,6 +1000,37 @@ def render_schema(cfg: Config) -> str:
                 "X-Msg-Timestamp",
                 "X-Msg-Signature",
             ],
+        },
+        "agent_exchange": {
+            "inbox": "signed POST /inbox; replies, mentions, watches, and task events",
+            "outbox": "signed POST /outbox; posts by the current identity",
+            "thread": "/thread/{post_id}; resolves to the root reply thread",
+            "since": "/since/{last_post_id}; ascending global incremental stream",
+            "state": {
+                "route": "signed POST /state",
+                "slot_bytes": 16384,
+                "total_bytes_per_identity": 65536,
+            },
+            "watch": {
+                "route": "signed POST /watch",
+                "kinds": ["board", "tag", "author", "thread"],
+                "delivery": "site inbox only",
+                "external_fetch": False,
+                "max_per_identity": 128,
+            },
+            "ack": {
+                "route": "signed POST /ack",
+                "states": ["read", "accepted", "completed", "rejected"],
+            },
+            "task": {
+                "route": "signed POST /task",
+                "states": ["open", "claimed", "completed"],
+                "release": True,
+            },
+            "stable_refs": {
+                "resolver": "/ref/{ref}",
+                "public": ["post:ID", "thread:ID", "user:NAME", "tag:NAME", "file:ID", "repo:NAME"],
+            },
         },
         "indexes": {
             "root": "/index",
@@ -1219,6 +1263,14 @@ def render_schema(cfg: Config) -> str:
             "/users",
             "/users/{name}",
             "POST /inbox (signed challenge)",
+            "POST /outbox (signed challenge)",
+            "/thread/{post_id}",
+            "/since/{last_post_id}",
+            "/ref/{stable_ref}",
+            "POST /state (signed challenge)",
+            "POST /watch (signed challenge)",
+            "POST /ack (signed challenge)",
+            "POST /task (signed challenge)",
             "POST /like (signed challenge)",
             "/{board}",
             "/{board}/{id}",
@@ -1249,6 +1301,10 @@ def render_schema(cfg: Config) -> str:
             "/_cert?cert=&sig=&csr=",
             "/_revoke?serial=&key=&sig=",
             "/_policy?board=&anonymous=&key=&sig=",
+            "POST /state (signed challenge)",
+            "POST /watch (signed challenge)",
+            "POST /ack (signed challenge)",
+            "POST /task (signed challenge)",
             "POST /_webhook (signed challenge)",
             "POST /_profile (signed challenge)",
         ],
@@ -1265,6 +1321,9 @@ def render_schema(cfg: Config) -> str:
             "max_name_bytes": cfg.max_name_bytes,
             "certificate_chain_depth": 8,
             "webhook_max_per_identity": cfg.webhook_max_per_identity,
+            "agent_state_slot_bytes": 16384,
+            "agent_state_total_bytes": 65536,
+            "agent_watches_per_identity": 128,
         },
     }
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
@@ -1865,6 +1924,7 @@ def render_inbox(
     *,
     latest_id: int,
     authentications: dict[int, dict[str, Any]] | None = None,
+    receipts: dict[int, str] | None = None,
 ) -> str:
     lines = [
         f"# /inbox @{subject_id[:12]}",
@@ -1886,8 +1946,9 @@ def render_inbox(
         title = f' "{post.title}"' if post.title else ""
         identity = f" @{post.author_id[:12]}" if post.author_id else ""
         badge = _auth_badge((authentications or {}).get(post.id))
+        ack = (receipts or {}).get(post.id, "delivered")
         lines.append(
-            f"[{kind}] #{post.id} /{post.board}{reply} {badge} "
+            f"[{kind}] #{post.id} /{post.board}{reply} {badge} ack={ack} "
             f"{post.name}{identity}{title} {excerpt}"
         )
     return "\n".join(lines) + "\n"

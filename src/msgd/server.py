@@ -31,6 +31,7 @@ from msgd.crypto import (
     request_payload,
     signed_request,
 )
+from msgd.exchange import ACK_STATUSES, ExchangeService
 from msgd.gitrepos import GitBackendResponse, RepoService
 from msgd.ratelimit import Limiter
 from msgd.render import (
@@ -133,6 +134,7 @@ class Board:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.store = Store(cfg)
+        self.exchange = ExchangeService(cfg, self.store)
         self.repos = RepoService(cfg)
         self.engagement = Engagement(cfg.valkey_url, prefix=cfg.valkey_prefix)
         if cfg.valkey_required and not self.engagement.available:
@@ -173,6 +175,7 @@ class MsgServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         self.board.webhooks.close()
         self.board.engagement.close()
+        self.board.exchange.close()
         super().server_close()
 
 
@@ -367,6 +370,7 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def _emit_post_created(self, post: Any) -> None:
+        self.board.exchange.index_post(post)
         data = self._post_webhook_data(post)
         self.board.webhooks.emit(post.author_id, "post.created", data)
         for subject_id, kind in self.board.store.inbox_targets(post.id):
@@ -376,6 +380,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.board.webhooks.emit(subject_id, "mention.created", data)
 
     def _emit_post_updated(self, post: Any) -> None:
+        self.board.exchange.index_post(post, updated=True)
         self.board.webhooks.emit(
             post.author_id,
             "post.updated",
@@ -723,6 +728,37 @@ class Handler(BaseHTTPRequestHandler):
             self._inbox(params)
             return
 
+        if head in {"outbox", "state", "watch", "ack", "task"}:
+            if method != "POST":
+                self._send(
+                    401,
+                    render_error(
+                        401,
+                        "signed POST required",
+                        f"/_signing?action={head}.read&key=YOUR_PUBLIC_KEY"
+                        if head in {"outbox", "state"}
+                        else "/_signing?key=YOUR_PUBLIC_KEY&action=...",
+                    ),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            action = _param(params, "action") or ""
+            write_actions = {
+                "state.write",
+                "state.delete",
+                "watch.add",
+                "watch.delete",
+                "inbox.ack",
+                "task.open",
+                "task.claim",
+                "task.release",
+                "task.complete",
+            }
+            if self._limited(action in write_actions):
+                return
+            self._exchange(head, params)
+            return
+
         if head == "publish":
             if self._limited(True):
                 return
@@ -765,6 +801,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if head == "latest":
             self._latest(segments, params)
+            return
+        if head == "thread":
+            self._thread_view(segments, params)
+            return
+        if head == "since":
+            self._since_view(segments, params)
+            return
+        if head == "ref":
+            self._stable_ref(segments)
             return
         if head == "hot":
             self._hot(params)
@@ -1207,6 +1252,24 @@ class Handler(BaseHTTPRequestHandler):
                     "issued": issued,
                     "id": post.id,
                     "liked": action == "post.like",
+                    **payload_info(payload),
+                },
+            )
+            return
+
+        if action in EXCHANGE_ACTIONS:
+            payload, meta = _exchange_signing_spec(
+                self.board,
+                action,
+                signer_id,
+                params,
+                signing=True,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    **meta,
                     **payload_info(payload),
                 },
             )
@@ -1792,6 +1855,10 @@ class Handler(BaseHTTPRequestHandler):
             before=before,
             limit=limit,
         )
+        receipts = self.board.exchange.receipts_for(
+            auth.signer_id,
+            [post.id for post, _kinds in events],
+        )
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             lines = []
             for post, kinds in events:
@@ -1799,6 +1866,8 @@ class Handler(BaseHTTPRequestHandler):
                     json.dumps(
                         {
                             "kinds": list(kinds),
+                            "ack": receipts.get(post.id, "delivered"),
+                            "ref": f"post:{post.id}",
                             "post": post.to_dict(),
                             "authentication": self.board.store.post_authentication(post),
                         },
@@ -1820,8 +1889,144 @@ class Handler(BaseHTTPRequestHandler):
                 authentications={
                     post.id: self.board.store.post_authentication(post) for post, _ in events
                 },
+                receipts=receipts,
             ),
         )
+
+    def _exchange(self, head: str, params: Params) -> None:
+        action = _required(params, "action")
+        if not _exchange_action_for_head(head, action):
+            raise StoreError(f"{action or 'missing action'} is not valid for /{head}", 400)
+
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        canonical_key, signer_id = public_identity(key)
+        payload, meta = _exchange_signing_spec(
+            self.board,
+            action,
+            signer_id,
+            params,
+            signing=False,
+        )
+        nonce = str(meta["nonce"])
+        issued = int(meta["issued"])
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        self.board.store.consume_nonce(auth)
+        service = self.board.exchange
+
+        if action == "outbox.read":
+            limit = int(meta["limit"])
+            posts = self.board.store.list_posts(
+                author_id=auth.signer_id,
+                since=meta["since"],
+                before=meta["before"],
+                limit=limit,
+                order="desc",
+            )
+            posts = [post for post in posts if not post.system and post.custody_id is None]
+            fmt = (_param(params, "format") or "ndjson").lower()
+            authentications = {
+                post.id: self.board.store.post_authentication(post) for post in posts
+            }
+            tags = self.board.store.tags_for_posts([post.id for post in posts])
+            if fmt == "json":
+                self._json(
+                    200,
+                    [
+                        {
+                            **post.to_dict(),
+                            "authentication": authentications[post.id],
+                            "tags": list(tags.get(post.id, ())),
+                        }
+                        for post in posts
+                    ],
+                )
+                return
+            if fmt != "ndjson":
+                raise StoreError("outbox format must be json or ndjson", 400)
+            self._send(
+                200,
+                posts_to_ndjson(posts, authentications=authentications, tags=tags),
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+
+        if action == "state.read":
+            self._json(200, service.state_read(auth.signer_id, meta["name"]))
+            return
+        if action == "state.write":
+            self._json(
+                200,
+                service.state_write(
+                    auth.signer_id,
+                    str(meta["name"]),
+                    str(meta["value"]),
+                ),
+            )
+            return
+        if action == "state.delete":
+            self._json(200, service.state_delete(auth.signer_id, str(meta["name"])))
+            return
+
+        if action == "watch.add":
+            self._json(
+                201,
+                service.watch_add(
+                    auth.signer_id,
+                    str(meta["kind"]),
+                    str(meta["target"]),
+                ),
+            )
+            return
+        if action == "watch.delete":
+            self._json(200, service.watch_delete(auth.signer_id, str(meta["id"])))
+            return
+        if action == "watch.list":
+            self._json(200, service.watch_list(auth.signer_id))
+            return
+
+        if action == "inbox.ack":
+            self._json(
+                200,
+                service.ack(
+                    auth.signer_id,
+                    int(meta["id"]),
+                    str(meta["status"]),
+                ),
+            )
+            return
+
+        if action == "task.open":
+            self._json(201, service.task_open(auth.signer_id, int(meta["id"])))
+            return
+        if action == "task.claim":
+            self._json(200, service.task_claim(auth.signer_id, int(meta["id"])))
+            return
+        if action == "task.release":
+            self._json(200, service.task_release(auth.signer_id, int(meta["id"])))
+            return
+        if action == "task.complete":
+            self._json(200, service.task_complete(auth.signer_id, int(meta["id"])))
+            return
+        if action == "task.list":
+            self._json(
+                200,
+                service.task_list(
+                    auth.signer_id,
+                    scope=str(meta["scope"] or "open"),
+                    limit=int(meta["limit"]),
+                ),
+            )
+            return
+
+        raise StoreError("unsupported exchange action", 400)
 
     def _webhook(self, params: Params) -> None:
         action = _required(params, "action")
@@ -3144,6 +3349,203 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(200, render_latest_pointer(item))
 
+    def _thread_view(self, segments: list[str], params: Params) -> None:
+        if len(segments) != 2:
+            raise StoreError("thread requires a post id", 404)
+        post_id = _post_id(segments[1])
+        limit = _int(
+            params,
+            "limit",
+            min(100, self.board.cfg.max_limit),
+            1,
+            self.board.cfg.max_limit,
+        )
+        assert limit is not None
+        root_id, posts, truncated = self.board.exchange.thread(post_id, limit=limit)
+        fmt = (_param(params, "format") or "").lower()
+        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
+        tags = self.board.store.tags_for_posts([post.id for post in posts])
+        if fmt == "json":
+            self._json(
+                200,
+                {
+                    "type": "thread",
+                    "ref": f"thread:{root_id}",
+                    "root_id": root_id,
+                    "requested_id": post_id,
+                    "truncated": truncated,
+                    "posts": [
+                        {
+                            **post.to_dict(),
+                            "authentication": authentications[post.id],
+                            "tags": list(tags.get(post.id, ())),
+                        }
+                        for post in posts
+                    ],
+                },
+            )
+            return
+        if fmt == "ndjson":
+            self._send(
+                200,
+                posts_to_ndjson(
+                    posts,
+                    authentications=authentications,
+                    tags=tags,
+                    page={
+                        "thread_ref": f"thread:{root_id}",
+                        "root_id": root_id,
+                        "truncated": truncated,
+                    },
+                ),
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+        if fmt:
+            raise StoreError("thread format must be json or ndjson", 400)
+        self._send(
+            200,
+            render_listing(
+                board=None,
+                posts=posts,
+                full=True,
+                truncated=truncated,
+                authentications=authentications,
+                tags=tags,
+                heading=f"# thread:{root_id}",
+                note=f"requested=post:{post_id} root=post:{root_id}",
+            ),
+        )
+
+    def _since_view(self, segments: list[str], params: Params) -> None:
+        if len(segments) != 2:
+            raise StoreError("/since requires the last seen global post id", 404)
+        try:
+            after = int(segments[1])
+        except ValueError as exc:
+            raise StoreError("since id must be an integer", 400) from exc
+        if after < 0:
+            raise StoreError("since id must be non-negative", 400)
+        limit = _int(
+            params,
+            "limit",
+            self.board.cfg.default_limit,
+            1,
+            self.board.cfg.max_limit,
+        )
+        assert limit is not None
+        posts = self.board.store.list_posts(
+            since=after,
+            limit=limit + 1,
+            order="asc",
+        )
+        truncated = len(posts) > limit
+        posts = posts[:limit]
+        fmt = (_param(params, "format") or "ndjson").lower()
+        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
+        tags = self.board.store.tags_for_posts([post.id for post in posts])
+        next_after = posts[-1].id if posts else after
+        next_url = (
+            f"/since/{next_after}?limit={limit}&format={quote(fmt, safe='')}" if truncated else None
+        )
+        if fmt == "json":
+            self._json(
+                200,
+                {
+                    "type": "since",
+                    "after": after,
+                    "next": next_url,
+                    "has_more": truncated,
+                    "posts": [
+                        {
+                            **post.to_dict(),
+                            "authentication": authentications[post.id],
+                            "tags": list(tags.get(post.id, ())),
+                        }
+                        for post in posts
+                    ],
+                },
+            )
+            return
+        if fmt == "ndjson":
+            self._send(
+                200,
+                posts_to_ndjson(
+                    posts,
+                    authentications=authentications,
+                    tags=tags,
+                    page={
+                        "after": after,
+                        "next": next_url,
+                        "has_more": truncated,
+                    },
+                ),
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+        if fmt == "text":
+            self._send(
+                200,
+                render_listing(
+                    board=None,
+                    posts=posts,
+                    full=False,
+                    truncated=truncated,
+                    next_url=next_url,
+                    page_direction="newer",
+                    authentications=authentications,
+                    tags=tags,
+                    heading=f"# /since/{after}",
+                ),
+            )
+            return
+        raise StoreError("since format must be ndjson, json, or text", 400)
+
+    def _stable_ref(self, segments: list[str]) -> None:
+        if len(segments) != 2 or ":" not in segments[1]:
+            raise StoreError("stable ref must look like post:123, thread:123, or tag:name", 404)
+        kind, value = segments[1].split(":", 1)
+        kind = kind.lower()
+        target = ""
+        if kind in {"post", "msg"}:
+            post = self.board.store.get_post(_post_id(value))
+            if post is None:
+                raise StoreError("post reference not found", 404)
+            target = f"/{post.board}/{post.id}"
+        elif kind == "thread":
+            post_id = _post_id(value)
+            root_id, _posts, _truncated = self.board.exchange.thread(post_id, limit=1)
+            target = f"/thread/{root_id}"
+        elif kind == "user":
+            profile = (
+                self.board.store.profile_by_author(value.lower())
+                if valid_author_id(value.lower())
+                else self.board.store.profile_by_name(value)
+            )
+            if profile is None:
+                raise StoreError("user reference not found", 404)
+            target = str(profile["profile_url"])
+        elif kind == "tag":
+            tag = self.board.store.normalize_tag(value)
+            if self.board.store.tag_info(tag) is None:
+                raise StoreError("tag reference not found", 404)
+            target = f"/tag/{quote(tag, safe='')}"
+        elif kind == "file":
+            file_id = _post_id(value)
+            if self.board.store.attachment(file_id) is None:
+                raise StoreError("file reference not found", 404)
+            target = f"/file/{file_id}"
+        elif kind == "repo":
+            info = self.board.repos.repository_info(value)
+            target = f"/repos/{quote(str(info['name']), safe='')}"
+        else:
+            raise StoreError("unsupported stable ref kind", 400)
+        self._send(
+            307,
+            render_ok(ref=segments[1], target=target),
+            extra_headers={"Location": target},
+        )
+
     def _hot(self, params: Params) -> None:
         sort = (_param(params, "sort") or "hot").lower()
         if sort not in Engagement.SORTS:
@@ -3717,6 +4119,176 @@ class Handler(BaseHTTPRequestHandler):
                 actor_id=auth.signer_id,
             ),
         )
+
+
+EXCHANGE_ACTIONS = frozenset(
+    {
+        "outbox.read",
+        "state.read",
+        "state.write",
+        "state.delete",
+        "watch.add",
+        "watch.delete",
+        "watch.list",
+        "inbox.ack",
+        "task.open",
+        "task.claim",
+        "task.release",
+        "task.complete",
+        "task.list",
+    }
+)
+
+
+def _exchange_action_for_head(head: str, action: str) -> bool:
+    prefixes = {
+        "outbox": {"outbox.read"},
+        "state": {"state.read", "state.write", "state.delete"},
+        "watch": {"watch.add", "watch.delete", "watch.list"},
+        "ack": {"inbox.ack"},
+        "task": {
+            "task.open",
+            "task.claim",
+            "task.release",
+            "task.complete",
+            "task.list",
+        },
+    }
+    return action in prefixes.get(head, set())
+
+
+def _exchange_signing_spec(
+    board: Board,
+    action: str,
+    signer_id: str,
+    params: Params,
+    *,
+    signing: bool,
+) -> tuple[bytes, dict[str, Any]]:
+    if action not in EXCHANGE_ACTIONS:
+        raise StoreError("unsupported exchange action", 400)
+
+    nonce = _param(params, "nonce")
+    if signing and nonce is None:
+        nonce = secrets.token_hex(16)
+    if nonce is None:
+        raise StoreError("nonce is required", 400)
+    issued = _int_required(
+        params,
+        "issued",
+        int(time.time()) if signing else None,
+    )
+    common: dict[str, Any] = {"nonce": nonce, "issued": issued}
+
+    if action == "outbox.read":
+        since, before, limit = _inbox_window(params, board.cfg)
+        payload = request_payload(
+            action=action,
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            since=since,
+            before=before,
+            limit=limit,
+        )
+        return payload, {**common, "since": since, "before": before, "limit": limit}
+
+    if action in {"state.read", "state.write", "state.delete"}:
+        supplied_name = _param(params, "name")
+        if action == "state.read" and not supplied_name:
+            state_name = ""
+        else:
+            state_name = board.exchange.normalize_state_name(supplied_name)
+        state_value = _required(params, "value") if action == "state.write" else ""
+        payload = request_payload(
+            action=action,
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            state_name=state_name,
+            state_value=state_value,
+        )
+        meta = {**common, "name": state_name or None}
+        if action == "state.write":
+            meta["value"] = state_value
+        return payload, meta
+
+    if action in {"watch.add", "watch.delete", "watch.list"}:
+        watch_id = ""
+        watch_kind = ""
+        watch_target = ""
+        if action == "watch.add":
+            watch_kind = _required(params, "kind").lower().strip()
+            watch_target = board.exchange.normalize_watch_target(
+                watch_kind,
+                _required(params, "target"),
+            )
+        elif action == "watch.delete":
+            watch_id = _required(params, "id").lower().strip()
+            if not re.fullmatch(r"[0-9a-f]{32}", watch_id):
+                raise StoreError("watch id must be 32 lowercase hex characters", 400)
+        payload = request_payload(
+            action=action,
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            watch_id=watch_id,
+            watch_kind=watch_kind,
+            watch_target=watch_target,
+        )
+        return payload, {
+            **common,
+            "id": watch_id or None,
+            "kind": watch_kind or None,
+            "target": watch_target or None,
+        }
+
+    if action == "inbox.ack":
+        post_id = _int_required(params, "id")
+        ack_status = _required(params, "status").lower().strip()
+        if ack_status not in ACK_STATUSES:
+            raise StoreError(f"ack status must be one of {sorted(ACK_STATUSES)}", 400)
+        payload = request_payload(
+            action=action,
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            post_id=post_id,
+            ack_status=ack_status,
+        )
+        return payload, {**common, "id": post_id, "status": ack_status}
+
+    post_id: int | None = None
+    scope = ""
+    limit: int | None = None
+    if action == "task.list":
+        scope = (_param(params, "scope") or "open").lower().strip()
+        if scope not in {"open", "mine", "all"}:
+            raise StoreError("task scope must be open, mine, or all", 400)
+        limit = _int(params, "limit", min(50, board.cfg.max_limit), 1, board.cfg.max_limit)
+        assert limit is not None
+    else:
+        post_id = _int_required(params, "id")
+    payload = request_payload(
+        action=action,
+        signer_id=signer_id,
+        version=1,
+        nonce=nonce,
+        issued=issued,
+        post_id=post_id,
+        task_scope=scope,
+        limit=limit,
+    )
+    return payload, {
+        **common,
+        "id": post_id,
+        "scope": scope or None,
+        "limit": limit,
+    }
 
 
 def _webhook_fields(

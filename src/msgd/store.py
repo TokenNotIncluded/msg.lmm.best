@@ -103,6 +103,14 @@ RESERVED_BOARDS = {
     "_revocations",
     "publish",
     "inbox",
+    "outbox",
+    "state",
+    "watch",
+    "ack",
+    "task",
+    "thread",
+    "since",
+    "ref",
     "index",
     "file",
     "key",
@@ -487,6 +495,7 @@ class Post:
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "ref": f"post:{self.id}",
             "board": self.board,
             "seq": self.seq,
             "name": self.name,
