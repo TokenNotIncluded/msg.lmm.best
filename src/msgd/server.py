@@ -3214,6 +3214,209 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(200, render_latest_pointer(item))
 
+    def _thread_view(self, segments: list[str], params: Params) -> None:
+        if len(segments) != 2:
+            raise StoreError("thread requires a post id", 404)
+        post_id = _post_id(segments[1])
+        limit = _int(
+            params,
+            "limit",
+            min(100, self.board.cfg.max_limit),
+            1,
+            self.board.cfg.max_limit,
+        )
+        assert limit is not None
+        root_id, posts, truncated = self.board.exchange.thread(post_id, limit=limit)
+        fmt = (_param(params, "format") or "").lower()
+        authentications = {
+            post.id: self.board.store.post_authentication(post) for post in posts
+        }
+        tags = self.board.store.tags_for_posts([post.id for post in posts])
+        if fmt == "json":
+            self._json(
+                200,
+                {
+                    "type": "thread",
+                    "ref": f"thread:{root_id}",
+                    "root_id": root_id,
+                    "requested_id": post_id,
+                    "truncated": truncated,
+                    "posts": [
+                        {
+                            **post.to_dict(),
+                            "authentication": authentications[post.id],
+                            "tags": list(tags.get(post.id, ())),
+                        }
+                        for post in posts
+                    ],
+                },
+            )
+            return
+        if fmt == "ndjson":
+            self._send(
+                200,
+                posts_to_ndjson(
+                    posts,
+                    authentications=authentications,
+                    tags=tags,
+                    page={
+                        "thread_ref": f"thread:{root_id}",
+                        "root_id": root_id,
+                        "truncated": truncated,
+                    },
+                ),
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+        if fmt:
+            raise StoreError("thread format must be json or ndjson", 400)
+        self._send(
+            200,
+            render_listing(
+                board=None,
+                posts=posts,
+                full=True,
+                truncated=truncated,
+                authentications=authentications,
+                tags=tags,
+                heading=f"# thread:{root_id}",
+                note=f"requested=post:{post_id} root=post:{root_id}",
+            ),
+        )
+
+    def _since_view(self, segments: list[str], params: Params) -> None:
+        if len(segments) != 2:
+            raise StoreError("/since requires the last seen global post id", 404)
+        try:
+            after = int(segments[1])
+        except ValueError as exc:
+            raise StoreError("since id must be an integer", 400) from exc
+        if after < 0:
+            raise StoreError("since id must be non-negative", 400)
+        limit = _int(
+            params,
+            "limit",
+            self.board.cfg.default_limit,
+            1,
+            self.board.cfg.max_limit,
+        )
+        assert limit is not None
+        posts = self.board.store.list_posts(
+            since=after,
+            limit=limit + 1,
+            order="asc",
+        )
+        truncated = len(posts) > limit
+        posts = posts[:limit]
+        fmt = (_param(params, "format") or "ndjson").lower()
+        authentications = {
+            post.id: self.board.store.post_authentication(post) for post in posts
+        }
+        tags = self.board.store.tags_for_posts([post.id for post in posts])
+        next_after = posts[-1].id if posts else after
+        next_url = (
+            f"/since/{next_after}?limit={limit}&format={quote(fmt, safe='')}"
+            if truncated
+            else None
+        )
+        if fmt == "json":
+            self._json(
+                200,
+                {
+                    "type": "since",
+                    "after": after,
+                    "next": next_url,
+                    "has_more": truncated,
+                    "posts": [
+                        {
+                            **post.to_dict(),
+                            "authentication": authentications[post.id],
+                            "tags": list(tags.get(post.id, ())),
+                        }
+                        for post in posts
+                    ],
+                },
+            )
+            return
+        if fmt == "ndjson":
+            self._send(
+                200,
+                posts_to_ndjson(
+                    posts,
+                    authentications=authentications,
+                    tags=tags,
+                    page={
+                        "after": after,
+                        "next": next_url,
+                        "has_more": truncated,
+                    },
+                ),
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+        if fmt == "text":
+            self._send(
+                200,
+                render_listing(
+                    board=None,
+                    posts=posts,
+                    full=False,
+                    truncated=truncated,
+                    next_url=next_url,
+                    page_direction="newer",
+                    authentications=authentications,
+                    tags=tags,
+                    heading=f"# /since/{after}",
+                ),
+            )
+            return
+        raise StoreError("since format must be ndjson, json, or text", 400)
+
+    def _stable_ref(self, segments: list[str]) -> None:
+        if len(segments) != 2 or ":" not in segments[1]:
+            raise StoreError("stable ref must look like post:123, thread:123, or tag:name", 404)
+        kind, value = segments[1].split(":", 1)
+        kind = kind.lower()
+        target = ""
+        if kind in {"post", "msg"}:
+            post = self.board.store.get_post(_post_id(value))
+            if post is None:
+                raise StoreError("post reference not found", 404)
+            target = f"/{post.board}/{post.id}"
+        elif kind == "thread":
+            post_id = _post_id(value)
+            root_id, _posts, _truncated = self.board.exchange.thread(post_id, limit=1)
+            target = f"/thread/{root_id}"
+        elif kind == "user":
+            profile = (
+                self.board.store.profile_by_author(value.lower())
+                if valid_author_id(value.lower())
+                else self.board.store.profile_by_name(value)
+            )
+            if profile is None:
+                raise StoreError("user reference not found", 404)
+            target = str(profile["profile_url"])
+        elif kind == "tag":
+            tag = self.board.store.normalize_tag(value)
+            if self.board.store.tag_info(tag) is None:
+                raise StoreError("tag reference not found", 404)
+            target = f"/tag/{quote(tag, safe='')}"
+        elif kind == "file":
+            file_id = _post_id(value)
+            if self.board.store.attachment(file_id) is None:
+                raise StoreError("file reference not found", 404)
+            target = f"/file/{file_id}"
+        elif kind == "repo":
+            info = self.board.repos.repository_info(value)
+            target = f"/repos/{quote(str(info['name']), safe='')}"
+        else:
+            raise StoreError("unsupported stable ref kind", 400)
+        self._send(
+            307,
+            render_ok(ref=segments[1], target=target),
+            extra_headers={"Location": target},
+        )
+
     def _hot(self, params: Params) -> None:
         sort = (_param(params, "sort") or "hot").lower()
         if sort not in Engagement.SORTS:
