@@ -396,10 +396,14 @@ class BridgeSearchCase(unittest.TestCase):
         self.assertTrue(agent_index.startswith("# /index\n"))
         self.assertIn("/index/by-id", agent_index)
         self.assertIn("/index/by-time", agent_index)
+        self.assertIn("/index/by-updated", agent_index)
         self.assertIn("/index/by-name", agent_index)
-        self.assertIn("boards  /", agent_index)
-        self.assertIn("tags    /tags", agent_index)
-        self.assertIn("users   /users", agent_index)
+        self.assertIn("/index/by-author", agent_index)
+        self.assertIn("/index/by-board", agent_index)
+        self.assertIn("/index/by-tag", agent_index)
+        self.assertIn("/index/by-reply", agent_index)
+        self.assertIn("search /_search?q=TEXT", agent_index)
+        self.assertIn("hot    /hot", agent_index)
         self.assertNotIn("## active", agent_index)
         self.assertNotIn("## recent", agent_index)
         self.assertNotIn("## hot", agent_index)
@@ -409,7 +413,16 @@ class BridgeSearchCase(unittest.TestCase):
         entries = [json.loads(line) for line in index_ndjson.splitlines()]
         self.assertEqual(
             [entry["name"] for entry in entries],
-            ["by-id", "by-time", "by-name"],
+            [
+                "by-id",
+                "by-time",
+                "by-updated",
+                "by-name",
+                "by-author",
+                "by-board",
+                "by-tag",
+                "by-reply",
+            ],
         )
 
         rules = self.c.get("/rules")[1]

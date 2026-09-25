@@ -35,6 +35,7 @@ from msgd.ratelimit import Limiter
 from msgd.render import (
     posts_to_ndjson,
     render_agent_index,
+    render_dimension_index,
     render_error,
     render_inbox,
     render_index,
@@ -2437,10 +2438,40 @@ class Handler(BaseHTTPRequestHandler):
                 "description": "posts ordered by creation time",
             },
             {
+                "name": "by-updated",
+                "href": "/index/by-updated",
+                "key": "updated,id",
+                "description": "posts ordered by last update time",
+            },
+            {
                 "name": "by-name",
                 "href": "/index/by-name",
                 "key": "bound signed name",
                 "description": "claimed signed names ordered alphabetically",
+            },
+            {
+                "name": "by-author",
+                "href": "/index/by-author",
+                "key": "author_id",
+                "description": "signed identities ordered by author id",
+            },
+            {
+                "name": "by-board",
+                "href": "/index/by-board",
+                "key": "board name",
+                "description": "boards ordered alphabetically",
+            },
+            {
+                "name": "by-tag",
+                "href": "/index/by-tag",
+                "key": "normalized hashtag",
+                "description": "hashtags ordered alphabetically",
+            },
+            {
+                "name": "by-reply",
+                "href": "/index/by-reply",
+                "key": "parent post id",
+                "description": "reply groups ordered by parent post id",
             },
         ]
 
@@ -2452,11 +2483,12 @@ class Handler(BaseHTTPRequestHandler):
                         "type": "index-root",
                         "version": __version__,
                         "indexes": manifest,
-                        "secondary": {
-                            "boards": "/",
-                            "tags": "/tags",
-                            "users": "/users",
+                        "views": {
                             "search": "/_search?q=TEXT",
+                            "hot": "/hot",
+                            "rss": "/rss.xml",
+                            "tags_by_popularity": "/tags",
+                            "users_by_activity": "/users",
                         },
                     },
                 )
@@ -2475,11 +2507,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, render_agent_index(self.board.cfg))
             return
 
-        if len(segments) != 2 or segments[1] not in {"by-id", "by-time", "by-name"}:
+        kinds = {
+            "by-id",
+            "by-time",
+            "by-updated",
+            "by-name",
+            "by-author",
+            "by-board",
+            "by-tag",
+            "by-reply",
+        }
+        if len(segments) != 2 or segments[1] not in kinds:
             self._error(
                 404,
                 "unknown index",
-                "use /index/by-id, /index/by-time, or /index/by-name",
+                "see /index for available index dimensions",
             )
             return
 
@@ -2492,7 +2534,7 @@ class Handler(BaseHTTPRequestHandler):
             self.board.cfg.max_limit,
         )
         assert limit is not None
-        default_order = "desc" if kind == "by-time" else "asc"
+        default_order = "desc" if kind in {"by-time", "by-updated"} else "asc"
         order = (_param(params, "order") or default_order).lower()
         if order not in {"asc", "desc"}:
             raise StoreError("order must be asc or desc", 400)
@@ -2505,7 +2547,7 @@ class Handler(BaseHTTPRequestHandler):
             scope=scope,
         )
 
-        if kind in {"by-id", "by-time"}:
+        if kind in {"by-id", "by-time", "by-updated"}:
             if kind == "by-id":
                 boundary = cursor.get("id")
                 if boundary is not None and (not isinstance(boundary, int) or boundary < 1):
@@ -2517,27 +2559,40 @@ class Handler(BaseHTTPRequestHandler):
                     order=order,
                 )
             else:
-                time_cursor: tuple[float, int] | None = None
+                timestamp_field = "created" if kind == "by-time" else "updated"
+                timestamp_cursor: tuple[float, int] | None = None
                 if cursor:
                     try:
-                        time_cursor = (float(cursor["created"]), int(cursor["id"]))
+                        timestamp_cursor = (
+                            float(cursor[timestamp_field]),
+                            int(cursor["id"]),
+                        )
                     except (KeyError, TypeError, ValueError) as exc:
-                        raise StoreError("invalid by-time cursor", 400) from exc
-                    if time_cursor[1] < 1:
-                        raise StoreError("invalid by-time cursor", 400)
-                posts = store.list_posts_by_time(
-                    cursor=time_cursor,
-                    limit=limit + 1,
-                    order=order,
-                )
+                        raise StoreError(f"invalid {kind} cursor", 400) from exc
+                    if timestamp_cursor[1] < 1:
+                        raise StoreError(f"invalid {kind} cursor", 400)
+                if kind == "by-time":
+                    posts = store.list_posts_by_time(
+                        cursor=timestamp_cursor,
+                        limit=limit + 1,
+                        order=order,
+                    )
+                else:
+                    posts = store.list_posts_by_updated(
+                        cursor=timestamp_cursor,
+                        limit=limit + 1,
+                        order=order,
+                    )
 
             truncated = len(posts) > limit
             posts = posts[:limit]
             next_cursor = None
             if truncated and posts:
-                values = {"id": posts[-1].id}
+                values: dict[str, int | str] = {"id": posts[-1].id}
                 if kind == "by-time":
                     values["created"] = repr(posts[-1].created)
+                elif kind == "by-updated":
+                    values["updated"] = repr(posts[-1].updated)
                 next_cursor = _encode_cursor(f"index-{kind}", scope, **values)
             next_url = _next_cursor_url(
                 path,
@@ -2573,21 +2628,97 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        name_cursor = cursor.get("key") if cursor else None
-        if name_cursor is not None and not isinstance(name_cursor, str):
-            raise StoreError("invalid by-name cursor", 400)
-        names = store.list_bound_names(
-            cursor_key=name_cursor,
-            limit=limit + 1,
-            order=order,
-        )
-        truncated = len(names) > limit
-        names = names[:limit]
-        next_cursor = (
-            _encode_cursor(f"index-{kind}", scope, key=str(names[-1]["name_key"]))
-            if truncated and names
-            else None
-        )
+        if kind == "by-name":
+            name_cursor = cursor.get("key") if cursor else None
+            if name_cursor is not None and not isinstance(name_cursor, str):
+                raise StoreError("invalid by-name cursor", 400)
+            names = store.list_bound_names(
+                cursor_key=name_cursor,
+                limit=limit + 1,
+                order=order,
+            )
+            truncated = len(names) > limit
+            names = names[:limit]
+            next_cursor = (
+                _encode_cursor(f"index-{kind}", scope, key=str(names[-1]["name_key"]))
+                if truncated and names
+                else None
+            )
+            next_url = _next_cursor_url(
+                path,
+                params,
+                cursor=next_cursor,
+                limit=limit,
+                has_more=truncated,
+            )
+            items = [
+                {
+                    "name": str(item["name"]),
+                    "profile": str(item["profile"]),
+                    "author_id": str(item["author_id"]),
+                    "posts": int(item["posts"]),
+                    "claimed": item["claimed"],
+                    "last_used": item["last_used"],
+                }
+                for item in names
+            ]
+            self._send_index_page(
+                fmt=fmt,
+                kind=kind,
+                order=order,
+                next_url=next_url,
+                items=items,
+                text_body=render_name_index(names, order=order, next_url=next_url),
+            )
+            return
+
+        key_cursor = cursor.get("key") if cursor else None
+        if kind == "by-reply":
+            reply_cursor = cursor.get("id") if cursor else None
+            if reply_cursor is not None and (not isinstance(reply_cursor, int) or reply_cursor < 1):
+                raise StoreError("invalid by-reply cursor", 400)
+            entries = store.list_reply_groups(
+                cursor_id=reply_cursor,
+                limit=limit + 1,
+                order=order,
+            )
+            cursor_value = int(entries[limit - 1]["parent_id"]) if len(entries) > limit else None
+        else:
+            if key_cursor is not None and not isinstance(key_cursor, str):
+                raise StoreError(f"invalid {kind} cursor", 400)
+            if kind == "by-tag":
+                entries = store.list_tags_by_name(
+                    cursor_key=key_cursor,
+                    limit=limit + 1,
+                    order=order,
+                )
+                cursor_field = "tag"
+            elif kind == "by-board":
+                entries = store.list_boards_by_name(
+                    cursor_key=key_cursor,
+                    limit=limit + 1,
+                    order=order,
+                )
+                cursor_field = "name"
+            else:
+                entries = store.list_authors(
+                    cursor_key=key_cursor,
+                    limit=limit + 1,
+                    order=order,
+                )
+                cursor_field = "author_id"
+            cursor_value = str(entries[limit - 1][cursor_field]) if len(entries) > limit else None
+
+        truncated = len(entries) > limit
+        entries = entries[:limit]
+        if truncated and cursor_value is not None:
+            next_cursor = _encode_cursor(
+                f"index-{kind}",
+                scope,
+                **({"id": cursor_value} if kind == "by-reply" else {"key": cursor_value}),
+            )
+        else:
+            next_cursor = None
         next_url = _next_cursor_url(
             path,
             params,
@@ -2595,24 +2726,32 @@ class Handler(BaseHTTPRequestHandler):
             limit=limit,
             has_more=truncated,
         )
-        items = [
-            {
-                "name": str(item["name"]),
-                "profile": str(item["profile"]),
-                "author_id": str(item["author_id"]),
-                "posts": int(item["posts"]),
-                "claimed": item["claimed"],
-                "last_used": item["last_used"],
-            }
-            for item in names
-        ]
+
+        items: list[dict[str, Any]] = []
+        for item in entries:
+            entry = dict(item)
+            if kind == "by-tag":
+                entry["path"] = f"/tag/{quote(str(item['tag']), safe='')}"
+            elif kind == "by-board":
+                entry["path"] = f"/{item['name']}"
+            elif kind == "by-author":
+                entry["path"] = str(item["key_url"])
+            elif kind == "by-reply" and item.get("parent_board"):
+                entry["path"] = f"/{item['parent_board']}/{item['parent_id']}"
+            items.append(entry)
+
         self._send_index_page(
             fmt=fmt,
             kind=kind,
             order=order,
             next_url=next_url,
             items=items,
-            text_body=render_name_index(names, order=order, next_url=next_url),
+            text_body=render_dimension_index(
+                kind,
+                entries,
+                order=order,
+                next_url=next_url,
+            ),
         )
 
     def _hot(self, params: Params) -> None:
