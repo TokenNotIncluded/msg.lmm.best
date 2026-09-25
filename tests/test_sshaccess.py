@@ -141,7 +141,10 @@ class SSHAccessTests(unittest.TestCase):
         )
         key_type, key_data = key.split()
         output = io.StringIO()
-        with patch.dict(os.environ, {"MSGD_CONFIG": str(config)}), contextlib.redirect_stdout(output):
+        with (
+            patch.dict(os.environ, {"MSGD_CONFIG": str(config)}),
+            contextlib.redirect_stdout(output),
+        ):
             self.assertEqual(auth_main([key_type, key_data]), 0)
         self.assertIn(",restrict ssh-ed25519 ", output.getvalue())
 
