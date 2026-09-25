@@ -1183,6 +1183,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action in {"post.like", "post.unlike"}:
+            if store.key_info(signer_id) is None:
+                raise StoreError("like requires an established signed identity", 403)
             post_id = _post_id(_required(params, "id"))
             post = store.get_post(post_id)
             if post is None:
@@ -1735,6 +1737,8 @@ class Handler(BaseHTTPRequestHandler):
             nonce=nonce,
             issued=issued,
         )
+        if self.board.store.key_info(auth.signer_id) is None:
+            raise StoreError("like requires an established signed identity", 403)
         self.board.store.consume_nonce(auth)
         changed, likes = self.board.store.set_post_like(
             post.id,
