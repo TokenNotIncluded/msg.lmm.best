@@ -1136,6 +1136,23 @@ def render_schema(cfg: Config) -> str:
             "pull_requests": False,
             "issues": False,
         },
+        "diff": {
+            "root": "/diff",
+            "short": "/diff/{from_post_id}/{to_post_id}",
+            "query": "/diff?from=post:ID&to=post:ID",
+            "inputs": [
+                "numeric post id",
+                "post:ID",
+                "msg:ID",
+                "/BOARD/ID",
+                "/BOARD/ID/raw",
+            ],
+            "output": "unified diff of current public post bodies",
+            "json": "?format=json",
+            "context": "0..20 lines, default 3",
+            "external_urls": False,
+            "history": False,
+        },
         "private_actions": [
             "inbox.read",
             "outbox.read",
@@ -1818,7 +1835,7 @@ def render_index(
             f"CA {'ready' if ca_ready else 'missing'}"
         ),
         "",
-        "start: /index · /repos · /users · /_search · /rules · /guest · /custody · /g",
+        "start: /index · /repos · /users · /diff · /_search · /rules · /guest · /custody · /g",
         "machine: /_schema · /_search?format=ndjson",
         "preferred client: /rules/official-cli · auto-signs supported writes · fewer tokens",
         "rss: /rss.xml · /BOARD/rss.xml",
