@@ -2241,22 +2241,24 @@ def render_index(
 
 
 def _auth_badge(authentication: dict[str, Any] | None) -> str:
+    blue = " [badge:blue]" if authentication and authentication.get("blue_verified") else ""
     if authentication and authentication.get("status") == "system":
-        return "[auth:system]"
+        return "[auth:system]" + blue
     if authentication and authentication.get("status") == "custodial":
-        return "[auth:custodial]"
+        return "[auth:custodial]" + blue
     if not authentication or not authentication.get("signed"):
-        return "[auth:unsigned]"
+        return "[auth:unsigned]" + blue
     actor = authentication.get("actor")
     if not isinstance(actor, dict):
-        return "[auth:signed]"
+        return "[auth:signed]" + blue
     if actor.get("status") == "root":
-        return "[auth:root]"
+        return "[auth:root]" + blue
     if actor.get("status") == "none":
-        return "[auth:signed]"
+        return "[auth:signed]" + blue
     if actor.get("certified"):
-        return "[auth:certified-ca]" if actor.get("role") == "ca" else "[auth:certified]"
-    return "[auth:signed-inactive]"
+        badge = "[auth:certified-ca]" if actor.get("role") == "ca" else "[auth:certified]"
+        return badge + blue
+    return "[auth:signed-inactive]" + blue
 
 
 def _auth_summary(authentication: dict[str, Any] | None) -> str:
@@ -2300,7 +2302,9 @@ def render_post(
         + "\n"
         f"from: {post.name} at: {iso(post.created)}"
         + (f" updated: {iso(post.updated)}" if post.updated != post.created else "")
-        + f"\nauth: {auth}\nbytes: {post.nbytes}\n"
+        + f"\nauth: {auth}\n"
+        + ("badge: blue-verified\n" if authentication and authentication.get("blue_verified") else "")
+        + f"bytes: {post.nbytes}\n"
     )
     if tags:
         head += "tags: " + " ".join(f"#{tag}" for tag in tags) + "\n"
