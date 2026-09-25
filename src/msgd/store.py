@@ -28,9 +28,7 @@ from msgd.crypto import (
 
 BOARD_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 AUTHOR_ID_RE = re.compile(r"^[0-9a-f]{64}$")
-MENTION_RE = re.compile(
-    r"(?<![A-Za-z0-9._-])@([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?![A-Za-z0-9._-])"
-)
+MENTION_RE = re.compile(r"(?<![A-Za-z0-9._-])@([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?![A-Za-z0-9._-])")
 
 ANONYMOUS_PERMISSION_BITS = {
     "post.create": 1,
@@ -43,21 +41,14 @@ DEFAULT_ANONYMOUS = frozenset(ANONYMOUS_PERMISSION_BITS)
 
 def anonymous_permission_mask(actions: Iterable[str]) -> int:
     current = set(actions)
-    return sum(
-        bit
-        for action, bit in ANONYMOUS_PERMISSION_BITS.items()
-        if action in current
-    )
+    return sum(bit for action, bit in ANONYMOUS_PERMISSION_BITS.items() if action in current)
 
 
 def anonymous_actions(mask: int) -> tuple[str, ...]:
     if mask < 0 or mask & ~ANONYMOUS_PERMISSION_MASK:
         raise ValueError(f"anonymous permission mask must be 0..{ANONYMOUS_PERMISSION_MASK}")
-    return tuple(
-        action
-        for action, bit in ANONYMOUS_PERMISSION_BITS.items()
-        if mask & bit
-    )
+    return tuple(action for action, bit in ANONYMOUS_PERMISSION_BITS.items() if mask & bit)
+
 
 RESERVED_BOARDS = {
     "rules",
@@ -210,7 +201,6 @@ class StoreError(Exception):
         self.hint = hint
 
 
-
 @dataclass(frozen=True)
 class FileInput:
     name: str
@@ -258,6 +248,7 @@ class Attachment:
             "url": f"/file/{self.id}",
         }
 
+
 @dataclass
 class Post:
     id: int
@@ -303,8 +294,11 @@ class Post:
             "signature": self.signature,
             "sig_version": self.sig_version if self.signed else None,
             "sig_action": (
-                "post.create" if self.signed and self.sig_version == 1 else
-                "post.edit" if self.signed else None
+                "post.create"
+                if self.signed and self.sig_version == 1
+                else "post.edit"
+                if self.signed
+                else None
             ),
             "sig_nonce": self.sig_nonce if self.signed and self.sig_version == 1 else None,
             "sig_issued": self.sig_issued if self.signed and self.sig_version == 1 else None,
@@ -336,9 +330,12 @@ class Store:
         )
         self._conn.row_factory = sqlite3.Row
         with self._lock:
-            had_inbox = self._conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox_events'"
-            ).fetchone() is not None
+            had_inbox = (
+                self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox_events'"
+                ).fetchone()
+                is not None
+            )
             self._conn.executescript(TABLES)
             self._ensure_schema()
             for name, description in DEFAULT_BOARDS.items():
@@ -356,8 +353,7 @@ class Store:
 
     def _ensure_schema(self) -> None:
         columns = {
-            str(row["name"])
-            for row in self._conn.execute("PRAGMA table_info(posts)").fetchall()
+            str(row["name"]) for row in self._conn.execute("PRAGMA table_info(posts)").fetchall()
         }
         additions = {
             "author_key": "TEXT",
@@ -380,9 +376,7 @@ class Store:
             for row in self._conn.execute("PRAGMA table_info(revocations)").fetchall()
         }
         if revocation_columns and "reason" not in revocation_columns:
-            self._conn.execute(
-                "ALTER TABLE revocations ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
-            )
+            self._conn.execute("ALTER TABLE revocations ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
 
         self._conn.executescript(
             """
@@ -457,7 +451,7 @@ class Store:
         try:
             key = Path(self.cfg.root_public_key).read_text(encoding="utf-8").strip()
             canonical, root_id = public_identity(key)
-        except (OSError, SignatureError):
+        except OSError, SignatureError:
             return None
         return {
             "algorithm": "ed25519",
@@ -816,7 +810,7 @@ class Store:
                 f"requested_issuer={requested_issuer or 'any'}",
                 f"delegate={str(delegate).lower()}",
                 f"grants={canonical_json(grant_list)}",
-                *( [f"message={message[:300]}"] if message else [] ),
+                *([f"message={message[:300]}"] if message else []),
             ],
         )
         return csr
@@ -880,10 +874,7 @@ class Store:
         if csr["requested_issuer"] and csr["requested_issuer"] != signer_id:
             return False
         grants = self._grant_map(csr["grants"])
-        return all(
-            "cert.issue" in self.permissions_for(signer_id, topic)
-            for topic in grants
-        )
+        return all("cert.issue" in self.permissions_for(signer_id, topic) for topic in grants)
 
     def cancel_csr(self, csr_id: int, signer_id: str, reason: str = "") -> dict[str, Any]:
         csr = self.csr(csr_id)
@@ -979,8 +970,7 @@ class Store:
             "decision_by": str(row["decision_by"] or ""),
             "reason": str(row["reason"] or ""),
             "certificate_serial": (
-                str(row["certificate_serial"])
-                if row["certificate_serial"] is not None else None
+                str(row["certificate_serial"]) if row["certificate_serial"] is not None else None
             ),
         }
 
@@ -1077,7 +1067,7 @@ class Store:
             "issued",
             f"[ISSUED] {cert.serial[:12]}",
             [
-                *( [f"csr=/_csr?id={csr_id}"] if csr_id is not None else [] ),
+                *([f"csr=/_csr?id={csr_id}"] if csr_id is not None else []),
                 f"certificate=/_cert?serial={cert.serial}",
                 f"subject={cert.subject_id}",
                 f"issuer={cert.issuer_id}",
@@ -1149,7 +1139,7 @@ class Store:
         now = int(time.time()) if now is None else now
         try:
             return self._validate_chain(serial, now=now, seen=set(), depth=0)
-        except (StoreError, SignatureError):
+        except StoreError, SignatureError:
             return False
 
     def permissions_for(self, subject_id: str, board: str) -> set[str]:
@@ -1175,14 +1165,12 @@ class Store:
             return True
         permissions = self.permissions_for(signer_id, board)
         if action == "post.edit":
-            return (
-                "post.edit.any" in permissions
-                or (owner_id == signer_id and "post.edit.self" in permissions)
+            return "post.edit.any" in permissions or (
+                owner_id == signer_id and "post.edit.self" in permissions
             )
         if action == "post.delete":
-            return (
-                "post.delete.any" in permissions
-                or (owner_id == signer_id and "post.delete.self" in permissions)
+            return "post.delete.any" in permissions or (
+                owner_id == signer_id and "post.delete.self" in permissions
             )
         return action in permissions
 
@@ -1206,8 +1194,7 @@ class Store:
         if not allowed and signer_id == cert.issuer_id:
             topics = tuple(cert.grants)
             allowed = all(
-                "cert.revoke" in self.permissions_for(signer_id, topic)
-                for topic in topics
+                "cert.revoke" in self.permissions_for(signer_id, topic) for topic in topics
             )
         if not allowed:
             raise StoreError("not allowed to revoke this certificate", 403)
@@ -1381,7 +1368,7 @@ class Store:
     def find_in_board(self, board: str, ident: str | int) -> Post | None:
         try:
             value = int(ident)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
         with self._lock:
             row = self._conn.execute(
@@ -1422,9 +1409,7 @@ class Store:
             used = self._storage_bytes()
             old_bytes = self._post_storage_bytes(post.id)
             file_bytes = (
-                sum(file.nbytes for file in files)
-                if files is not None
-                else old_bytes - post.nbytes
+                sum(file.nbytes for file in files) if files is not None else old_bytes - post.nbytes
             )
             new_bytes = nbytes + file_bytes
             if new_bytes > old_bytes and used - old_bytes + new_bytes > self.cfg.max_storage_bytes:
@@ -1569,15 +1554,7 @@ class Store:
                 post = self._row(post_row)
                 if post is None:
                     continue
-                kinds = tuple(
-                    sorted(
-                        {
-                            item
-                            for item in str(row["kinds"] or "").split(",")
-                            if item
-                        }
-                    )
-                )
+                kinds = tuple(sorted({item for item in str(row["kinds"] or "").split(",") if item}))
                 result.append((post, kinds))
         return result
 

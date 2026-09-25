@@ -65,14 +65,12 @@ def _render_index(boards: list[tuple[str, int]]) -> str:
 
 
 def _current_index(base_url: str) -> dict[str, object] | None:
-    text = _request(
-        f"{base_url}/{INDEX_BOARD}?format=ndjson&order=asc&limit=1"
-    ).strip()
+    text = _request(f"{base_url}/{INDEX_BOARD}?format=ndjson&order=asc&limit=1").strip()
     if not text:
         return None
     try:
         value = json.loads(text.splitlines()[0])
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         return None
     return value if isinstance(value, dict) else None
 

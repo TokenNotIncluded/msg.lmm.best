@@ -88,9 +88,7 @@ def command_init(args: argparse.Namespace) -> int:
     have_private = private_path.exists()
     have_public = public_path.exists()
     if have_public and not have_private:
-        raise SystemExit(
-            "root CA private key is missing; refusing to rotate the trust anchor"
-        )
+        raise SystemExit("root CA private key is missing; refusing to rotate the trust anchor")
 
     if have_private:
         key = _load_private(str(private_path))

@@ -26,11 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = Config.load(args.config)
-    overrides = {
-        k: v
-        for k in ("host", "port", "database")
-        if (v := getattr(args, k)) is not None
-    }
+    overrides = {k: v for k in ("host", "port", "database") if (v := getattr(args, k)) is not None}
     cfg = replace(cfg, **overrides)
     cfg.validate()
 

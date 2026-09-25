@@ -412,10 +412,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     **post.to_dict(),
-                    "files": [
-                        file.to_dict()
-                        for file in self.board.store.attachments(post.id)
-                    ],
+                    "files": [file.to_dict() for file in self.board.store.attachments(post.id)],
                 },
             )
         else:
@@ -482,8 +479,12 @@ class Handler(BaseHTTPRequestHandler):
             if action == "post.edit":
                 body, title, name, _ = store.prepare_post(
                     body=_required(params, "text"),
-                    title=post.title if _param(params, "title") is None else _param(params, "title") or "",
-                    name=post.name if _param(params, "name") is None else _param(params, "name") or "",
+                    title=post.title
+                    if _param(params, "title") is None
+                    else _param(params, "title") or "",
+                    name=post.name
+                    if _param(params, "name") is None
+                    else _param(params, "name") or "",
                     max_body_bytes=_body_limit(self.board.cfg, method),
                 )
                 manifest = _signing_manifest(
@@ -1326,11 +1327,7 @@ def _signing_manifest(
 ) -> tuple[dict[str, object], ...]:
     clear = _truthy(_param(params, "clear_files"))
     declared_raw = _param(params, "files")
-    declared = (
-        normalize_file_manifest(declared_raw)
-        if declared_raw is not None
-        else None
-    )
+    declared = normalize_file_manifest(declared_raw) if declared_raw is not None else None
     uploaded = tuple(file.manifest() for file in uploads)
 
     if clear:
@@ -1368,12 +1365,7 @@ def _parse_multipart(
         raise StoreError("multipart boundary is required", 400)
 
     message = BytesParser(policy=email_policy).parsebytes(
-        (
-            "Content-Type: "
-            + content_type
-            + "\r\nMIME-Version: 1.0\r\n\r\n"
-        ).encode("utf-8")
-        + raw
+        ("Content-Type: " + content_type + "\r\nMIME-Version: 1.0\r\n\r\n").encode("utf-8") + raw
     )
     if not message.is_multipart():
         raise StoreError("invalid multipart body", 400)
@@ -1412,9 +1404,7 @@ def _parse_multipart(
             raise StoreError(f"file exceeds max_file_bytes={max_file_bytes}", 413)
 
         content_type_value = (
-            part.get_content_type()
-            if part.get("Content-Type")
-            else "application/octet-stream"
+            part.get_content_type() if part.get("Content-Type") else "application/octet-stream"
         )
         files.append(
             FileInput(
@@ -1453,8 +1443,7 @@ def _grant_manifest(
     grants: dict[str, tuple[str, ...]],
 ) -> tuple[dict[str, object], ...]:
     return tuple(
-        {"topic": topic, "actions": list(actions)}
-        for topic, actions in sorted(grants.items())
+        {"topic": topic, "actions": list(actions)} for topic, actions in sorted(grants.items())
     )
 
 

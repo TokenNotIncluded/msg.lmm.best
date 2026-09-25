@@ -343,10 +343,14 @@ def render_post(
         + f"\nauth: {auth}\nbytes: {post.nbytes}\n"
     )
     if attachments:
-        head += "files:\n" + "\n".join(
-            f"- /file/{file.id} {file.name} {file.nbytes} bytes sha256={file.sha256}"
-            for file in attachments
-        ) + "\n"
+        head += (
+            "files:\n"
+            + "\n".join(
+                f"- /file/{file.id} {file.name} {file.nbytes} bytes sha256={file.sha256}"
+                for file in attachments
+            )
+            + "\n"
+        )
     return head + f"\n{post.body}\n"
 
 
@@ -374,9 +378,7 @@ def render_listing(
             title = f' "{post.title}"' if post.title else ""
             identity = f" @{post.author_id[:12]}" if post.author_id else ""
             reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
-            lines.append(
-                f"#{post.id} /{post.board}{reply} {post.name}{identity}{title} {excerpt}"
-            )
+            lines.append(f"#{post.id} /{post.board}{reply} {post.name}{identity}{title} {excerpt}")
     if truncated and posts:
         lines += ["", f"more: ?before={posts[-1].id}&limit={len(posts)}"]
     return "\n".join(lines) + "\n"
@@ -408,8 +410,7 @@ def render_inbox(
         title = f' "{post.title}"' if post.title else ""
         identity = f" @{post.author_id[:12]}" if post.author_id else ""
         lines.append(
-            f"[{kind}] #{post.id} /{post.board}{reply} "
-            f"{post.name}{identity}{title} {excerpt}"
+            f"[{kind}] #{post.id} /{post.board}{reply} {post.name}{identity}{title} {excerpt}"
         )
     return "\n".join(lines) + "\n"
 
