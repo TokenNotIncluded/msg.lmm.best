@@ -47,6 +47,26 @@ class Config:
     topic_template_dir: str = "/etc/msg-lmm-best/templates"
     certificate_only_topics: str = "store,ads"
 
+    # Commerce is data-driven by /store posts; Waffo Pancake only handles checkout/payment.
+    commerce_enabled: bool = False
+    waffo_base_url: str = "https://api.waffo.ai"
+    waffo_merchant_id: str = ""
+    waffo_private_key: str = "/etc/msg-lmm-best/commerce/waffo-merchant.pem"
+    waffo_webhook_public_key: str = ""
+    waffo_onetime_product_id: str = ""
+    waffo_subscription_products: str = ""
+    waffo_tax_category: str = "digital_goods"
+    commerce_checkout_ttl_seconds: int = 900
+    commerce_fulfillment_poll_seconds: int = 2
+    commerce_allowed_grant_actions: str = (
+        "post.create,post.edit.self,post.delete.self,"
+        "web.write,web.delete,badge.blue,"
+        "file.list,file.create,file.write,file.archive,repo.create,repo.write"
+    )
+    privacy_policy_file: str = "/etc/msg-lmm-best/privacy.md"
+    terms_file: str = "/etc/msg-lmm-best/terms.md"
+    root_private_key: str = "/etc/msg-lmm-best/root-ca.key"
+
     # OpenSSH restricted-shell integration.
     ssh_shell_command: str = "/usr/local/bin/msg-ssh-shell"
     ssh_max_keys_per_identity: int = 16
@@ -92,6 +112,23 @@ class Config:
         return frozenset(
             part.strip().lower()
             for part in self.certificate_only_topics.split(",")
+            if part.strip()
+        )
+
+    @property
+    def waffo_subscription_product_map(self) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for item in self.waffo_subscription_products.split(","):
+            key, sep, value = item.strip().partition("=")
+            if sep and key and value:
+                result[key.strip().lower()] = value.strip()
+        return result
+
+    @property
+    def commerce_allowed_grant_action_set(self) -> frozenset[str]:
+        return frozenset(
+            part.strip()
+            for part in self.commerce_allowed_grant_actions.split(",")
             if part.strip()
         )
 
@@ -156,6 +193,34 @@ class Config:
             certificate_only_topics=get(
                 "topics", "certificate_only", base.certificate_only_topics
             ),
+            commerce_enabled=get("commerce", "enabled", base.commerce_enabled),
+            waffo_base_url=get("commerce", "waffo_base_url", base.waffo_base_url),
+            waffo_merchant_id=get("commerce", "waffo_merchant_id", base.waffo_merchant_id),
+            waffo_private_key=get("commerce", "waffo_private_key", base.waffo_private_key),
+            waffo_webhook_public_key=get(
+                "commerce", "waffo_webhook_public_key", base.waffo_webhook_public_key
+            ),
+            waffo_onetime_product_id=get(
+                "commerce", "waffo_onetime_product_id", base.waffo_onetime_product_id
+            ),
+            waffo_subscription_products=get(
+                "commerce", "waffo_subscription_products", base.waffo_subscription_products
+            ),
+            waffo_tax_category=get("commerce", "waffo_tax_category", base.waffo_tax_category),
+            commerce_checkout_ttl_seconds=get(
+                "commerce", "checkout_ttl_seconds", base.commerce_checkout_ttl_seconds
+            ),
+            commerce_fulfillment_poll_seconds=get(
+                "commerce", "fulfillment_poll_seconds", base.commerce_fulfillment_poll_seconds
+            ),
+            commerce_allowed_grant_actions=get(
+                "commerce", "allowed_grant_actions", base.commerce_allowed_grant_actions
+            ),
+            privacy_policy_file=get(
+                "commerce", "privacy_policy_file", base.privacy_policy_file
+            ),
+            terms_file=get("commerce", "terms_file", base.terms_file),
+            root_private_key=get("commerce", "root_private_key", base.root_private_key),
             ssh_shell_command=get("ssh", "shell_command", base.ssh_shell_command),
             ssh_max_keys_per_identity=get(
                 "ssh", "max_keys_per_identity", base.ssh_max_keys_per_identity
@@ -225,6 +290,8 @@ class Config:
             "repo_max_request_bytes",
             "web_max_site_bytes",
             "ssh_max_keys_per_identity",
+            "commerce_checkout_ttl_seconds",
+            "commerce_fulfillment_poll_seconds",
         ):
             if getattr(self, key) < 1:
                 raise SystemExit(f"{key} must be >= 1")
@@ -246,3 +313,12 @@ class Config:
         topic_re = re.compile(r"^[a-z][a-z0-9]{1,23}$")
         if any(not topic_re.fullmatch(name) for name in self.certificate_only_topic_set):
             raise SystemExit("topics.certificate_only contains an invalid topic name")
+        if self.commerce_enabled:
+            if not self.waffo_base_url.startswith("https://"):
+                raise SystemExit("commerce.waffo_base_url must use https")
+            if not self.waffo_merchant_id.strip():
+                raise SystemExit("commerce.waffo_merchant_id is required when commerce is enabled")
+            if not self.waffo_onetime_product_id and not self.waffo_subscription_product_map:
+                raise SystemExit(
+                    "commerce requires waffo_onetime_product_id or waffo_subscription_products"
+                )
