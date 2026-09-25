@@ -153,10 +153,17 @@ if (( healthy == 0 )); then
 fi
 curl -fsS "$LOCAL_API/_health"
 
+ROOT_CA_PRIVATE="$("$VENV/bin/python" - "$CONFIG" <<'PY'
+import sys
+from msgd.config import Config
+
+print(Config.load(sys.argv[1]).root_private_key)
+PY
+)"
 echo "==> seed default /store products"
 sudo "$VENV/bin/msg" \
     --api "$LOCAL_API" \
-    --key /etc/msg-lmm-best/root-ca.key \
+    --key "$ROOT_CA_PRIVATE" \
     post store \
     --fields-file "$D/etc/msg-lmm-best/products/membership.json"
 
