@@ -198,7 +198,7 @@ class GitObjectStore:
             raise ObjectStoreError("post id must be positive")
         commit_oid = self._oid(commit_oid)
         with self._lock:
-            self._run(["cat-file", "-e", f"{commit_oid}^{commit}"])
+            self._run(["cat-file", "-e", f"{commit_oid}^{{commit}}"])
             self._run(["update-ref", f"refs/msg/posts/{post_id}", commit_oid])
 
     def delete_post_ref(self, post_id: int) -> None:
