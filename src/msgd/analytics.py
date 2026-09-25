@@ -222,14 +222,26 @@ class Engagement:
             )
         return result
 
-    def rank(self, metric: str, *, board: str | None = None, limit: int = 20) -> list[int]:
+    def rank(
+        self,
+        metric: str,
+        *,
+        board: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[int]:
         if metric not in self.SORTS:
             raise ValueError(f"unsupported engagement sort: {metric}")
         client = self.client
         if client is None:
             return []
+        start = max(0, offset)
         try:
-            members = client.zrevrange(self._key(metric, board), 0, max(0, limit - 1))
+            members = client.zrevrange(
+                self._key(metric, board),
+                start,
+                start + max(0, limit - 1),
+            )
             return [int(member) for member in members]
         except (ValkeyError, OSError, ValueError) as exc:
             self.error = str(exc)
