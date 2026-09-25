@@ -1354,7 +1354,14 @@ class ServerCase(unittest.TestCase):
             issued=str(info["issued"]),
         )
         self.assertEqual(status, 200, body)
-        self.assertEqual(json.loads(body)["bio"], "managed by delegated certificate")
+        updated = json.loads(body)
+        self.assertEqual(updated["bio"], "managed by delegated certificate")
+        self.assertEqual(updated["profile_actor_id"], public_identity_for_test(delegate))
+        self.assertEqual(updated["profile_actor_key"], public_b64(delegate))
+        self.assertEqual(
+            self.c.get("/@Alice/profile-actor-key"),
+            (200, public_b64(delegate) + "\n"),
+        )
 
         denied = self.signing(
             action="profile.update",
@@ -1373,6 +1380,38 @@ class ServerCase(unittest.TestCase):
         )
         self.assertEqual(status, 403, body)
         self.assertIn("profile.update", body)
+
+    def test_delegation_cannot_rebind_self_scope_to_child(self) -> None:
+        alice = Ed25519PrivateKey.generate()
+        delegate = Ed25519PrivateKey.generate()
+        parent_serial = self.issue(
+            self.root_key,
+            alice,
+            grants=[
+                {
+                    "scope": "account:self",
+                    "actions": ["profile.update", "cert.issue"],
+                }
+            ],
+            delegate=True,
+        )
+        info = self.signing(
+            action="cert.issue",
+            key=public_b64(alice),
+            issuer_serial=parent_serial,
+            subject_key=public_b64(delegate),
+            grants=json.dumps(
+                [{"scope": "account:self", "actions": ["profile.update"]}],
+                separators=(",", ":"),
+            ),
+        )
+        status, body = self.c.post(
+            "/_cert",
+            cert=info["certificate"],
+            sig=sign_b64(alice, info["payload_b64"]),
+        )
+        self.assertEqual(status, 403, body)
+        self.assertIn("issuer cannot issue for scope", body)
 
 
 class PostUploadCase(unittest.TestCase):
