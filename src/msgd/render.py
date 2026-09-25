@@ -2332,21 +2332,39 @@ def render_post(
     auth = _auth_summary(authentication)
     if post.signed:
         auth += f" author={post.author_id} actor={post.actor_id} v={post.sig_version}"
+    board_link = md_link(post.board, f"/{post.board}")
+    reply = (
+        f" reply_to: {md_link('#' + str(post.reply_to), '/ref/post/' + str(post.reply_to))}"
+        if post.reply_to is not None
+        else ""
+    )
+    author = (
+        md_link(post.name, f"/@{quote(post.name, safe='')}")
+        if post.author_id and post.name != "[anon] anonymous"
+        else post.name
+    )
     head = (
         f"## #{post.id}{title}\n"
-        f"board: {post.board} seq: {post.seq}"
-        + (f" reply_to: #{post.reply_to}" if post.reply_to is not None else "")
+        f"board: {board_link} seq: {post.seq}"
+        + reply
         + "\n"
-        f"from: {post.name} at: {iso(post.created)}"
+        f"from: {author} at: {iso(post.created)}"
         + (f" updated: {iso(post.updated)}" if post.updated != post.created else "")
         + f"\nauth: {auth}\n"
         + ("badge: blue-verified\n" if authentication and authentication.get("blue_verified") else "")
         + f"bytes: {post.nbytes}\n"
     )
     if tags:
-        head += "tags: " + " ".join(f"#{tag}" for tag in tags) + "\n"
+        head += (
+            "tags: "
+            + " ".join(md_link(f"#{tag}", f"/tag/{quote(tag, safe='')}") for tag in tags)
+            + "\n"
+        )
     ack_hint = f"msg ack {post.id} read"
-    head += f"receipt: /ack/{post.id} · after-full-read: {ack_hint} (signed identities)\n"
+    head += (
+        f"receipt: {md_link('/ack/' + str(post.id), '/ack/' + str(post.id))} · "
+        f"after-full-read: {ack_hint} (signed identities)\n"
+    )
     if engagement is not None:
         head += (
             f"engagement: views={int(engagement.get('views', 0))} "
@@ -2358,14 +2376,13 @@ def render_post(
         head += (
             "files:\n"
             + "\n".join(
-                f"- /file/{file.id} {file.name} {file.nbytes} bytes sha256={file.sha256}"
+                f"- {md_link(file.name, '/file/' + str(file.id))} "
+                f"{file.nbytes} bytes sha256={file.sha256}"
                 for file in attachments
             )
             + "\n"
         )
     return head + f"\n{post.body}\n"
-
-
 def render_listing(
     *,
     board: str | None,
@@ -2406,10 +2423,29 @@ def render_listing(
             title = f' "{post.title}"' if post.title else ""
             identity = f" @{post.author_id[:12]}" if post.author_id else ""
             badge = _auth_badge((authentications or {}).get(post.id))
-            reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
+            target = f"/{post.board}/{post.id}"
+            post_link = md_link(f"#{post.id}", target)
+            board_link = md_link(f"/{post.board}", f"/{post.board}")
+            reply = (
+                " ->" + md_link(f"#{post.reply_to}", f"/ref/post/{post.reply_to}")
+                if post.reply_to is not None
+                else ""
+            )
+            author = (
+                md_link(post.name, f"/@{quote(post.name, safe='')}")
+                if post.author_id and post.name != "[anon] anonymous"
+                else post.name
+            )
             metric = (engagement or {}).get(post.id, {})
             post_tags = (tags or {}).get(post.id, ())
-            tag_suffix = " · " + " ".join(f"#{tag}" for tag in post_tags) if post_tags else ""
+            tag_suffix = (
+                " · "
+                + " ".join(
+                    md_link(f"#{tag}", f"/tag/{quote(tag, safe='')}") for tag in post_tags
+                )
+                if post_tags
+                else ""
+            )
             suffix = (
                 f" · {int(metric.get('views', 0))} views"
                 f" · {int(metric.get('likes', 0))} likes"
@@ -2418,19 +2454,19 @@ def render_listing(
                 else ""
             )
             lines.append(
-                f"#{post.id} /{post.board}{reply} {badge} "
-                f"{post.name}{identity}{title} {excerpt}{tag_suffix}{suffix}"
+                f"{post_link} {board_link}{reply} {badge} "
+                f"{author}{identity}{title} {excerpt}{tag_suffix}{suffix}"
             )
     lines += ["", "page:"]
     lines.append(f"has_more={'yes' if truncated and next_url else 'no'}")
     if posts:
-        lines.append(f"newest=#{max(post.id for post in posts)}")
-        lines.append(f"oldest=#{min(post.id for post in posts)}")
+        newest = max(post.id for post in posts)
+        oldest = min(post.id for post in posts)
+        lines.append(f"newest={md_link('#' + str(newest), '/ref/post/' + str(newest))}")
+        lines.append(f"oldest={md_link('#' + str(oldest), '/ref/post/' + str(oldest))}")
     lines.append(f"direction={page_direction}")
-    lines.append(f"next={next_url or ''}")
+    lines.append(f"next={md_link(next_url, next_url) if next_url else ''}")
     return "\n".join(lines) + "\n"
-
-
 def render_users(users: list[dict[str, Any]]) -> str:
     lines = [
         "# /users",
