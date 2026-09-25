@@ -480,6 +480,12 @@ class Store:
                 ).fetchone()
                 is not None
             )
+            had_claims = (
+                self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='name_claims'"
+                ).fetchone()
+                is not None
+            )
             self._conn.executescript(TABLES)
             self._ensure_schema()
             for name, description in DEFAULT_BOARDS.items():
@@ -489,11 +495,11 @@ class Store:
                     "UPDATE boards SET description = ? WHERE name = ?",
                     (DEFAULT_BOARDS[name], name),
                 )
-            if not had_inbox:
+            self._migrate_identity_names()
+            if not had_inbox or not had_claims:
                 self._rebuild_inbox()
             if not had_tags:
                 self._rebuild_tags()
-            self._migrate_identity_names()
 
     def close(self) -> None:
         with self._lock:
@@ -2147,6 +2153,8 @@ class Store:
         post_id: int | None = None,
     ) -> str:
         name_key = self.normalize_identity_name(name)
+        if name_key == "anonymous":
+            return name_key
         row = self._conn.execute(
             """
             SELECT display_name, author_id, public_key
@@ -3323,6 +3331,7 @@ class Store:
             "author_id": author_id,
             "algorithm": "ed25519",
             "public_key": public_key,
+            "profile": self.profile_by_author(author_id),
             "display_name": str(aliases[0]["name"]) if aliases else None,
             "aliases": [
                 {
