@@ -60,8 +60,8 @@ from msgd.render import (
 from msgd.search import SearchSyntaxError, parse_search_query, search_help
 from msgd.store import (
     ANONYMOUS_BASE_ACTIONS,
-    SIGNED_BASE_ACTIONS,
     RESERVED_BOARDS,
+    SIGNED_BASE_ACTIONS,
     FileInput,
     Store,
     StoreError,
