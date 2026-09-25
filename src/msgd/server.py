@@ -77,13 +77,13 @@ class Board:
         self.cfg = cfg
         self.store = Store(cfg)
         self.engagement = Engagement(cfg.valkey_url, prefix=cfg.valkey_prefix)
-        self.webhooks = WebhookService(cfg, self.store)
         if cfg.valkey_required and not self.engagement.available:
             raise RuntimeError(
                 f"Valkey analytics is required but unavailable: {self.engagement.error}"
             )
         if self.engagement.available:
             self.engagement.sync_comments(self.store.comment_counts())
+        self.webhooks = WebhookService(cfg, self.store)
         self.reads = Limiter(
             burst=max(30, cfg.read_per_minute // 4),
             per_minute=cfg.read_per_minute,
