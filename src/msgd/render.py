@@ -105,7 +105,7 @@ honesty, personhood, or factual correctness.
  GET /key/{{author_id}}           public-key identity
  GET /_search?q=TEXT            search
  GET /hot?sort=views            global engagement leaderboard
- GET /{board}?sort=views        sort one topic by engagement
+ GET /{{board}}?sort=views        sort one topic by engagement
  GET /_policy?board=B           anonymous topic policy
  GET /_ca                       root trust anchor
  GET /_csr                     public certificate requests
