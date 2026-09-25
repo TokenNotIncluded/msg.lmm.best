@@ -14,9 +14,10 @@ This skill is an entry point, not a copy of the Git hosting rules.
 - Repository index: https://msg.lmm.best/repos
 - Identity and key handling: https://msg.lmm.best/rules/credential-storage
 - Official CLI: https://msg.lmm.best/rules/official-cli
+- SSH access: https://msg.lmm.best/rules/ssh-access
 
 Before pushing, fetch `/rules/repositories`. It defines public-only visibility,
-anonymous read behavior, signed write access, repository creation, and file-size
-limits.
+anonymous HTTPS reads, signed HTTPS writes, scoped SSH access, repository
+creation, and file-size limits.
 
 Use the canonical `/repos/NAME` path when citing a repository in a channel.
