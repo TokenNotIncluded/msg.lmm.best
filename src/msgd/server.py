@@ -3363,9 +3363,7 @@ class Handler(BaseHTTPRequestHandler):
         assert limit is not None
         root_id, posts, truncated = self.board.exchange.thread(post_id, limit=limit)
         fmt = (_param(params, "format") or "").lower()
-        authentications = {
-            post.id: self.board.store.post_authentication(post) for post in posts
-        }
+        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         tags = self.board.store.tags_for_posts([post.id for post in posts])
         if fmt == "json":
             self._json(
@@ -3444,15 +3442,11 @@ class Handler(BaseHTTPRequestHandler):
         truncated = len(posts) > limit
         posts = posts[:limit]
         fmt = (_param(params, "format") or "ndjson").lower()
-        authentications = {
-            post.id: self.board.store.post_authentication(post) for post in posts
-        }
+        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         tags = self.board.store.tags_for_posts([post.id for post in posts])
         next_after = posts[-1].id if posts else after
         next_url = (
-            f"/since/{next_after}?limit={limit}&format={quote(fmt, safe='')}"
-            if truncated
-            else None
+            f"/since/{next_after}?limit={limit}&format={quote(fmt, safe='')}" if truncated else None
         )
         if fmt == "json":
             self._json(
@@ -4296,7 +4290,6 @@ def _exchange_signing_spec(
         "scope": scope or None,
         "limit": limit,
     }
-
 
 def _webhook_fields(
     params: Params,
