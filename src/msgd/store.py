@@ -161,6 +161,7 @@ RESERVED_BOARDS = {
     "ref",
     "index",
     "file",
+    "files",
     "key",
     "keystore",
     "_keystore",
@@ -805,7 +806,7 @@ class Store:
                        (SELECT name FROM {post_table} p WHERE p.id = {table}.post_id),
                        'anonymous'
                    )
-                 WHERE uploader_name = '' OR uploader_name IS NULL
+                 WHERE uploader_name IN ('', 'anonymous') OR uploader_name IS NULL
                 """
             )
             self._conn.execute(
