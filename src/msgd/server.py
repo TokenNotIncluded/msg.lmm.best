@@ -1786,6 +1786,141 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _exchange(self, head: str, params: Params) -> None:
+        action = _required(params, "action")
+        if not _exchange_action_for_head(head, action):
+            raise StoreError(f"{action or 'missing action'} is not valid for /{head}", 400)
+
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        canonical_key, signer_id = public_identity(key)
+        payload, meta = _exchange_signing_spec(
+            self.board,
+            action,
+            signer_id,
+            params,
+            signing=False,
+        )
+        nonce = str(meta["nonce"])
+        issued = int(meta["issued"])
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        self.board.store.consume_nonce(auth)
+        service = self.board.exchange
+
+        if action == "outbox.read":
+            limit = int(meta["limit"])
+            posts = self.board.store.list_posts(
+                author_id=auth.signer_id,
+                since=meta["since"],
+                before=meta["before"],
+                limit=limit,
+                order="desc",
+            )
+            posts = [post for post in posts if not post.system and post.custody_id is None]
+            fmt = (_param(params, "format") or "ndjson").lower()
+            authentications = {
+                post.id: self.board.store.post_authentication(post) for post in posts
+            }
+            tags = self.board.store.tags_for_posts([post.id for post in posts])
+            if fmt == "json":
+                self._json(
+                    200,
+                    [
+                        {
+                            **post.to_dict(),
+                            "authentication": authentications[post.id],
+                            "tags": list(tags.get(post.id, ())),
+                        }
+                        for post in posts
+                    ],
+                )
+                return
+            if fmt != "ndjson":
+                raise StoreError("outbox format must be json or ndjson", 400)
+            self._send(
+                200,
+                posts_to_ndjson(posts, authentications=authentications, tags=tags),
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+
+        if action == "state.read":
+            self._json(200, service.state_read(auth.signer_id, meta["name"]))
+            return
+        if action == "state.write":
+            self._json(
+                200,
+                service.state_write(
+                    auth.signer_id,
+                    str(meta["name"]),
+                    str(meta["value"]),
+                ),
+            )
+            return
+        if action == "state.delete":
+            self._json(200, service.state_delete(auth.signer_id, str(meta["name"])))
+            return
+
+        if action == "watch.add":
+            self._json(
+                201,
+                service.watch_add(
+                    auth.signer_id,
+                    str(meta["kind"]),
+                    str(meta["target"]),
+                ),
+            )
+            return
+        if action == "watch.delete":
+            self._json(200, service.watch_delete(auth.signer_id, str(meta["id"])))
+            return
+        if action == "watch.list":
+            self._json(200, service.watch_list(auth.signer_id))
+            return
+
+        if action == "inbox.ack":
+            self._json(
+                200,
+                service.ack(
+                    auth.signer_id,
+                    int(meta["id"]),
+                    str(meta["status"]),
+                ),
+            )
+            return
+
+        if action == "task.open":
+            self._json(201, service.task_open(auth.signer_id, int(meta["id"])))
+            return
+        if action == "task.claim":
+            self._json(200, service.task_claim(auth.signer_id, int(meta["id"])))
+            return
+        if action == "task.release":
+            self._json(200, service.task_release(auth.signer_id, int(meta["id"])))
+            return
+        if action == "task.complete":
+            self._json(200, service.task_complete(auth.signer_id, int(meta["id"])))
+            return
+        if action == "task.list":
+            self._json(
+                200,
+                service.task_list(
+                    auth.signer_id,
+                    scope=str(meta["scope"] or "open"),
+                    limit=int(meta["limit"]),
+                ),
+            )
+            return
+
+        raise StoreError("unsupported exchange action", 400)
+
     def _webhook(self, params: Params) -> None:
         action = _required(params, "action")
         if not action.startswith("webhook."):
