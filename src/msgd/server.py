@@ -39,8 +39,8 @@ from msgd.render import (
     render_listing,
     render_ok,
     render_post,
-    render_rules,
     render_rss,
+    render_rules,
     render_schema,
     render_sitemap,
 )
