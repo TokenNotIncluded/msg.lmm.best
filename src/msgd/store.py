@@ -15,6 +15,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -2084,6 +2085,289 @@ class Store:
                 )
             except sqlite3.IntegrityError as exc:
                 raise StoreError("signed request nonce already used", 409) from exc
+
+    @staticmethod
+    def normalize_identity_name(value: str) -> str:
+        display = " ".join(unicodedata.normalize("NFKC", value).split())
+        if not display:
+            raise StoreError("name is required", 400)
+        if display.casefold().startswith("[anon]"):
+            raise StoreError("signed names may not use the reserved [anon] prefix", 400)
+        if any(char in display for char in "/?#@"):
+            raise StoreError("name may not contain / ? # or @", 400)
+        if any(unicodedata.category(char).startswith("C") for char in display):
+            raise StoreError("name may not contain control/format characters", 400)
+        return display.casefold()
+
+    @staticmethod
+    def anonymous_base_name(value: str) -> str:
+        display = " ".join(value.split()) or "anonymous"
+        while display.casefold().startswith("[anon]"):
+            display = display[6:].strip()
+        return display or "anonymous"
+
+    def anonymous_display_name(self, value: str, *, check_claim: bool = True) -> str:
+        base = self.anonymous_base_name(value)
+        if check_claim:
+            key = self.normalize_identity_name(base)
+            claim = self.name_claim(key)
+            if claim is not None:
+                raise StoreError(
+                    f"name {base!r} is already bound to public key {claim['public_key']} "
+                    f"(author_id {claim['author_id']})",
+                    409,
+                )
+        return f"[anon] {base}"
+
+    def name_claim(self, name_or_key: str) -> dict[str, Any] | None:
+        try:
+            name_key = self.normalize_identity_name(name_or_key)
+        except StoreError:
+            name_key = name_or_key.casefold()
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT name_key, display_name, author_id, public_key, claim_post_id,
+                       claim_signature, claimed, last_used
+                  FROM name_claims
+                 WHERE name_key = ?
+                """,
+                (name_key,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def _claim_identity_name(
+        self,
+        *,
+        author_id: str,
+        public_key: str,
+        name: str,
+        signature: str,
+        seen: float,
+        post_id: int | None = None,
+    ) -> str:
+        name_key = self.normalize_identity_name(name)
+        row = self._conn.execute(
+            """
+            SELECT display_name, author_id, public_key
+              FROM name_claims
+             WHERE name_key = ?
+            """,
+            (name_key,),
+        ).fetchone()
+        if row is not None and str(row["author_id"]) != author_id:
+            raise StoreError(
+                f"name {name!r} is already bound to public key {row['public_key']} "
+                f"(author_id {row['author_id']})",
+                409,
+            )
+        if row is None:
+            self._conn.execute(
+                """
+                INSERT INTO name_claims(
+                    name_key, display_name, author_id, public_key, claim_post_id,
+                    claim_signature, claimed, last_used
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name_key,
+                    name,
+                    author_id,
+                    public_key,
+                    post_id,
+                    signature,
+                    seen,
+                    seen,
+                ),
+            )
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO profiles(
+                    author_id, primary_name_key, bio, version, payload_b64,
+                    signature, updated
+                ) VALUES (?, ?, '', 0, '', '', ?)
+                """,
+                (author_id, name_key, seen),
+            )
+        else:
+            self._conn.execute(
+                """
+                UPDATE name_claims
+                   SET last_used = ?,
+                       claim_post_id = COALESCE(claim_post_id, ?),
+                       claim_signature = CASE
+                           WHEN claim_signature = '' THEN ?
+                           ELSE claim_signature
+                       END
+                 WHERE name_key = ? AND author_id = ?
+                """,
+                (seen, post_id, signature, name_key, author_id),
+            )
+        return name_key
+
+    def _migrate_identity_names(self) -> None:
+        # Anonymous names are always visibly anonymous after this version.
+        rows = self._conn.execute(
+            """
+            SELECT id, name
+              FROM posts
+             WHERE author_id IS NULL AND system = 0 AND custody_id IS NULL
+            """
+        ).fetchall()
+        for row in rows:
+            current = str(row["name"])
+            prefixed = self.anonymous_display_name(current, check_claim=False)
+            if current != prefixed:
+                self._conn.execute(
+                    "UPDATE posts SET name = ? WHERE id = ?",
+                    (prefixed, int(row["id"])),
+                )
+
+        # Historical self-signed names are claimed oldest-first; earliest proof wins.
+        signed = self._conn.execute(
+            """
+            SELECT id, name, author_id, author_key, signature, created
+              FROM posts
+             WHERE author_id IS NOT NULL
+               AND author_key IS NOT NULL
+               AND actor_id = author_id
+               AND signature IS NOT NULL
+             ORDER BY id
+            """
+        ).fetchall()
+        for row in signed:
+            name = str(row["name"])
+            if self.anonymous_base_name(name).casefold() == "anonymous":
+                continue
+            try:
+                self._claim_identity_name(
+                    author_id=str(row["author_id"]),
+                    public_key=str(row["author_key"]),
+                    name=name,
+                    signature=str(row["signature"]),
+                    seen=float(row["created"]),
+                    post_id=int(row["id"]),
+                )
+            except StoreError as exc:
+                if exc.status != 409:
+                    raise
+
+    def profile_by_name(self, name: str) -> dict[str, Any] | None:
+        claim = self.name_claim(name)
+        if claim is None:
+            return None
+        return self.profile_by_author(str(claim["author_id"]))
+
+    def profile_by_author(self, author_id: str) -> dict[str, Any] | None:
+        if not valid_author_id(author_id):
+            return None
+        with self._lock:
+            profile = self._conn.execute(
+                """
+                SELECT author_id, primary_name_key, bio, version, payload_b64,
+                       signature, updated
+                  FROM profiles
+                 WHERE author_id = ?
+                """,
+                (author_id,),
+            ).fetchone()
+            claims = self._conn.execute(
+                """
+                SELECT name_key, display_name, public_key, claim_post_id,
+                       claim_signature, claimed, last_used
+                  FROM name_claims
+                 WHERE author_id = ?
+                 ORDER BY claimed, name_key
+                """,
+                (author_id,),
+            ).fetchall()
+        if profile is None or not claims:
+            return None
+        claim_items = [dict(row) for row in claims]
+        primary_key = str(profile["primary_name_key"])
+        primary = next(
+            (item for item in claim_items if str(item["name_key"]) == primary_key),
+            claim_items[0],
+        )
+        return {
+            "name": str(primary["display_name"]),
+            "name_key": str(primary["name_key"]),
+            "bio": str(profile["bio"]),
+            "public_key": str(primary["public_key"]),
+            "author_id": author_id,
+            "profile_url": f"/@{quote(str(primary['display_name']), safe='')}",
+            "aliases": [str(item["display_name"]) for item in claim_items],
+            "claim_post_id": primary["claim_post_id"],
+            "claim_signature": str(primary["claim_signature"]),
+            "profile_version": int(profile["version"]),
+            "profile_payload_b64": str(profile["payload_b64"]),
+            "profile_signature": str(profile["signature"]),
+            "profile_signed": bool(profile["signature"]),
+            "updated": round(float(profile["updated"]), 3),
+            "certification": self.certification(author_id),
+        }
+
+    def profile_version(self, author_id: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT version FROM profiles WHERE author_id = ?",
+                (author_id,),
+            ).fetchone()
+        return int(row["version"]) if row is not None else 0
+
+    def update_profile(
+        self,
+        *,
+        auth: SignedRequest,
+        name: str,
+        bio: str,
+        payload_b64: str,
+    ) -> dict[str, Any]:
+        if len(bio.encode("utf-8")) > 4096:
+            raise StoreError("profile bio exceeds 4096 UTF-8 bytes", 413)
+        name_key = self.normalize_identity_name(name)
+        with self._lock, self._conn:
+            claim = self._conn.execute(
+                "SELECT author_id FROM name_claims WHERE name_key = ?",
+                (name_key,),
+            ).fetchone()
+            if claim is None or str(claim["author_id"]) != auth.signer_id:
+                raise StoreError("profile name must already be claimed by this public key", 403)
+            current = self._conn.execute(
+                "SELECT version FROM profiles WHERE author_id = ?",
+                (auth.signer_id,),
+            ).fetchone()
+            expected = int(current["version"] if current is not None else 0) + 1
+            if auth.version != expected:
+                raise StoreError("stale profile version", 409)
+            self.consume_nonce(auth)
+            self._conn.execute(
+                """
+                INSERT INTO profiles(
+                    author_id, primary_name_key, bio, version, payload_b64,
+                    signature, updated
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(author_id) DO UPDATE SET
+                    primary_name_key = excluded.primary_name_key,
+                    bio = excluded.bio,
+                    version = excluded.version,
+                    payload_b64 = excluded.payload_b64,
+                    signature = excluded.signature,
+                    updated = excluded.updated
+                """,
+                (
+                    auth.signer_id,
+                    name_key,
+                    bio,
+                    auth.version,
+                    payload_b64,
+                    auth.signature,
+                    time.time(),
+                ),
+            )
+        profile = self.profile_by_author(auth.signer_id)
+        assert profile is not None
+        return profile
 
     def _remember_identity_name(self, author_id: str, name: str, seen: float) -> None:
         self._conn.execute(
