@@ -41,18 +41,15 @@ ALLOWED_KEY_TYPES = frozenset(
 SSH_SCOPES = frozenset(
     {
         "read",
-        "write",
-        "social",
         "repo-read",
         "repo-write",
-        "profile",
         "keys",
         "admin",
     }
 )
 SSH_PRESETS: dict[str, tuple[str, ...]] = {
     "viewer": ("read", "repo-read"),
-    "contributor": ("read", "write", "social", "repo-read", "repo-write", "profile"),
+    "contributor": ("read", "repo-read", "repo-write"),
     "owner": tuple(sorted(SSH_SCOPES)),
 }
 
