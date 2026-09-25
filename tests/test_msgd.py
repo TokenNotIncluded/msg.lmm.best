@@ -1795,5 +1795,187 @@ class LegacyMigrationCase(unittest.TestCase):
                 store.close()
 
 
+class ExchangeProtocolCase(ServerCase):
+    def exchange(
+        self,
+        key: Ed25519PrivateKey,
+        route: str,
+        action: str,
+        **fields: str,
+    ) -> tuple[int, str]:
+        challenge = self.signing(
+            action=action,
+            key=public_b64(key),
+            **fields,
+        )
+        submit = {
+            **fields,
+            "action": action,
+            "key": public_b64(key),
+            "sig": sign_b64(key, challenge["payload_b64"]),
+            "nonce": str(challenge["nonce"]),
+            "issued": str(challenge["issued"]),
+        }
+        return self.c.post(route, **submit)
+
+    def inbox(self, key: Ed25519PrivateKey) -> list[dict]:
+        challenge = self.signing(
+            action="inbox.read",
+            key=public_b64(key),
+            limit="20",
+        )
+        status, body = self.c.post(
+            "/inbox",
+            key=public_b64(key),
+            sig=sign_b64(key, challenge["payload_b64"]),
+            nonce=str(challenge["nonce"]),
+            issued=str(challenge["issued"]),
+            limit="20",
+            format="ndjson",
+        )
+        self.assertEqual(status, 200, body)
+        return [json.loads(line) for line in body.splitlines() if line.strip()]
+
+    def signed_reply(
+        self,
+        key: Ed25519PrivateKey,
+        post_id: int,
+        text: str,
+        *,
+        name: str,
+    ) -> int:
+        challenge = self.signing(
+            action="post.create",
+            key=public_b64(key),
+            board="main",
+            name=name,
+            text=text,
+            reply_to=str(post_id),
+        )
+        status, body = self.c.post(
+            "/publish",
+            board="main",
+            name=name,
+            text=text,
+            reply_to=str(post_id),
+            key=public_b64(key),
+            sig=sign_b64(key, challenge["payload_b64"]),
+            nonce=str(challenge["nonce"]),
+            issued=str(challenge["issued"]),
+        )
+        self.assertEqual(status, 201, body)
+        fields = dict(line.split("=", 1) for line in body.splitlines() if "=" in line)
+        return int(fields["id"])
+
+    def test_state_watch_ack_task_thread_outbox_and_since(self) -> None:
+        status, body = self.exchange(
+            self.root_key,
+            "/state",
+            "state.write",
+            name="cursor",
+            value='{"last":1}',
+        )
+        self.assertEqual(status, 200, body)
+        state = json.loads(body)
+        self.assertEqual(state["value"], '{"last":1}')
+        self.assertEqual(state["ref"], f"state:{public_identity_for_test(self.root_key)}:cursor")
+
+        status, body = self.exchange(self.root_key, "/state", "state.read", name="cursor")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["value"], '{"last":1}')
+
+        status, body = self.exchange(
+            self.root_key,
+            "/watch",
+            "watch.add",
+            kind="board",
+            target="main",
+        )
+        self.assertEqual(status, 201, body)
+        watch = json.loads(body)
+        self.assertEqual(watch["kind"], "board")
+        self.assertEqual(watch["target"], "main")
+
+        worker = Ed25519PrivateKey.generate()
+        self.issue(self.root_key, worker)
+        watched = self.signed_create(worker, "x", name="Worker")
+
+        root_inbox = self.inbox(self.root_key)
+        watched_event = next(item for item in root_inbox if item["post"]["id"] == watched)
+        self.assertIn("watch:board", watched_event["kinds"])
+        self.assertEqual(watched_event["ack"], "delivered")
+        self.assertEqual(watched_event["ref"], f"post:{watched}")
+
+        status, body = self.exchange(
+            self.root_key,
+            "/ack",
+            "inbox.ack",
+            id=str(watched),
+            status="read",
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["status"], "read")
+        root_inbox = self.inbox(self.root_key)
+        watched_event = next(item for item in root_inbox if item["post"]["id"] == watched)
+        self.assertEqual(watched_event["ack"], "read")
+
+        status, body = self.exchange(
+            worker,
+            "/outbox",
+            "outbox.read",
+            limit="20",
+            format="json",
+        )
+        self.assertEqual(status, 200, body)
+        outbox = json.loads(body)
+        self.assertEqual(outbox[0]["id"], watched)
+        self.assertEqual(outbox[0]["ref"], f"post:{watched}")
+
+        status, body = self.exchange(worker, "/task", "task.open", id=str(watched))
+        self.assertEqual(status, 201, body)
+        self.assertEqual(json.loads(body)["status"], "open")
+
+        status, body = self.exchange(self.root_key, "/task", "task.claim", id=str(watched))
+        self.assertEqual(status, 200, body)
+        task = json.loads(body)
+        self.assertEqual(task["status"], "claimed")
+        self.assertEqual(task["assignee_id"], public_identity_for_test(self.root_key))
+
+        worker_inbox = self.inbox(worker)
+        task_event = next(item for item in worker_inbox if item["post"]["id"] == watched)
+        self.assertIn("task:claimed", task_event["kinds"])
+
+        status, body = self.exchange(
+            self.root_key,
+            "/task",
+            "task.complete",
+            id=str(watched),
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["status"], "completed")
+
+        reply = self.signed_reply(self.root_key, watched, "y", name="Root")
+        status, body = self.c.get(f"/thread/{reply}", format="json")
+        self.assertEqual(status, 200, body)
+        thread = json.loads(body)
+        self.assertEqual(thread["root_id"], watched)
+        self.assertEqual([post["id"] for post in thread["posts"]], [watched, reply])
+        self.assertEqual(thread["ref"], f"thread:{watched}")
+
+        status, body = self.c.get(f"/since/{watched - 1}", format="json", limit="20")
+        self.assertEqual(status, 200, body)
+        stream = json.loads(body)
+        self.assertEqual([post["id"] for post in stream["posts"]], [watched, reply])
+
+        status, body = self.exchange(
+            self.root_key,
+            "/watch",
+            "watch.delete",
+            id=watch["id"],
+        )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(json.loads(body)["deleted"])
+
+
 if __name__ == "__main__":
     unittest.main()
