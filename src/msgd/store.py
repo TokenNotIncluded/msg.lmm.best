@@ -473,6 +473,20 @@ CREATE INDEX IF NOT EXISTS websub_deliveries_due
     ON websub_deliveries(delivered, next_attempt, created);
 
 
+CREATE TABLE IF NOT EXISTS websub_hub_deliveries (
+    id           TEXT PRIMARY KEY,
+    hub          TEXT NOT NULL,
+    topic        TEXT NOT NULL,
+    created      REAL NOT NULL,
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    next_attempt REAL NOT NULL,
+    delivered    REAL,
+    last_error   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS websub_hub_deliveries_due
+    ON websub_hub_deliveries(delivered, next_attempt, created);
+
+
 CREATE TABLE IF NOT EXISTS path_get_receipts (
     request_id     TEXT PRIMARY KEY,
     payload_sha256 TEXT NOT NULL,
@@ -4576,6 +4590,94 @@ class Store:
                 """,
                 (now - 7 * 86400, now - 30 * 86400),
             )
+            self._conn.execute(
+                """
+                DELETE FROM websub_hub_deliveries
+                 WHERE (delivered IS NOT NULL AND delivered < ?)
+                    OR (delivered IS NULL AND attempts >= 6 AND created < ?)
+                """,
+                (now - 7 * 86400, now - 30 * 86400),
+            )
+
+    def queue_websub_hub_publish(self, hub: str, topic: str) -> str | None:
+        now = time.time()
+        with self._lock, self._conn:
+            pending = self._conn.execute(
+                """
+                SELECT id
+                  FROM websub_hub_deliveries
+                 WHERE hub = ? AND topic = ?
+                   AND delivered IS NULL
+                   AND attempts < 6
+                 LIMIT 1
+                """,
+                (hub, topic),
+            ).fetchone()
+            if pending is not None:
+                return None
+            delivery_id = secrets.token_hex(16)
+            self._conn.execute(
+                """
+                INSERT INTO websub_hub_deliveries(
+                    id, hub, topic, created, next_attempt
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (delivery_id, hub, topic, now, now),
+            )
+        return delivery_id
+
+    def due_websub_hub_deliveries(self, limit: int = 20) -> list[dict[str, Any]]:
+        now = time.time()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, hub, topic, created, attempts, next_attempt
+                  FROM websub_hub_deliveries
+                 WHERE delivered IS NULL
+                   AND attempts < 6
+                   AND next_attempt <= ?
+                 ORDER BY next_attempt, created
+                 LIMIT ?
+                """,
+                (now, max(1, min(limit, 100))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def finish_websub_hub_delivery(
+        self,
+        delivery_id: str,
+        *,
+        success: bool,
+        error: str = "",
+        retry_after: float = 0,
+    ) -> None:
+        now = time.time()
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT attempts FROM websub_hub_deliveries WHERE id = ?",
+                (delivery_id,),
+            ).fetchone()
+            if row is None:
+                return
+            attempts = int(row["attempts"]) + 1
+            if success:
+                self._conn.execute(
+                    """
+                    UPDATE websub_hub_deliveries
+                       SET attempts = ?, delivered = ?, last_error = ''
+                     WHERE id = ?
+                    """,
+                    (attempts, now, delivery_id),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE websub_hub_deliveries
+                       SET attempts = ?, next_attempt = ?, last_error = ?
+                     WHERE id = ?
+                    """,
+                    (attempts, now + retry_after, error[:500], delivery_id),
+                )
 
     def path_get_receipt(self, request_id: str) -> dict[str, Any] | None:
         with self._lock:
