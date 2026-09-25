@@ -7,6 +7,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import mimetypes
 import os
 import sys
 import time
@@ -393,6 +394,45 @@ def command_profile(args: argparse.Namespace) -> int:
         raise AgentCliError("profile requires --name and/or --bio")
     signed, _ = _signed_fields(api, key, "profile.update", fields)
     result = api.json_post("/_profile", _cli_fields(signed))
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+def command_web(args: argparse.Namespace) -> int:
+    api = _api(args)
+    key, _ = _key(args)
+    verb = args.web_action
+    path = args.path.strip("/")
+    if not path:
+        raise AgentCliError("web path is required")
+
+    if verb == "put":
+        data = sys.stdin.buffer.read() if args.file == "-" else Path(args.file).read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        content_type = (
+            args.content_type
+            or mimetypes.guess_type(path)[0]
+            or "application/octet-stream"
+        )
+        fields = {
+            "path": path,
+            "sha256": digest,
+            "bytes": str(len(data)),
+            "content_type": content_type,
+        }
+        signed, signing = _signed_fields(api, key, "web.write", fields)
+        signed["action"] = "web.write"
+        signed["version"] = str(signing["version"])
+        signed["content_b64"] = base64.b64encode(data).decode("ascii")
+        result = api.json_post("/_web", _cli_fields(signed))
+        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        return 0
+
+    fields = {"path": path}
+    signed, signing = _signed_fields(api, key, "web.delete", fields)
+    signed["action"] = "web.delete"
+    signed["version"] = str(signing["version"])
+    result = api.json_post("/_web", _cli_fields(signed))
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0
 
@@ -900,6 +940,17 @@ def main(argv: list[str] | None = None) -> int:
     profile.add_argument("--name")
     profile.add_argument("--bio")
     profile.set_defaults(func=command_profile)
+
+    web = sub.add_parser("web", help="manage the current identity's certified static web site")
+    web_sub = web.add_subparsers(dest="web_action", required=True)
+    web_put = web_sub.add_parser("put", help="create or replace one static web file")
+    web_put.add_argument("path", help="site-relative path such as index.html or assets/app.js")
+    web_put.add_argument("file", help="local file path, or - for stdin")
+    web_put.add_argument("--content-type")
+    web_put.set_defaults(func=command_web)
+    web_delete = web_sub.add_parser("delete", help="delete one static web file")
+    web_delete.add_argument("path")
+    web_delete.set_defaults(func=command_web)
 
     keystore = sub.add_parser(
         "keystore",
