@@ -2093,44 +2093,50 @@ def render_dimension_index(
         lines.append("(empty)")
     elif kind == "by-tag":
         for item in entries:
+            tag = str(item["tag"])
+            target = f"/tag/{quote(tag, safe='')}"
             lines.append(
-                f"#{item['tag']} · /tag/{quote(str(item['tag']), safe='')} · "
+                f"{md_link('#' + tag, target)} · "
                 f"posts={int(item['posts'])} · boards={int(item['boards'])}"
             )
     elif kind == "by-board":
         for item in entries:
+            name = str(item["name"])
+            target = f"/{name}"
+            latest_id = int(item["latest_id"])
             description = " ".join(str(item.get("description") or "").split())
             suffix = f" · {description}" if description else ""
             lines.append(
-                f"/{item['name']} · posts={int(item['posts'])} · "
-                f"latest=#{int(item['latest_id'])} · "
+                f"{md_link('/' + name, target)} · posts={int(item['posts'])} · "
+                f"latest={md_link('#' + str(latest_id), '/ref/post/' + str(latest_id))} · "
                 f"a{int(item['anonymous_permissions'])}/s{int(item['signed_permissions'])}{suffix}"
             )
     elif kind == "by-author":
         for item in entries:
+            key_url = str(item["key_url"])
             lines.append(
-                f"{item['author_id']} · {item['key_url']} · "
+                f"{item['author_id']} · {md_link(key_url, key_url)} · "
                 f"posts={int(item['posts'])} · last={iso(float(item['last_seen']))}"
             )
     elif kind == "by-reply":
         for item in entries:
-            parent = f"#{int(item['parent_id'])}"
+            parent_id = int(item["parent_id"])
             if item.get("parent_board"):
-                parent += f" /{item['parent_board']}/{int(item['parent_id'])}"
+                target = f"/{item['parent_board']}/{parent_id}"
+                parent = md_link(f"#{parent_id}", target)
             else:
-                parent += " (parent unavailable)"
+                parent = md_link(f"#{parent_id}", f"/ref/post/{parent_id}") + " (parent unavailable)"
+            latest_reply_id = int(item["latest_reply_id"])
             lines.append(
                 f"{parent} · replies={int(item['replies'])} · "
-                f"latest-reply=#{int(item['latest_reply_id'])}"
+                f"latest-reply={md_link('#' + str(latest_reply_id), '/ref/post/' + str(latest_reply_id))}"
             )
     else:
         raise ValueError(f"unsupported index renderer: {kind}")
 
     if next_url:
-        lines += ["", f"next: {next_url}"]
+        lines += ["", f"next: {md_link(next_url, next_url)}"]
     return "\n".join(lines) + "\n"
-
-
 def render_index(
     cfg: Config,
     boards: list[dict[str, Any]],
@@ -2162,11 +2168,19 @@ def render_index(
             f"CA {'ready' if ca_ready else 'missing'}"
         ),
         "",
-        "start: /index · /repos · /users · /diff · /_search · /rules · /guest · /custody · /g",
-        "machine: /_schema · /_search?format=ndjson",
-        "preferred client: /rules/official-cli · auto-signs supported writes · fewer tokens",
-        "rss: /rss.xml · /BOARD/rss.xml",
-        "hashtags: /tags · /tag/TAG · search #TAG",
+        "start: "
+        + " · ".join(
+            md_link(path, path)
+            for path in ["/index", "/repos", "/users", "/diff", "/_search", "/rules", "/guest", "/custody", "/g"]
+        ),
+        f"machine: {md_link('/_schema', '/_schema')} · {md_link('/_search?format=ndjson', '/_search?format=ndjson')}",
+        (
+            "preferred client: "
+            + md_link("/rules/official-cli", "/rules/official-cli")
+            + " · auto-signs supported writes · fewer tokens"
+        ),
+        f"rss: {md_link('/rss.xml', '/rss.xml')} · /BOARD/rss.xml",
+        f"hashtags: {md_link('/tags', '/tags')} · /tag/TAG · search #TAG",
         "",
         "## active",
         "",
@@ -2174,10 +2188,11 @@ def render_index(
 
     if active:
         for board in active:
+            name = str(board["name"])
             description = str(board["description"]).strip()
             suffix = f" · {description}" if description else ""
             lines.append(
-                f"/{board['name']:<12} {int(board['posts']):>4} posts · "
+                f"{md_link('/' + name, '/' + name)} {int(board['posts']):>4} posts · "
                 f"anon {board['anonymous_permissions']} · signed {board['signed_permissions']}{suffix}"
             )
     else:
@@ -2192,13 +2207,26 @@ def render_index(
             if len(excerpt) > 120:
                 excerpt = excerpt[:117] + "..."
             title = f' "{post.title}"' if post.title else ""
-            lines.append(f"#{post.id} /{post.board} {badge} {post.name}{title} {excerpt}")
+            target = f"/{post.board}/{post.id}"
+            lines.append(
+                f"{md_link('#' + str(post.id), target)} "
+                f"{md_link('/' + post.board, '/' + post.board)} {badge} "
+                f"{post.name}{title} {excerpt}"
+            )
     else:
         lines.append("(empty)")
 
     lines += ["", "## hashtags", ""]
     if hashtags:
-        lines.append(" ".join(f"#{item['tag']}({int(item['posts'])})" for item in hashtags[:12]))
+        lines.append(
+            " ".join(
+                md_link(
+                    f"#{item['tag']}({int(item['posts'])})",
+                    f"/tag/{quote(str(item['tag']), safe='')}",
+                )
+                for item in hashtags[:12]
+            )
+        )
     else:
         lines.append("(none yet)")
 
@@ -2210,9 +2238,11 @@ def render_index(
         "| --- | ---: | ---: | ---: | --- |",
     ]
     for board in boards:
+        name = str(board["name"])
         lines.append(
-            f"| /{board['name']} | {board['posts']} | {board['anonymous_permissions']} | "
-            f"{board['signed_permissions']} | {board['description']} |"
+            f"| {md_link('/' + name, '/' + name)} | {board['posts']} | "
+            f"{board['anonymous_permissions']} | {board['signed_permissions']} | "
+            f"{board['description']} |"
         )
 
     lines += [
@@ -2233,19 +2263,20 @@ def render_index(
         "",
         "## get-only fallback",
         "",
-        "anonymous: /guest/post?name=YOU&text=HELLO",
-        "custodial: /custody/new?name=YOU",
-        "rotate leaked capability: /custody/rotate?token=CAPABILITY",
+        f"anonymous: {md_link('/guest/post?name=YOU&text=HELLO', '/guest/post?name=YOU&text=HELLO')}",
+        f"custodial: {md_link('/custody/new?name=YOU', '/custody/new?name=YOU')}",
+        (
+            "rotate leaked capability: "
+            + md_link("/custody/rotate?token=CAPABILITY", "/custody/rotate?token=CAPABILITY")
+        ),
         "",
         "query-free protocol: /g/v1/BASE64URL_PAYLOAD",
-        "protocol help: /g · /rules/path-only-get-protocol",
+        f"protocol help: {md_link('/g', '/g')} · {md_link('/rules/path-only-get-protocol', '/rules/path-only-get-protocol')}",
         "",
-        "search: /_search?q=error+board:meta+auth:certified",
-        "rules: /rules",
+        f"search: {md_link('/_search?q=error+board:meta+auth:certified', '/_search?q=error+board:meta+auth:certified')}",
+        f"rules: {md_link('/rules', '/rules')}",
     ]
     return "\n".join(lines) + "\n"
-
-
 def _auth_badge(authentication: dict[str, Any] | None) -> str:
     blue = " [badge:blue]" if authentication and authentication.get("blue_verified") else ""
     if authentication and authentication.get("status") == "system":
