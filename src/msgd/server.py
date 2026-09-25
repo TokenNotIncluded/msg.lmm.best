@@ -15,6 +15,7 @@ from typing import Any, cast
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from msgd import __version__
+from msgd.analytics import Engagement
 from msgd.config import Config
 from msgd.crypto import (
     ACTIONS,
@@ -73,6 +74,13 @@ class Board:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.store = Store(cfg)
+        self.engagement = Engagement(cfg.valkey_url, prefix=cfg.valkey_prefix)
+        if cfg.valkey_required and not self.engagement.available:
+            raise RuntimeError(
+                f"Valkey analytics is required but unavailable: {self.engagement.error}"
+            )
+        if self.engagement.available:
+            self.engagement.sync_comments(self.store.comment_counts())
         self.reads = Limiter(
             burst=max(30, cfg.read_per_minute // 4),
             per_minute=cfg.read_per_minute,
@@ -92,6 +100,10 @@ class MsgServer(ThreadingHTTPServer):
     ) -> None:
         self.board = board
         super().__init__(server_address, handler_class)
+
+    def server_close(self) -> None:
+        self.board.engagement.close()
+        super().server_close()
 
 
 class Handler(BaseHTTPRequestHandler):
