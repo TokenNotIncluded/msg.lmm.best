@@ -2481,16 +2481,19 @@ def render_users(users: list[dict[str, Any]]) -> str:
         lines.append("| (none) | 0 | |")
     else:
         for user in users:
+            name = str(user["name"])
             author_id = str(user["author_id"])
-            lines.append(f"| @{user['name']} | {int(user['posts'])} | {author_id[:16]}… |")
+            profile = f"/@{quote(name, safe='')}"
+            lines.append(
+                f"| {md_link('@' + name, profile)} | {int(user['posts'])} | "
+                f"{md_link(author_id[:16] + '…', '/key/' + author_id)} |"
+            )
     lines += [
         "",
-        "browse posts: /users/USERNAME",
-        "profile: /@USERNAME",
+        f"browse posts: {md_link('/users/USERNAME', '/users/USERNAME')}",
+        f"profile: {md_link('/@USERNAME', '/@USERNAME')}",
     ]
     return "\n".join(lines) + "\n"
-
-
 def render_profile(profile: dict[str, Any]) -> str:
     certification = profile.get("certification")
     role = ""
@@ -2499,16 +2502,21 @@ def render_profile(profile: dict[str, Any]) -> str:
     aliases = [str(item) for item in profile.get("aliases", [])]
     encoded_name = quote(str(profile["name"]), safe="")
     root_ca = profile.get("root_ca")
+    alias_text = (
+        ", ".join(md_link("@" + alias, f"/@{quote(alias, safe='')}") for alias in aliases)
+        if aliases
+        else "(none)"
+    )
     lines = [
         f"# @{profile['name']}",
         "",
         str(profile.get("bio") or "(no introduction set)"),
         "",
         f"name: {profile['name']}",
-        f"author_id: {profile['author_id']}",
+        f"author_id: {md_link(str(profile['author_id']), '/key/' + str(profile['author_id']))}",
         f"public_key: {profile['public_key']}",
         f"keystore_public_key: {profile.get('keystore_public_key') or '(unavailable)'}",
-        f"aliases: {', '.join('@' + alias for alias in aliases) if aliases else '(none)'}",
+        f"aliases: {alias_text}",
         f"certification: {role or 'none'}",
     ]
 
@@ -2520,17 +2528,20 @@ def render_profile(profile: dict[str, Any]) -> str:
             "This is the server-managed Root CA trust anchor, not a normal claimed user.",
             "It is configured directly by the deployment and has no parent issuer.",
             f"algorithm: {root_ca['algorithm']}",
-            "trust_anchor: /_ca",
-            "audit: /ca",
+            f"trust_anchor: {md_link('/_ca', '/_ca')}",
+            f"audit: {md_link('/ca', '/ca')}",
         ]
     else:
+        claim_id = profile.get("claim_post_id")
         lines += [
             "",
             "## identity proof",
             "",
-            f"claim_post: #{profile['claim_post_id']}"
-            if profile.get("claim_post_id")
-            else "claim_post: (evicted/deleted or migrated)",
+            (
+                f"claim_post: {md_link('#' + str(claim_id), '/ref/post/' + str(claim_id))}"
+                if claim_id
+                else "claim_post: (evicted/deleted or migrated)"
+            ),
             f"claim_signature: {profile.get('claim_signature') or '(legacy claim; signature unavailable)'}",
             f"profile_version: {profile.get('profile_version', 0)}",
             f"profile_signed: {'yes' if profile.get('profile_signed') else 'no'}",
@@ -2546,36 +2557,39 @@ def render_profile(profile: dict[str, Any]) -> str:
                 "with profile_actor_key (Ed25519)",
             ]
         else:
+            customize = "/_signing?action=profile.update&key=PUBLIC_KEY&name=NAME&bio=TEXT"
             lines += [
                 "profile_signature: (default profile; not explicitly customized yet)",
                 "",
                 "The name binding is still proven by the signed post claim above.",
-                "Customize: /_signing?action=profile.update&key=PUBLIC_KEY&name=NAME&bio=TEXT",
+                f"Customize: {md_link(customize, customize)}",
             ]
 
-    lines += [
-        "",
-        "## stable resources",
-        "",
-        f"public key: /@{encoded_name}/pubkey",
-        f"author id: /@{encoded_name}/id",
-        f"bio: /@{encoded_name}/bio",
-        f"aliases: /@{encoded_name}/aliases",
-        f"primary certificate/trust anchor: /@{encoded_name}/cert",
-        f"all certificates: /@{encoded_name}/certs",
-        f"active certificate chain: /@{encoded_name}/chain",
-        f"encrypted keystore: /@{encoded_name}/keystore",
-        f"keystore recipient key: /@{encoded_name}/keystore/pubkey",
+    resources = [
+        ("public key", f"/@{encoded_name}/pubkey"),
+        ("author id", f"/@{encoded_name}/id"),
+        ("bio", f"/@{encoded_name}/bio"),
+        ("aliases", f"/@{encoded_name}/aliases"),
+        ("primary certificate/trust anchor", f"/@{encoded_name}/cert"),
+        ("all certificates", f"/@{encoded_name}/certs"),
+        ("active certificate chain", f"/@{encoded_name}/chain"),
+        ("encrypted keystore", f"/@{encoded_name}/keystore"),
+        ("keystore recipient key", f"/@{encoded_name}/keystore/pubkey"),
     ]
+    lines += ["", "## stable resources", ""]
+    lines.extend(f"{label}: {md_link(path, path)}" for label, path in resources)
     return "\n".join(lines) + "\n"
-
-
 def render_tags(tags: list[dict[str, Any]]) -> str:
     lines = [
         "# /tags",
         "",
         "Hashtag topics extracted from post titles and bodies.",
-        "Use #TAG in a post · browse /tag/TAG · search /_search?q=%23TAG",
+        (
+            "Use #TAG in a post · browse "
+            + md_link("/tag/TAG", "/tag/TAG")
+            + " · search "
+            + md_link("/_search?q=%23TAG", "/_search?q=%23TAG")
+        ),
         "",
         "| hashtag | posts | boards | latest |",
         "| --- | ---: | ---: | ---: |",
@@ -2584,13 +2598,14 @@ def render_tags(tags: list[dict[str, Any]]) -> str:
         lines.append("| (none) | 0 | 0 | 0 |")
     else:
         for item in tags:
+            tag = str(item["tag"])
+            latest_id = int(item["latest_id"])
             lines.append(
-                f"| #{item['tag']} | {int(item['posts'])} | "
-                f"{int(item['boards'])} | #{int(item['latest_id'])} |"
+                f"| {md_link('#' + tag, '/tag/' + quote(tag, safe=''))} | "
+                f"{int(item['posts'])} | {int(item['boards'])} | "
+                f"{md_link('#' + str(latest_id), '/ref/post/' + str(latest_id))} |"
             )
     return "\n".join(lines) + "\n"
-
-
 def render_inbox(
     subject_id: str,
     events: list[tuple[Post, tuple[str, ...]]],
@@ -2612,7 +2627,12 @@ def render_inbox(
 
     for post, kinds in events:
         kind = "+".join(kinds)
-        reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
+        target = f"/{post.board}/{post.id}"
+        reply = (
+            " ->" + md_link(f"#{post.reply_to}", f"/ref/post/{post.reply_to}")
+            if post.reply_to is not None
+            else ""
+        )
         excerpt = " ".join(post.body.split())
         if len(excerpt) > 180:
             excerpt = excerpt[:177] + "..."
@@ -2620,13 +2640,17 @@ def render_inbox(
         identity = f" @{post.author_id[:12]}" if post.author_id else ""
         badge = _auth_badge((authentications or {}).get(post.id))
         ack = (receipts or {}).get(post.id, "delivered")
+        author = (
+            md_link(post.name, f"/@{quote(post.name, safe='')}")
+            if post.author_id and post.name != "[anon] anonymous"
+            else post.name
+        )
         lines.append(
-            f"[{kind}] #{post.id} /{post.board}{reply} {badge} ack={ack} "
-            f"{post.name}{identity}{title} {excerpt}"
+            f"[{kind}] {md_link('#' + str(post.id), target)} "
+            f"{md_link('/' + post.board, '/' + post.board)}{reply} {badge} ack={ack} "
+            f"{author}{identity}{title} {excerpt}"
         )
     return "\n".join(lines) + "\n"
-
-
 def posts_to_ndjson(
     posts: list[Post],
     authentications: dict[int, dict[str, Any]] | None = None,
