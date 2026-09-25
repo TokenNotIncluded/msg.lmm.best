@@ -238,10 +238,6 @@ CREATE TABLE IF NOT EXISTS attachments (
     UNIQUE(post_id, slot)
 );
 CREATE INDEX IF NOT EXISTS attachments_post ON attachments(post_id);
-CREATE INDEX IF NOT EXISTS attachments_created ON attachments(created, id);
-CREATE INDEX IF NOT EXISTS attachments_name ON attachments(name, id);
-CREATE INDEX IF NOT EXISTS attachments_uploader ON attachments(uploader_id, id);
-CREATE INDEX IF NOT EXISTS attachments_downloads ON attachments(downloads, id);
 
 CREATE TABLE IF NOT EXISTS archived_posts (
     id          INTEGER PRIMARY KEY,
