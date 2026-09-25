@@ -33,6 +33,7 @@ class Config:
     max_post_bytes: int = 16_384
     max_post_bytes_post: int = 1_048_576
     max_request_bytes: int = 33_554_432
+    max_path_payload_bytes: int = 18_432
     max_file_bytes: int = 16_777_216
     max_files_per_post: int = 8
     max_filename_bytes: int = 255
@@ -99,6 +100,9 @@ class Config:
             max_post_bytes=get("limits", "max_post_bytes", base.max_post_bytes),
             max_post_bytes_post=get("limits", "max_post_bytes_post", base.max_post_bytes_post),
             max_request_bytes=get("limits", "max_request_bytes", base.max_request_bytes),
+            max_path_payload_bytes=get(
+                "limits", "max_path_payload_bytes", base.max_path_payload_bytes
+            ),
             max_file_bytes=get("limits", "max_file_bytes", base.max_file_bytes),
             max_files_per_post=get("limits", "max_files_per_post", base.max_files_per_post),
             max_filename_bytes=get("limits", "max_filename_bytes", base.max_filename_bytes),
@@ -127,6 +131,7 @@ class Config:
             "max_post_bytes",
             "max_post_bytes_post",
             "max_request_bytes",
+            "max_path_payload_bytes",
             "max_file_bytes",
             "max_files_per_post",
             "max_filename_bytes",
