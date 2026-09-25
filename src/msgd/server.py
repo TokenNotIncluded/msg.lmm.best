@@ -259,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
         if uploads and head not in {"publish", "_signing"}:
             raise StoreError("file uploads are only accepted by /publish or /_signing", 400)
 
-        if head in {"publish", "_cert", "_revoke", "_policy"} and method == "HEAD":
+        if head in {"publish", "_cert", "_csr", "_revoke", "_policy"} and method == "HEAD":
             self._send(
                 405,
                 render_error(405, "HEAD cannot write"),
@@ -281,6 +281,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if head == "_cert":
             self._cert(params)
+            return
+        if head == "_csr":
+            self._csr(params, method)
             return
         if head == "_revoke":
             if self._limited(True):
@@ -540,6 +543,62 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if action == "cert.request":
+            grants = _grants(_required(params, "grants"))
+            grant_manifest = _grant_manifest(grants)
+            requested_issuer = (_param(params, "requested_issuer") or "").lower()
+            delegate = _truthy(_param(params, "delegate"))
+            message = _param(params, "message") or ""
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+                requested_issuer=requested_issuer,
+                delegate=delegate,
+                csr_grants=grant_manifest,
+                message=message,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "requested_issuer": requested_issuer,
+                    "delegate": delegate,
+                    "grants": list(grant_manifest),
+                    **payload_info(payload),
+                },
+            )
+            return
+
+        if action in {"cert.request.cancel", "cert.request.reject"}:
+            csr_id = _int_required(params, "id")
+            if store.csr(csr_id) is None:
+                raise StoreError("CSR not found", 404)
+            reason = _param(params, "reason") or ""
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                csr_id=csr_id,
+                reason=reason,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "id": csr_id,
+                    "reason": reason,
+                    **payload_info(payload),
+                },
+            )
+            return
+
         if action == "topic.policy":
             board = (_required(params, "board")).lower()
             anonymous = _topic_permissions(params)
@@ -568,17 +627,38 @@ class Handler(BaseHTTPRequestHandler):
         if action == "cert.issue":
             root = store.root_info()
             issuer_serial = _param(params, "issuer_serial") or "root"
-            grants = _grants(_required(params, "grants"))
+            csr_id = _optional_positive_int(params, "csr")
+            csr = store.csr(csr_id) if csr_id is not None else None
+            if csr_id is not None and csr is None:
+                raise StoreError("CSR not found", 404)
+
+            if csr is not None:
+                subject_key = _param(params, "subject_key") or str(csr["subject_key"])
+                grants = (
+                    _grants(_required(params, "grants"))
+                    if _param(params, "grants") is not None
+                    else _grants(canonical_json(csr["grants"]))
+                )
+                delegate = (
+                    _truthy(_param(params, "delegate"))
+                    if _param(params, "delegate") is not None
+                    else bool(csr["delegate"])
+                )
+            else:
+                subject_key = _required(params, "subject_key")
+                grants = _grants(_required(params, "grants"))
+                delegate = _truthy(_param(params, "delegate"))
+
             not_before = _int_required(params, "not_before", int(time.time()) - 60)
             not_after = _int_required(params, "not_after", int(time.time()) + 365 * 86400)
             cert = make_certificate(
                 serial=_param(params, "serial") or secrets.token_hex(16),
                 issuer_serial=issuer_serial,
                 issuer_id=signer_id,
-                subject_key=_required(params, "subject_key"),
+                subject_key=subject_key,
                 not_before=not_before,
                 not_after=not_after,
-                delegate=(_param(params, "delegate") or "").lower() in {"1", "true", "yes"},
+                delegate=delegate,
                 grants=grants,
             )
             if issuer_serial == "root" and (root is None or signer_id != root["root_id"]):
@@ -588,6 +668,7 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "certificate": cert.body,
                     "subject_id": cert.subject_id,
+                    "csr": csr_id,
                     **payload_info(certificate_payload(cert.body)),
                 },
             )
@@ -603,7 +684,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if cert_body is None or signature is None:
                 raise StoreError("cert and sig are both required", 400)
-            cert = self.board.store.register_certificate(cert_body, signature)
+            csr_id = _optional_positive_int(params, "csr")
+            cert = self.board.store.register_certificate(
+                cert_body,
+                signature,
+                csr_id=csr_id,
+            )
             self._json(
                 201,
                 {
@@ -612,6 +698,7 @@ class Handler(BaseHTTPRequestHandler):
                     "subject_id": cert.subject_id,
                     "delegate": cert.delegate,
                     "grants": cert.grants,
+                    "csr": csr_id,
                 },
             )
             return
@@ -637,15 +724,17 @@ class Handler(BaseHTTPRequestHandler):
         serial = _required(params, "serial")
         key = _required(params, "key")
         sig = _required(params, "sig")
+        reason = _param(params, "reason") or ""
         canonical_key, signer_id = public_identity(key)
         payload = request_payload(
             action="cert.revoke",
             signer_id=signer_id,
             version=1,
             serial=serial,
+            reason=reason,
         )
         auth = signed_request(canonical_key, sig, payload, version=1)
-        self.board.store.revoke_certificate(serial, auth.signer_id)
+        self.board.store.revoke_certificate(serial, auth.signer_id, reason)
         self._send(200, render_ok(ok=1, action="revoke", serial=serial, by=auth.signer_id))
 
     def _policy(self, params: Params) -> None:
