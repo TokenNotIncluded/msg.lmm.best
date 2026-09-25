@@ -90,6 +90,14 @@ class SSHAccessTests(unittest.TestCase):
         self.assertIsNotNone(revoked["revoked"])
         self.assertIsNone(self.store.lookup(key_type, key_data))
 
+    def test_key_label_rejects_terminal_control_characters(self) -> None:
+        with self.assertRaises(StoreError):
+            self.store.add(
+                owner_id=self.owner,
+                public_key=public_key(),
+                name="human\x1b[31m",
+            )
+
     def test_same_key_cannot_ambiguously_map_to_two_accounts(self) -> None:
         key = public_key()
         self.store.add(owner_id=self.owner, public_key=key, name="one")
