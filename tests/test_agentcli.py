@@ -222,7 +222,6 @@ class AgentCliCase(unittest.TestCase):
         self.assertEqual(result["format"], "libsodium-sealed-box-v1")
         self.assertNotIn("never-send-plaintext", out)
 
-        _public = _public_b64(self.root_key)
         import hashlib
 
         root_id = hashlib.sha256(
