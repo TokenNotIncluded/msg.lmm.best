@@ -788,6 +788,39 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if action.startswith("webhook."):
+            webhook_id, webhook_url, webhook_events, webhook_enabled = _webhook_fields(
+                params,
+                action,
+            )
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+                webhook_id=webhook_id,
+                webhook_url=webhook_url,
+                webhook_events=webhook_events,
+                webhook_enabled=webhook_enabled,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "webhook_id": webhook_id or None,
+                    "url": webhook_url or None,
+                    "events": list(webhook_events),
+                    "enabled": webhook_enabled,
+                    **payload_info(payload),
+                },
+            )
+            return
+
         if action == "cert.request":
             grants = _grants(_required(params, "grants"))
             grant_manifest = _grant_manifest(grants)
