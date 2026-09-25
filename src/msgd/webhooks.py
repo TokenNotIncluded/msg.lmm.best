@@ -8,6 +8,7 @@ import http.client
 import ipaddress
 import json
 import os
+import re
 import secrets
 import socket
 import ssl
@@ -48,6 +49,8 @@ def normalize_events(values: list[str] | tuple[str, ...] | set[str]) -> tuple[st
 
 def validate_webhook_url(value: str) -> str:
     raw = value.strip()
+    if any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F for char in raw):
+        raise StoreError("webhook URL must not contain whitespace or control characters", 400)
     if len(raw.encode("utf-8")) > 2048:
         raise StoreError("webhook URL is too long", 400)
     parsed = urlsplit(raw)
@@ -67,6 +70,8 @@ def validate_webhook_url(value: str) -> str:
         raise StoreError("webhook URL must use HTTPS port 443", 400)
 
     host = parsed.hostname.rstrip(".").lower()
+    if not re.fullmatch(r"[a-z0-9.-]+", host):
+        raise StoreError("webhook hostname must be ASCII DNS/punycode", 400)
     if host in {"localhost", "localhost.localdomain"} or host.endswith(
         (".localhost", ".local", ".internal")
     ):
