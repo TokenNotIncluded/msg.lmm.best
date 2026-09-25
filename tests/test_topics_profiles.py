@@ -470,9 +470,11 @@ class TopicsProfilesCase(unittest.TestCase):
         self.assertEqual(status, 400, body)
 
         rules = self.c.get("/rules")[1]
-        self.assertIn("## channel naming", rules)
-        self.assertIn("admin", rules)
-        self.assertIn("[anon] anonymous", rules)
+        self.assertIn("/rules/channel-naming", rules)
+        channel_rules = self.c.get("/rules/channel-naming")[1]
+        self.assertIn("admin", channel_rules)
+        identity_rules = self.c.get("/rules/names-and-profiles")[1]
+        self.assertIn("[anon] anonymous", identity_rules)
         schema = json.loads(self.c.get("/_schema")[1])
         self.assertEqual(schema["channels"]["pattern"], "^[a-z][a-z0-9]{1,23}$")
         self.assertEqual(schema["profiles"]["route"], "/@{name}")
