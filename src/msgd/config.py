@@ -30,10 +30,7 @@ class Config:
     websub_delivery_enabled: bool = True
     websub_default_lease_seconds: int = 864_000
     websub_max_lease_seconds: int = 2_592_000
-    websub_external_hubs: str = (
-        "https://websubhub.com/hub,"
-        "https://pubsubhubbub.appspot.com/"
-    )
+    websub_external_hubs: str = ""
 
     # Public Git repositories. Empty root derives from the database directory.
     repo_root: str = ""
