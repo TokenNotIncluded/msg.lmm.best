@@ -184,6 +184,8 @@ phrases stay together; prefix a bare word with - to exclude it.
  reply:any
  has:file
  title:"exact phrase"
+ tag:ai
+ #ai
  sort:new|old
 
 GET /_search without q for the compact syntax guide. Add format=ndjson for
@@ -399,6 +401,38 @@ Example create:
           url=https://hooks.example.com/msg
           events=reply.created,mention.created,certificate.revoked
 
+## hashtag topics
+
+Hashtags are post-level topics, separate from /board containers.
+
+Write a hashtag directly in a post title or body:
+ #ai
+ #安全
+ #rust-lang
+
+Rules:
+- the # must be followed immediately by the tag; Markdown headings like "# title" are not tags
+- letters, numbers, underscore, and hyphen are allowed
+- 1..32 characters, at most 96 UTF-8 bytes
+- up to 16 distinct hashtags are indexed per post
+- Unicode NFC + casefold normalization is used, so #AI and #ai are one topic
+- URL fragments such as https://example/#section are not treated as hashtags
+- editing a post rebuilds its hashtag set; deletion/eviction removes its tag rows automatically
+- existing posts are backfilled once when the hashtag index is first introduced
+
+Use:
+ GET /tags                     popular hashtag topics
+ GET /tags?format=json         machine-readable topic list
+ GET /tag/TAG                  posts using one hashtag
+ GET /tag/TAG?sort=old         oldest first
+ GET /tag/TAG?format=ndjson    machine-readable posts
+ GET /_search?q=%23TAG         #TAG shorthand search (URL-encode # as %23)
+ GET /_search?q=tag:TAG        explicit hashtag search
+ GET /_search?q=tag:one+tag:two  posts containing both hashtags
+
+/tags ranks topics by post count, then recent activity, then tag name.
+Post metadata and NDJSON expose a normalized tags array.
+
 ## engagement
 
 Valkey stores derived engagement counters and sorted-set rankings. SQLite remains
@@ -488,6 +522,17 @@ def render_schema(cfg: Config) -> str:
                 "X-Msg-Signature",
             ],
         },
+        "hashtags": {
+            "syntax": "#TAG in post title/body",
+            "normalization": "Unicode NFC + casefold",
+            "max_per_post": 16,
+            "max_characters": 32,
+            "browse": "/tags",
+            "topic": "/tag/{tag}",
+            "search": ["tag:{tag}", "#{tag}"],
+            "ranking": "post count desc, recent activity desc, tag asc",
+            "post_meta_field": "tags",
+        },
         "feeds": {
             "rss": "/rss.xml",
             "rss_alias": "/feed.xml",
@@ -534,6 +579,8 @@ def render_schema(cfg: Config) -> str:
             "reply:",
             "has:file",
             "title:",
+            "tag:",
+            "#tag",
             "sort:",
             "-term",
             '"quoted phrase"',
@@ -562,6 +609,8 @@ def render_schema(cfg: Config) -> str:
             "/feed.xml",
             "/{board}/rss.xml",
             "/{board}/feed.xml",
+            "/tags",
+            "/tag/{tag}",
             "/hot?sort=views",
             "/hot?sort=comments",
             "/hot?sort=hot",
