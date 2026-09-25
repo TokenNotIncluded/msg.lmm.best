@@ -14,12 +14,14 @@ import time
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from msgd import __version__
 from msgd.analytics import Engagement
 from msgd.config import Config
+from msgd.commerce import CommerceService
 from msgd.crypto import (
     ACTIONS,
     SignatureError,
@@ -155,6 +157,7 @@ class Board:
         self.cfg = cfg
         self.store = Store(cfg)
         self.templates = TopicTemplateService(cfg)
+        self.commerce = CommerceService(cfg, self.store, self.templates)
         self.exchange = ExchangeService(cfg, self.store)
         self.repos = RepoService(cfg)
         self.web = WebSiteService(cfg, self.store)
@@ -202,6 +205,7 @@ class MsgServer(ThreadingHTTPServer):
         self.board.engagement.close()
         self.board.exchange.close()
         self.board.ssh_keys.close()
+        self.board.commerce.close()
         self.board.templates.close()
         super().server_close()
 
@@ -518,6 +522,38 @@ class Handler(BaseHTTPRequestHandler):
         path = unquote(parsed.path or "/")
         params = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=80)
         uploads: Uploads = ()
+
+        # Waffo signs the exact raw JSON body. Handle this endpoint before
+        # generic POST parsing so signature verification never sees re-encoded JSON.
+        if path == "/_payment/waffo":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "Waffo webhook requires POST"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self._error(400, "bad Content-Length")
+                return
+            if length < 0 or length > min(self.board.cfg.max_request_bytes, 1_048_576):
+                self._error(413, "webhook request too large")
+                return
+            raw = self.rfile.read(length) if length else b""
+            try:
+                result = self.board.commerce.handle_waffo_webhook(
+                    raw,
+                    self.headers.get("X-Waffo-Signature") or "",
+                )
+                self._json(200, result)
+            except StoreError as exc:
+                self._error(exc.status, str(exc), exc.hint)
+            except Exception as exc:
+                log("error", "unhandled Waffo webhook exception", error=repr(exc))
+                self._error(500, "internal payment error")
+            return
 
         if self.board.repos.is_transport_path(path):
             try:
@@ -846,6 +882,50 @@ class Handler(BaseHTTPRequestHandler):
             return
         if head == "_template":
             self._template(params, method)
+            return
+        if head == "checkout":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "checkout requires signed POST"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            if self._limited(True):
+                return
+            self._checkout(params)
+            return
+        if head == "balance":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "balance requires signed POST"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            if self._limited(False):
+                return
+            self._balance(params)
+            return
+        if head in {"privacy", "terms"}:
+            if method not in {"GET", "HEAD"}:
+                self._send(
+                    405,
+                    render_error(405, f"/{head} is read-only"),
+                    extra_headers={"Allow": "GET, HEAD"},
+                )
+                return
+            source = (
+                self.board.cfg.privacy_policy_file
+                if head == "privacy"
+                else self.board.cfg.terms_file
+            )
+            try:
+                text = Path(source).read_text(encoding="utf-8")
+            except OSError:
+                self._error(503, f"{head} document is not configured")
+            else:
+                self._send(200, text, content_type="text/markdown; charset=utf-8")
             return
         if head == "key":
             if len(segments) != 2 or not valid_author_id(segments[1]):
@@ -2221,6 +2301,54 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"signer_id": signer_id, "version": version, **payload_info(payload)})
             return
 
+        if action == "store.buy":
+            product_id = _int_required(params, "id")
+            product = store.get_post(product_id)
+            if product is None or product.board != "store" or product.reply_to is not None:
+                raise StoreError("store product not found", 404)
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+                post_id=product_id,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "product": product_id,
+                    **payload_info(payload),
+                },
+            )
+            return
+
+        if action == "balance.read":
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "nonce": nonce,
+                    "issued": issued,
+                    **payload_info(payload),
+                },
+            )
+            return
+
         if action == "topic.template":
             board = _required(params, "board")
             if board != board.lower() or not valid_board_name(board):
@@ -2574,6 +2702,61 @@ class Handler(BaseHTTPRequestHandler):
         if not self.board.store.signed_allowed(auth.signer_id, board, "topic.policy"):
             raise StoreError("certificate does not grant topic.policy", 403)
         self._json(200, self.board.store.set_policy(board, anonymous, signed, version))
+
+    def _checkout(self, params: Params) -> None:
+        product_id = _int_required(params, "id")
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        nonce = _required(params, "nonce")
+        issued = _int_required(params, "issued")
+        canonical_key, signer_id = public_identity(key)
+        payload = request_payload(
+            action="store.buy",
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            post_id=product_id,
+        )
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        self.board.store.consume_nonce(auth)
+        result = self.board.commerce.create_checkout(
+            buyer_key=canonical_key,
+            buyer_id=auth.signer_id,
+            product_id=product_id,
+        )
+        self._json(201, result)
+
+    def _balance(self, params: Params) -> None:
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        nonce = _required(params, "nonce")
+        issued = _int_required(params, "issued")
+        canonical_key, signer_id = public_identity(key)
+        payload = request_payload(
+            action="balance.read",
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        self.board.store.consume_nonce(auth)
+        self._json(200, self.board.commerce.balance(auth.signer_id))
 
     def _template(self, params: Params, method: str) -> None:
         board = _required(params, "board")
