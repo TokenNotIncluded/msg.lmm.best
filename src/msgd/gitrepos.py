@@ -59,10 +59,7 @@ def git_push_payload(audience: str, signer_id: str, issued: int) -> bytes:
     if not AUTHOR_ID_RE.fullmatch(signer_id):
         raise ValueError("invalid Git credential signer")
     return (
-        "msgd.git.push.v1\n"
-        f"audience={audience}\n"
-        f"signer={signer_id}\n"
-        f"issued={issued}\n"
+        f"msgd.git.push.v1\naudience={audience}\nsigner={signer_id}\nissued={issued}\n"
     ).encode()
 
 
@@ -86,9 +83,7 @@ class RepoService:
         self.cfg = cfg
         self.git = shutil.which("git")
         self.root = (
-            Path(cfg.repo_root)
-            if cfg.repo_root
-            else Path(cfg.database).resolve().parent / "repos"
+            Path(cfg.repo_root) if cfg.repo_root else Path(cfg.database).resolve().parent / "repos"
         )
         self._lock = threading.RLock()
         if self.git:
