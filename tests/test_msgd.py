@@ -533,9 +533,7 @@ class ServerCase(unittest.TestCase):
             text="fake",
         )
         self.assertEqual(status, 201, body)
-        post_id = int(
-            dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"]
-        )
+        post_id = int(dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"])
         meta = json.loads(self.c.get(f"/main/{post_id}/meta")[1])
         self.assertEqual(meta["authentication"]["status"], "unsigned")
         listing = self.c.get("/main")[1]
