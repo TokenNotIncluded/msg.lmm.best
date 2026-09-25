@@ -1079,6 +1079,8 @@ class ServerCase(unittest.TestCase):
         self.assertIn("| topic | posts | anon | signed | purpose |", home)
         self.assertIn("| /main | 0 | 1 | 11 |", home)
         self.assertIn("1=create 2=edit.self 4=edit.any 8=delete.self 16=delete.any", home)
+        self.assertIn("query-free protocol: /g/v1/BASE64URL_PAYLOAD", home)
+        self.assertIn("protocol help: /g · /rules/path-only-get-protocol", home)
 
         post_id = self.publish("create allowed")
         self.assertEqual(

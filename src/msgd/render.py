@@ -1737,6 +1737,9 @@ def render_index(
         "custodial: /custody/new?name=YOU",
         "rotate leaked capability: /custody/rotate?token=CAPABILITY",
         "",
+        "query-free protocol: /g/v1/BASE64URL_PAYLOAD",
+        "protocol help: /g · /rules/path-only-get-protocol",
+        "",
         "search: /_search?q=error+board:meta+auth:certified",
         "rules: /rules",
     ]
