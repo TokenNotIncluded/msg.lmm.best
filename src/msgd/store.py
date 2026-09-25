@@ -59,7 +59,9 @@ BASE_PERMISSION_BITS = {
 BASE_PERMISSION_MASK = sum(BASE_PERMISSION_BITS.values())
 ANONYMOUS_BASE_ACTIONS = frozenset({"post.create", "post.edit.any", "post.delete.any"})
 SIGNED_BASE_ACTIONS = frozenset({"post.create", "post.edit.self", "post.delete.self"})
-ANONYMOUS_BASE_PERMISSION_MASK = sum(BASE_PERMISSION_BITS[action] for action in ANONYMOUS_BASE_ACTIONS)
+ANONYMOUS_BASE_PERMISSION_MASK = sum(
+    BASE_PERMISSION_BITS[action] for action in ANONYMOUS_BASE_ACTIONS
+)
 SIGNED_BASE_PERMISSION_MASK = sum(BASE_PERMISSION_BITS[action] for action in SIGNED_BASE_ACTIONS)
 
 DEFAULT_ANONYMOUS = frozenset({"post.create"})
@@ -70,20 +72,14 @@ GUEST_ANONYMOUS = ANONYMOUS_BASE_ACTIONS
 def anonymous_permission_mask(actions: Iterable[str]) -> int:
     """Legacy 3-bit anonymous mask kept for API compatibility."""
     current = set(actions)
-    return sum(
-        bit for action, bit in LEGACY_ANONYMOUS_PERMISSION_BITS.items() if action in current
-    )
+    return sum(bit for action, bit in LEGACY_ANONYMOUS_PERMISSION_BITS.items() if action in current)
 
 
 def anonymous_actions(mask: int) -> tuple[str, ...]:
     """Decode the legacy 3-bit anonymous mask."""
     if mask < 0 or mask & ~LEGACY_ANONYMOUS_PERMISSION_MASK:
-        raise ValueError(
-            f"anonymous permission mask must be 0..{LEGACY_ANONYMOUS_PERMISSION_MASK}"
-        )
-    return tuple(
-        action for action, bit in LEGACY_ANONYMOUS_PERMISSION_BITS.items() if mask & bit
-    )
+        raise ValueError(f"anonymous permission mask must be 0..{LEGACY_ANONYMOUS_PERMISSION_MASK}")
+    return tuple(action for action, bit in LEGACY_ANONYMOUS_PERMISSION_BITS.items() if mask & bit)
 
 
 def base_permission_mask(actions: Iterable[str]) -> int:
@@ -96,9 +92,7 @@ def _base_actions(mask: int, allowed: frozenset[str], label: str) -> tuple[str, 
     if mask < 0 or mask & ~allowed_mask:
         raise ValueError(f"{label} permission mask contains unsupported bits")
     return tuple(
-        action
-        for action, bit in BASE_PERMISSION_BITS.items()
-        if action in allowed and mask & bit
+        action for action, bit in BASE_PERMISSION_BITS.items() if action in allowed and mask & bit
     )
 
 
@@ -1263,9 +1257,7 @@ class Store:
         if not valid_board_name(board):
             raise StoreError(f"invalid board name: {board!r}", 400)
         current = self.policy(board)
-        anonymous_values = (
-            set(current["anonymous"]) if anonymous is None else set(anonymous)
-        )
+        anonymous_values = set(current["anonymous"]) if anonymous is None else set(anonymous)
         signed_values = set(current["signed"]) if signed is None else set(signed)
         invalid_anonymous = anonymous_values - ANONYMOUS_BASE_ACTIONS
         if invalid_anonymous:
@@ -1977,7 +1969,9 @@ class Store:
             "type": "certificate-signed" if certified else "signed",
             "signed": True,
             "certified": certified,
-            "status": "certified" if certified else ("signed" if never_certified else "signed-inactive"),
+            "status": "certified"
+            if certified
+            else ("signed" if never_certified else "signed-inactive"),
             "server_accepted_signature": True,
             "basis": (
                 "current-active-certificate-chain"
