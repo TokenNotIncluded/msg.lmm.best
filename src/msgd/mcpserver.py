@@ -10,10 +10,10 @@ from urllib.parse import urlparse
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from mcp.server import MCPServer
 
-from msgd.certcli import _load_private, _public_b64
+from msgd.cli.cert import _load_private, _public_b64
+from msgd.cli.control import Api, _payload_signature
 from msgd.credentials import credential_path
 from msgd.crypto import public_identity
-from msgd.ctl import Api, _payload_signature
 
 MCP_CLIENT_MARKER = "msg-mcp"
 _BLOCKED_READ_PREFIXES = (

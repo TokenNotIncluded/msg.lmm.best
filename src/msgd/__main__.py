@@ -1,5 +1,5 @@
 import sys
 
-from msgd.cli import main
+from msgd.cli.server import main
 
 sys.exit(main())
