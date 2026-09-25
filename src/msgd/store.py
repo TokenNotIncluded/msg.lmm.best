@@ -1063,6 +1063,7 @@ class Store:
                 (board, seq, name, title, body, now, now, nbytes),
             )
             post_id = int(cur.lastrowid or 0)
+            self._reindex_tags(post_id)
         post = self.get_post(post_id)
         if post is None:
             raise StoreError("failed to create CA audit post", 500)
