@@ -17,6 +17,7 @@ from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from msgd.config import Config
 from msgd.crypto import (
@@ -150,8 +151,9 @@ CREATE TABLE IF NOT EXISTS custody_identities (
     name        TEXT NOT NULL,
     public_key  TEXT NOT NULL,
     author_id   TEXT NOT NULL UNIQUE,
-    private_key BLOB NOT NULL,
-    created     REAL NOT NULL,
+    key_nonce      BLOB NOT NULL,
+    key_ciphertext BLOB NOT NULL,
+    created         REAL NOT NULL,
     last_used   REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS custody_author_id ON custody_identities(author_id);
@@ -427,7 +429,8 @@ class Store:
                 name TEXT NOT NULL,
                 public_key TEXT NOT NULL,
                 author_id TEXT NOT NULL UNIQUE,
-                private_key BLOB NOT NULL,
+                key_nonce BLOB NOT NULL,
+                key_ciphertext BLOB NOT NULL,
                 created REAL NOT NULL,
                 last_used REAL NOT NULL
             );
@@ -1467,19 +1470,33 @@ class Store:
         public_key = base64.b64encode(public_raw).decode("ascii")
         _, author_id = public_identity(public_key)
         token = secrets.token_urlsafe(32)
-        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        token_bytes = token.encode("utf-8")
+        token_hash = hashlib.sha256(b"custody-auth\0" + token_bytes).hexdigest()
         custody_id = secrets.token_hex(12)
+        nonce = secrets.token_bytes(12)
+        key_key = hashlib.sha256(b"custody-key\0" + token_bytes).digest()
+        ciphertext = AESGCM(key_key).encrypt(nonce, private, custody_id.encode("ascii"))
         now = time.time()
 
         with self._lock, self._conn:
             self._conn.execute(
                 """
                 INSERT INTO custody_identities(
-                    id, token_hash, name, public_key, author_id, private_key,
-                    created, last_used
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    id, token_hash, name, public_key, author_id, key_nonce,
+                    key_ciphertext, created, last_used
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (custody_id, token_hash, name, public_key, author_id, private, now, now),
+                (
+                    custody_id,
+                    token_hash,
+                    name,
+                    public_key,
+                    author_id,
+                    nonce,
+                    ciphertext,
+                    now,
+                    now,
+                ),
             )
 
         return {
@@ -1496,11 +1513,14 @@ class Store:
     def _custody_row(self, token: str) -> sqlite3.Row:
         if len(token) < 32 or len(token) > 128:
             raise StoreError("invalid custody token", 403)
-        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        token_hash = hashlib.sha256(
+            b"custody-auth\0" + token.encode("utf-8")
+        ).hexdigest()
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT id, name, public_key, author_id, private_key, created, last_used
+                SELECT id, name, public_key, author_id, key_nonce, key_ciphertext,
+                       created, last_used
                   FROM custody_identities
                  WHERE token_hash = ?
                 """,
@@ -1539,7 +1559,17 @@ class Store:
         issued: int | None = None,
     ) -> tuple[SignedRequest, str]:
         row = self._custody_row(token)
-        key = Ed25519PrivateKey.from_private_bytes(bytes(row["private_key"]))
+        token_bytes = token.encode("utf-8")
+        key_key = hashlib.sha256(b"custody-key\0" + token_bytes).digest()
+        try:
+            private = AESGCM(key_key).decrypt(
+                bytes(row["key_nonce"]),
+                bytes(row["key_ciphertext"]),
+                str(row["id"]).encode("ascii"),
+            )
+        except ValueError as exc:
+            raise StoreError("invalid custody token", 403) from exc
+        key = Ed25519PrivateKey.from_private_bytes(private)
         signature = base64.b64encode(key.sign(payload)).decode("ascii")
         with self._lock, self._conn:
             self._conn.execute(
