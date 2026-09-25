@@ -55,8 +55,11 @@ No accounts, passwords, cookies, sessions, OAuth, edit keys, or revision history
  GET /_search?q=TEXT            search
  GET /_policy?board=B           anonymous topic policy
  GET /_ca                       root trust anchor
- GET /_cert?serial=S            certificate
- GET /_cert?subject=AUTHOR_ID   certificates for a key
+ GET /_csr                     public certificate requests
+ GET /_csr?id=N                one certificate request
+ GET /_cert                    public certificate directory
+ GET /_cert?serial=S           one certificate
+ GET /_cert?subject=AUTHOR_ID  certificates for a key
  GET /_revocations             revocation list
  POST /inbox                   private mentions/replies (signed challenge)
 
@@ -129,14 +132,46 @@ Signed permissions are certificate actions scoped to a topic:
 Certificates may delegate only permissions their issuer already has. A child
 certificate can never expand its parent. Maximum chain depth is 8.
 
-## certificates
+## CA workflow
 
+Authoritative state:
+ /_ca            root public trust anchor
+ /_csr           public certificate signing requests
+ /_cert          public issued-certificate directory
+ /_revocations   public revocation list
+
+/ca is a system-managed public audit topic. Its permission mask is permanently
+0. Users cannot create, edit, delete, or change its policy. REQUEST, ISSUED,
+REJECTED, CANCELLED, and REVOKED events are written there automatically.
+Authority always comes from the endpoints above, not from audit prose.
+
+A first-time key does not need a certificate to request one. It proves private
+key possession with a signed CSR:
+
+ /_signing?action=cert.request&key=SUBJECT_KEY&grants=JSON
+ POST /_csr key=... sig=... nonce=... issued=... grants=...
+
+Optional CSR fields:
+ requested_issuer=AUTHOR_ID
+ delegate=true|false
+ message=short evidence or request context
+
+CSR status is pending, issued, rejected, or cancelled. The subject can cancel a
+pending CSR with cert.request.cancel. A CA able to issue the requested scopes
+(or Root) can reject it with cert.request.reject.
+
+To issue directly:
  /_signing?action=cert.issue&key=ISSUER_KEY&issuer_serial=SERIAL
           &subject_key=SUBJECT_KEY&grants=JSON
- -> returns canonical certificate JSON + payload_b64
+
+To issue from CSR N, subject/grants/delegate default from the request:
+ /_signing?action=cert.issue&key=ISSUER_KEY&issuer_serial=SERIAL&csr=N
 
 Sign payload_b64 with the issuer private key, then register:
- /_cert?cert=JSON&sig=BASE64_SIGNATURE
+ POST /_cert cert=JSON&sig=BASE64_SIGNATURE&csr=N
+
+A CSR-linked certificate may equal or narrow the requested grants, but can never
+expand them. delegate=false cannot become delegate=true.
 
 The root issuer uses issuer_serial=root. Root private key is kept off the HTTP
 service; /_ca exposes only the public trust anchor.
@@ -164,8 +199,8 @@ topic.policy for that topic (or the root key) may change it.
 An issuer may revoke a certificate it issued when its chain grants cert.revoke.
 The root may revoke any certificate. Revoking a parent invalidates descendants.
 
- /_signing?action=cert.revoke&key=K&serial=S
- /_revoke?serial=S&key=K&sig=SIG
+ /_signing?action=cert.revoke&key=K&serial=S&reason=TEXT
+ /_revoke?serial=S&key=K&sig=SIG&reason=TEXT
 
 ## storage
 
@@ -185,6 +220,7 @@ def render_schema(cfg: Config) -> str:
         "model": "unsigned-or-certificate-signed",
         "identity": "ed25519 public key; author_id=sha256(raw key)",
         "root_ca": "/_ca",
+        "ca_audit": "/ca",
         "private_actions": ["inbox.read"],
         "topic_permission_bits": {
             "1": "post.create",
@@ -207,6 +243,9 @@ def render_schema(cfg: Config) -> str:
             "/_search?q=",
             "/_policy?board=",
             "/_ca",
+            "/_csr",
+            "/_csr?id=",
+            "/_cert",
             "/_cert?serial=",
             "/_revocations",
             "/key/{author_id}",
@@ -223,7 +262,8 @@ def render_schema(cfg: Config) -> str:
             "/publish?delete=",
             "POST /publish multipart/form-data with file parts",
             "/_signing?action=",
-            "/_cert?cert=&sig=",
+            "/_csr?key=&sig=&nonce=&issued=&grants=",
+            "/_cert?cert=&sig=&csr=",
             "/_revoke?serial=&key=&sig=",
             "/_policy?board=&anonymous=&key=&sig=",
         ],
