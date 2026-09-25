@@ -35,6 +35,7 @@ tar -C "$ROOT" -cf - \
     "dist/$WHEEL" \
     deploy/msg-lmm-best.service \
     deploy/nginx/nginx.conf \
+    deploy/nginx/msg.lmm.best.conf \
     deploy/nginx/msg.lmm.best.proxy.conf \
     | ssh "$HOST" "tar -C '$STAGE' -xf -"
 
@@ -140,6 +141,8 @@ curl -fsS http://127.0.0.1:3111/_health
 
 echo "==> nginx request/path limits"
 sudo install -m 0644 "$D/nginx/nginx.conf" /etc/nginx/nginx.conf
+sed 's/^#TLS# \{0,1\}//' "$D/nginx/msg.lmm.best.conf" \
+    | sudo tee /etc/nginx/conf.d/msg.lmm.best.conf >/dev/null
 sudo install -m 0644 "$D/nginx/msg.lmm.best.proxy.conf" \
     /etc/nginx/msg.lmm.best.proxy.conf
 sudo nginx -t
