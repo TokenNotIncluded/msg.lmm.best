@@ -1211,6 +1211,24 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, response)
             return
 
+        if action in EXCHANGE_ACTIONS:
+            payload, meta = _exchange_signing_spec(
+                self.board,
+                action,
+                signer_id,
+                params,
+                signing=True,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    **meta,
+                    **payload_info(payload),
+                },
+            )
+            return
+
         if action == "inbox.read":
             since, before, limit = _inbox_window(params, self.board.cfg)
             nonce = _param(params, "nonce") or secrets.token_hex(16)
