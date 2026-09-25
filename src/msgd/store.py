@@ -4277,7 +4277,7 @@ class Store:
                 "SELECT webhook_id, attempts FROM webhook_deliveries WHERE id = ?",
                 (delivery_id,),
             ).fetchone()
-            if row is None or int(row["generation"]) != generation:
+            if row is None:
                 return
             attempts = int(row["attempts"]) + 1
             if success:
