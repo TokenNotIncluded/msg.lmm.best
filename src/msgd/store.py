@@ -36,6 +36,7 @@ from msgd.crypto import (
     public_identity,
     verify_detached,
 )
+from msgd.objectstore import GitObjectStore, ObjectStoreError
 from msgd.search import SearchSpec
 
 BOARD_RE = re.compile(r"^[a-z][a-z0-9]{1,23}$")
@@ -203,6 +204,8 @@ CREATE TABLE IF NOT EXISTS posts (
     name        TEXT NOT NULL DEFAULT 'anonymous',
     title       TEXT NOT NULL DEFAULT '',
     body        TEXT NOT NULL,
+    body_oid    TEXT,
+    content_commit TEXT,
     created     REAL NOT NULL,
     updated     REAL NOT NULL,
     nbytes      INTEGER NOT NULL,
@@ -230,6 +233,7 @@ CREATE TABLE IF NOT EXISTS attachments (
     name          TEXT NOT NULL,
     content_type  TEXT NOT NULL,
     data          BLOB NOT NULL,
+    object_oid    TEXT,
     nbytes        INTEGER NOT NULL,
     sha256        TEXT NOT NULL,
     created       REAL NOT NULL,
@@ -247,6 +251,8 @@ CREATE TABLE IF NOT EXISTS archived_posts (
     name        TEXT NOT NULL DEFAULT 'anonymous',
     title       TEXT NOT NULL DEFAULT '',
     body        TEXT NOT NULL,
+    body_oid    TEXT,
+    content_commit TEXT,
     created     REAL NOT NULL,
     updated     REAL NOT NULL,
     nbytes      INTEGER NOT NULL,
@@ -274,6 +280,7 @@ CREATE TABLE IF NOT EXISTS archived_attachments (
     name          TEXT NOT NULL,
     content_type  TEXT NOT NULL,
     data          BLOB NOT NULL,
+    object_oid    TEXT,
     nbytes        INTEGER NOT NULL,
     sha256        TEXT NOT NULL,
     created       REAL NOT NULL,
@@ -581,6 +588,7 @@ class Attachment:
     data: bytes
     nbytes: int
     sha256: str
+    object_oid: str | None = None
     created: float
     uploader_name: str
     uploader_id: str | None
@@ -623,6 +631,8 @@ class Post:
     created: float
     updated: float
     nbytes: int
+    body_oid: str | None = None
+    content_commit: str | None = None
     author_key: str | None = None
     author_id: str | None = None
     actor_key: str | None = None
@@ -705,6 +715,11 @@ class Store:
         self._lock = threading.RLock()
         path = Path(cfg.database)
         path.parent.mkdir(parents=True, exist_ok=True)
+        object_root = Path(cfg.object_root) if cfg.object_root else path.parent / "objects.git"
+        try:
+            self._objects = GitObjectStore(object_root, enabled=cfg.object_enabled)
+        except ObjectStoreError as exc:
+            raise StoreError(f"failed to open Git object store: {exc}", 500) from exc
         self._conn = sqlite3.connect(
             str(path), check_same_thread=False, isolation_level=None, timeout=15.0
         )
@@ -748,9 +763,6 @@ class Store:
             self._conn.close()
 
     def _ensure_schema(self) -> None:
-        columns = {
-            str(row["name"]) for row in self._conn.execute("PRAGMA table_info(posts)").fetchall()
-        }
         additions = {
             "author_key": "TEXT",
             "author_id": "TEXT",
@@ -763,16 +775,24 @@ class Store:
             "reply_to": "INTEGER",
             "system": "INTEGER NOT NULL DEFAULT 0",
             "custody_id": "TEXT",
+            "body_oid": "TEXT",
+            "content_commit": "TEXT",
         }
-        for name, definition in additions.items():
-            if name not in columns:
-                self._conn.execute(f"ALTER TABLE posts ADD COLUMN {name} {definition}")
+        for table in ("posts", "archived_posts"):
+            columns = {
+                str(row["name"])
+                for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
         attachment_additions = {
             "created": "REAL NOT NULL DEFAULT 0",
             "uploader_name": "TEXT NOT NULL DEFAULT 'anonymous'",
             "uploader_id": "TEXT",
             "downloads": "INTEGER NOT NULL DEFAULT 0",
+            "object_oid": "TEXT",
         }
         for table, post_table in (
             ("attachments", "posts"),
@@ -1017,6 +1037,40 @@ class Store:
                 ON path_get_chunks(created);
             """
         )
+        had_post_fts = (
+            self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='post_fts'"
+            ).fetchone()
+            is not None
+        )
+        self._fts_available = False
+        try:
+            self._conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS post_fts "
+                "USING fts5(body, content='', tokenize='trigram')"
+            )
+            self._fts_available = True
+        except sqlite3.OperationalError:
+            self._fts_available = False
+
+        if self._fts_available and not had_post_fts:
+            rows = self._conn.execute(
+                "SELECT id, body, body_oid FROM posts ORDER BY id"
+            ).fetchall()
+            for row in rows:
+                body = str(row["body"])
+                oid = str(row["body_oid"]) if row["body_oid"] is not None else None
+                if oid and self._objects.available:
+                    try:
+                        body = self._objects.get_blob(oid).decode("utf-8")
+                    except (ObjectStoreError, UnicodeDecodeError):
+                        if not body:
+                            continue
+                self._conn.execute(
+                    "INSERT INTO post_fts(rowid, body) VALUES (?, ?)",
+                    (int(row["id"]), body),
+                )
+
         self._conn.execute(
             """
             INSERT INTO identity_names(author_id, name, first_seen, last_seen)
@@ -1061,12 +1115,13 @@ class Store:
     def _reindex_tags(self, post_id: int) -> None:
         self._conn.execute("DELETE FROM post_tags WHERE post_id = ?", (post_id,))
         row = self._conn.execute(
-            "SELECT title, body FROM posts WHERE id = ?",
+            self._select_posts() + " WHERE id = ?",
             (post_id,),
         ).fetchone()
-        if row is None:
+        post = self._row(row)
+        if post is None:
             return
-        tags = self.extract_tags(str(row["title"]), str(row["body"]))
+        tags = self.extract_tags(post.title, post.body)
         if tags:
             self._conn.executemany(
                 "INSERT INTO post_tags(post_id, tag) VALUES (?, ?)",
@@ -1281,7 +1336,7 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256,
+                SELECT id, post_id, slot, name, content_type, data, object_oid, nbytes, sha256,
                        created, uploader_name, uploader_id, downloads
                   FROM attachments
                  WHERE post_id = ?
@@ -1295,7 +1350,7 @@ class Store:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256,
+                SELECT id, post_id, slot, name, content_type, data, object_oid, nbytes, sha256,
                        created, uploader_name, uploader_id, downloads
                   FROM attachments
                  WHERE id = ?
@@ -1415,6 +1470,37 @@ class Store:
             ).fetchone()
         return int(row["downloads"]) if row is not None else None
 
+    @staticmethod
+    def _fts_query(value: str) -> str:
+        return '"' + value.replace('"', '""') + '"'
+
+    def _search_index_replace(
+        self,
+        post_id: int,
+        body: str,
+        *,
+        previous_body: str | None = None,
+    ) -> None:
+        if not self._fts_available:
+            return
+        if previous_body is not None:
+            self._conn.execute(
+                "INSERT INTO post_fts(post_fts, rowid, body) VALUES ('delete', ?, ?)",
+                (post_id, previous_body),
+            )
+        self._conn.execute(
+            "INSERT INTO post_fts(rowid, body) VALUES (?, ?)",
+            (post_id, body),
+        )
+
+    def _search_index_delete(self, post_id: int, body: str) -> None:
+        if not self._fts_available:
+            return
+        self._conn.execute(
+            "INSERT INTO post_fts(post_fts, rowid, body) VALUES ('delete', ?, ?)",
+            (post_id, body),
+        )
+
     def _storage_bytes(self) -> int:
         row = self._conn.execute(
             """
@@ -1448,21 +1534,26 @@ class Store:
         uploaded_at: float,
         uploader_name: str,
         uploader_id: str | None,
+        object_oids: tuple[str, ...] | None = None,
     ) -> None:
+        if object_oids is not None and len(object_oids) != len(files):
+            raise StoreError("object attachment manifest mismatch", 500)
         for slot, file in enumerate(files):
+            object_oid = object_oids[slot] if object_oids is not None else None
             self._conn.execute(
                 """
                 INSERT INTO attachments(
-                    post_id, slot, name, content_type, data, nbytes, sha256,
+                    post_id, slot, name, content_type, data, object_oid, nbytes, sha256,
                     created, uploader_name, uploader_id, downloads
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (
                     post_id,
                     slot,
                     file.name,
                     file.content_type,
-                    file.data,
+                    b"" if object_oid else file.data,
+                    object_oid,
                     file.nbytes,
                     file.sha256,
                     uploaded_at,
@@ -5529,51 +5620,70 @@ class Store:
     @staticmethod
     def _select_posts() -> str:
         return (
-            "SELECT id, board, seq, name, title, body, created, updated, nbytes,"
-            " author_key, author_id, actor_key, actor_id, signature,"
+            "SELECT id, board, seq, name, title, body, body_oid, content_commit,"
+            " created, updated, nbytes, author_key, author_id, actor_key, actor_id, signature,"
             " sig_version, sig_nonce, sig_issued, reply_to, system, custody_id FROM posts"
         )
 
     @staticmethod
     def _select_archived_posts() -> str:
         return (
-            "SELECT id, board, seq, name, title, body, created, updated, nbytes,"
-            " author_key, author_id, actor_key, actor_id, signature,"
+            "SELECT id, board, seq, name, title, body, body_oid, content_commit,"
+            " created, updated, nbytes, author_key, author_id, actor_key, actor_id, signature,"
             " sig_version, sig_nonce, sig_issued, reply_to, system, custody_id"
             " FROM archived_posts"
         )
 
-    @staticmethod
-    def _attachment(row: sqlite3.Row) -> Attachment:
+    def _attachment(self, row: sqlite3.Row) -> Attachment:
+        object_oid = str(row["object_oid"]) if row["object_oid"] is not None else None
+        data = bytes(row["data"])
+        if object_oid and self._objects.available:
+            try:
+                data = self._objects.get_blob(object_oid)
+            except ObjectStoreError as exc:
+                if not data:
+                    raise StoreError(f"attachment object is unavailable: {exc}", 500) from exc
         return Attachment(
             id=int(row["id"]),
             post_id=int(row["post_id"]),
             slot=int(row["slot"]),
             name=str(row["name"]),
             content_type=str(row["content_type"]),
-            data=bytes(row["data"]),
+            data=data,
             nbytes=int(row["nbytes"]),
             sha256=str(row["sha256"]),
             created=float(row["created"]),
             uploader_name=str(row["uploader_name"] or "anonymous"),
             uploader_id=str(row["uploader_id"]) if row["uploader_id"] is not None else None,
             downloads=int(row["downloads"]),
+            object_oid=object_oid,
         )
 
-    @staticmethod
-    def _row(row: sqlite3.Row | None) -> Post | None:
+    def _row(self, row: sqlite3.Row | None) -> Post | None:
         if row is None:
             return None
+        body = str(row["body"])
+        body_oid = str(row["body_oid"]) if row["body_oid"] is not None else None
+        if body_oid and self._objects.available:
+            try:
+                body = self._objects.get_blob(body_oid).decode("utf-8")
+            except (ObjectStoreError, UnicodeDecodeError) as exc:
+                if not body:
+                    raise StoreError(f"post body object is unavailable: {exc}", 500) from exc
         return Post(
             id=int(row["id"]),
             board=str(row["board"]),
             seq=int(row["seq"]),
             name=str(row["name"]),
             title=str(row["title"]),
-            body=str(row["body"]),
+            body=body,
             created=float(row["created"]),
             updated=float(row["updated"]),
             nbytes=int(row["nbytes"]),
+            body_oid=body_oid,
+            content_commit=(
+                str(row["content_commit"]) if row["content_commit"] is not None else None
+            ),
             author_key=str(row["author_key"]) if row["author_key"] is not None else None,
             author_id=str(row["author_id"]) if row["author_id"] is not None else None,
             actor_key=str(row["actor_key"]) if row["actor_key"] is not None else None,
