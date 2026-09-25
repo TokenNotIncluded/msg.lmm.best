@@ -41,10 +41,11 @@ DEFAULT_ANONYMOUS = frozenset(ANONYMOUS_PERMISSION_BITS)
 
 
 def anonymous_permission_mask(actions: Iterable[str]) -> int:
+    current = set(actions)
     return sum(
         bit
         for action, bit in ANONYMOUS_PERMISSION_BITS.items()
-        if action in set(actions)
+        if action in current
     )
 
 
