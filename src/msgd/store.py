@@ -1940,6 +1940,17 @@ class Store:
                 raise StoreError("issuer id does not match issuer certificate", 403)
             if not parent.delegate:
                 raise StoreError("issuer certificate cannot delegate", 403)
+
+            # Enforce cert.issue again at the mutation boundary. _check_delegation
+            # also validates the selected parent certificate, but keeping this
+            # identity-level check here prevents a future parser/metadata change
+            # from turning an asserted grant into authority.
+            for topic in cert.grants:
+                if "cert.issue" not in self.permissions_for(cert.issuer_id, topic):
+                    raise StoreError(
+                        f"issuer lacks active cert.issue for topic {topic}",
+                        403,
+                    )
             self._check_delegation(parent, cert)
             issuer_key = parent.subject_key
 
