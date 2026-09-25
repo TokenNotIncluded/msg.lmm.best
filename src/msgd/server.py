@@ -40,6 +40,7 @@ from msgd.render import (
     render_agent_index,
     render_dimension_index,
     render_error,
+    render_files_listing,
     render_inbox,
     render_index,
     render_latest_pointer,
@@ -996,6 +997,14 @@ class Handler(BaseHTTPRequestHandler):
                 aliases = [str(item) for item in profile.get("aliases", [])]
                 self._send(200, "".join(alias + "\n" for alias in aliases))
                 return
+            if resource == "files":
+                self._files(
+                    ["files"],
+                    params,
+                    uploader_id=str(profile["author_id"]),
+                    path_override=f"/@{quote(str(profile['name']), safe='')}/files",
+                )
+                return
 
             certification = profile.get("certification")
             primary = certification.get("primary") if isinstance(certification, dict) else None
@@ -1055,12 +1064,29 @@ class Handler(BaseHTTPRequestHandler):
             self._error(
                 404,
                 f"unknown profile resource: {resource}",
-                "available: name, id, pubkey, bio, aliases, cert, certs, chain, keystore, "
-                "claim-signature, profile-signature",
+                "available: name, id, pubkey, bio, aliases, files, cert, certs, chain, "
+                "keystore, claim-signature, profile-signature",
             )
             return
+        if head == "files":
+            if method not in {"GET", "HEAD"}:
+                self._send(
+                    405,
+                    render_error(405, "/files is read-only"),
+                    extra_headers={"Allow": "GET, HEAD"},
+                )
+                return
+            self._files(segments, params)
+            return
         if head == "file":
-            if len(segments) != 2:
+            if method not in {"GET", "HEAD"}:
+                self._send(
+                    405,
+                    render_error(405, "/file is read-only"),
+                    extra_headers={"Allow": "GET, HEAD"},
+                )
+                return
+            if len(segments) not in {2, 3}:
                 self._error(404, "file id is required")
                 return
             try:
@@ -1068,10 +1094,23 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 self._error(404, "invalid file id")
                 return
+            if len(segments) == 3:
+                if segments[2] != "meta":
+                    self._error(404, "unknown file resource", "try /file/ID/meta")
+                    return
+                metadata = self.board.store.attachment_metadata(file_id)
+                if metadata is None:
+                    self._error(404, "file not found")
+                else:
+                    self._json(200, metadata)
+                return
             attachment = self.board.store.attachment(file_id)
             if attachment is None:
                 self._error(404, "file not found")
                 return
+            downloads = attachment.downloads
+            if method == "GET":
+                downloads = self.board.store.record_attachment_download(file_id) or downloads
             disposition = "attachment; filename*=UTF-8''" + quote(
                 attachment.name,
                 safe="",
@@ -1083,6 +1122,7 @@ class Handler(BaseHTTPRequestHandler):
                 extra_headers={
                     "Content-Disposition": disposition,
                     "ETag": f'"{attachment.sha256}"',
+                    "X-Download-Count": str(downloads),
                 },
             )
             return
@@ -3367,6 +3407,12 @@ class Handler(BaseHTTPRequestHandler):
                 "key": "parent post id",
                 "description": "reply groups ordered by parent post id",
             },
+            {
+                "name": "by-file",
+                "href": "/index/by-file",
+                "key": "file id",
+                "description": "active attachments ordered by stable numeric file id",
+            },
         ]
 
         if len(segments) == 1:
@@ -3384,6 +3430,7 @@ class Handler(BaseHTTPRequestHandler):
                             "rss": "/rss.xml",
                             "tags_by_popularity": "/tags",
                             "users_by_activity": "/users",
+                            "files": "/files",
                         },
                     },
                 )
@@ -3411,6 +3458,7 @@ class Handler(BaseHTTPRequestHandler):
             "by-board",
             "by-tag",
             "by-reply",
+            "by-file",
         }
         if len(segments) != 2 or segments[1] not in kinds:
             self._error(
@@ -3421,6 +3469,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         kind = segments[1]
+        if kind == "by-file":
+            self._files(
+                ["files", "by-id"],
+                params,
+                path_override="/index/by-file",
+            )
+            return
+
         limit = _int(
             params,
             "limit",
@@ -3644,6 +3700,161 @@ class Handler(BaseHTTPRequestHandler):
             text_body=render_dimension_index(
                 kind,
                 entries,
+                order=order,
+                next_url=next_url,
+            ),
+        )
+
+    def _files(
+        self,
+        segments: list[str],
+        params: Params,
+        *,
+        uploader_id: str | None = None,
+        path_override: str | None = None,
+    ) -> None:
+        fmt = (_param(params, "format") or "").lower()
+        if fmt not in {"", "json", "ndjson"}:
+            raise StoreError("file listing format must be json or ndjson", 400)
+
+        dimensions = {
+            "by-id": "id",
+            "by-time": "time",
+            "by-name": "name",
+            "by-uploader": "uploader",
+            "by-downloads": "downloads",
+        }
+        if len(segments) == 1:
+            sort = "time"
+        elif len(segments) == 2 and segments[1] in dimensions:
+            sort = dimensions[segments[1]]
+        else:
+            self._error(
+                404,
+                "unknown file index",
+                "try /files, /files/by-time, /files/by-name, "
+                "/files/by-uploader, or /files/by-downloads",
+            )
+            return
+
+        default_order = "asc" if sort in {"id", "name", "uploader"} else "desc"
+        order = (_param(params, "order") or default_order).lower()
+        if order not in {"asc", "desc"}:
+            raise StoreError("order must be asc or desc", 400)
+        limit = _int(
+            params,
+            "limit",
+            min(50, self.board.cfg.max_limit),
+            1,
+            self.board.cfg.max_limit,
+        )
+        assert limit is not None
+
+        path = path_override or (
+            "/files" if len(segments) == 1 else f"/files/{segments[1]}"
+        )
+        scope = _pagination_scope(path, params, exclude={"format"})
+        cursor_data = _decode_cursor(
+            _param(params, "cursor"),
+            kind=f"files-{sort}",
+            scope=scope,
+        )
+        cursor: tuple[object, int] | None = None
+        if cursor_data:
+            try:
+                file_id = int(cursor_data["id"])
+                raw_value = cursor_data["value"]
+                if sort in {"id", "downloads"}:
+                    value: object = int(raw_value)
+                elif sort == "time":
+                    value = float(raw_value)
+                else:
+                    value = str(raw_value)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise StoreError("invalid file cursor", 400) from exc
+            if file_id < 1:
+                raise StoreError("invalid file cursor", 400)
+            cursor = (value, file_id)
+
+        files = self.board.store.list_attachment_metadata(
+            sort=sort,
+            cursor=cursor,
+            limit=limit + 1,
+            order=order,
+            uploader_id=uploader_id,
+        )
+        has_more = len(files) > limit
+        files = files[:limit]
+        next_cursor = None
+        if has_more and files:
+            last = files[-1]
+            if sort == "id":
+                value = str(last["id"])
+            elif sort == "time":
+                value = repr(last["uploaded_at"])
+            elif sort == "name":
+                value = str(last["name"])
+            elif sort == "uploader":
+                value = str((last.get("uploader") or {}).get("name") or "anonymous")
+            else:
+                value = str(last["downloads"])
+            next_cursor = _encode_cursor(
+                f"files-{sort}",
+                scope,
+                id=int(last["id"]),
+                value=value,
+            )
+        next_url = _next_cursor_url(
+            path,
+            params,
+            cursor=next_cursor,
+            limit=limit,
+            has_more=has_more,
+        )
+
+        if fmt == "json":
+            self._json(
+                200,
+                {
+                    "type": "files",
+                    "sort": sort,
+                    "order": order,
+                    "uploader_id": uploader_id,
+                    "has_more": has_more,
+                    "next": next_url,
+                    "files": files,
+                },
+            )
+            return
+        if fmt == "ndjson":
+            lines = [
+                json.dumps({"kind": "file", **item}, ensure_ascii=False)
+                for item in files
+            ]
+            lines.append(
+                json.dumps(
+                    {
+                        "kind": "page",
+                        "sort": sort,
+                        "order": order,
+                        "has_more": has_more,
+                        "next": next_url,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            self._send(
+                200,
+                "\n".join(lines) + "\n",
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+        self._send(
+            200,
+            render_files_listing(
+                path,
+                files,
+                sort=sort,
                 order=order,
                 next_url=next_url,
             ),
