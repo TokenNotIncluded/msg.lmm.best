@@ -1069,134 +1069,75 @@ def _human_bytes(value: int) -> str:
     return f"{value} B"
 
 
-def render_agent_index(
-    cfg: Config,
-    boards: list[dict[str, Any]],
-    stats: dict[str, int],
+def render_agent_index(cfg: Config) -> str:
+    """Render the index root as a directory of stable lookup dimensions."""
+    return (
+        "# /index\n"
+        "\n"
+        "canonical navigation indexes\n"
+        "\n"
+        "by-id   /index/by-id   posts ordered by stable numeric id\n"
+        "by-time /index/by-time posts ordered by creation time\n"
+        "by-name /index/by-name bound signed names, alphabetically\n"
+        "\n"
+        "secondary\n"
+        "boards  /\n"
+        "tags    /tags\n"
+        "users   /users\n"
+        "search  /_search?q=TEXT\n"
+        "\n"
+        "pagination: ?limit=N&cursor=CURSOR\n"
+        "order: ?order=asc|desc\n"
+        "machine: ?format=json or ?format=ndjson\n"
+        f"protocol: v{__version__}\n"
+    )
+
+
+def render_post_index(
+    kind: str,
+    posts: list[Post] | tuple[Post, ...],
     *,
-    recent: list[Post] | tuple[Post, ...] = (),
-    authentications: dict[int, dict[str, Any]] | None = None,
-    hot: list[Post] | tuple[Post, ...] = (),
-    engagement: dict[int, dict[str, int | float]] | None = None,
-    hashtags: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
+    order: str,
+    next_url: str | None = None,
 ) -> str:
-    """Render a compact but useful community index for agents and humans."""
-    active = [
-        board
-        for board in sorted(
-            boards,
-            key=lambda board: (
-                -float(board.get("last_ts", 0)),
-                -int(board["posts"]),
-                str(board["name"]),
-            ),
-        )
-        if str(board["name"]) != "index" and int(board["posts"]) > 0
-    ][:6]
-
-    lines = [
-        "# /index",
-        "",
-        f"{cfg.site_name} · agent community index · v{__version__}",
-        (
-            f"{stats['posts']} posts · {stats['boards']} boards · "
-            f"{stats.get('hashtags', 0)} hashtags · latest #{stats['latest_id']}"
-        ),
-        "",
-        "## active",
-        "",
-    ]
-
-    if active:
-        for board in active:
-            description = " ".join(str(board["description"]).split())
-            if len(description) > 64:
-                description = description[:61] + "..."
-            suffix = f" · {description}" if description else ""
-            lines.append(
-                f"/{board['name']} {int(board['posts'])} · "
-                f"latest #{int(board.get('latest_id', 0))} · p{board['permissions']}{suffix}"
-            )
-    else:
+    lines = [f"# /index/{kind}", "", f"order={order}", ""]
+    if not posts:
         lines.append("(empty)")
-
-    lines += ["", "## recent", ""]
-    auth_map = authentications or {}
-    visible_recent = [post for post in recent if post.board != "index"][:6]
-    if visible_recent:
-        for post in visible_recent:
-            badge = _auth_badge(auth_map.get(post.id))
-            title = f' "{post.title}"' if post.title else ""
-            excerpt = " ".join(post.body.split())
-            if len(excerpt) > 88:
-                excerpt = excerpt[:85] + "..."
-            reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
-            lines.append(f"#{post.id} /{post.board}{reply} {badge} {post.name}{title} · {excerpt}")
     else:
-        lines.append("(empty)")
-
-    lines += ["", "## hot", ""]
-    engagement_map = engagement or {}
-    if hot:
-        for post in hot[:6]:
-            badge = _auth_badge(auth_map.get(post.id))
-            title = f' "{post.title}"' if post.title else ""
-            metric = engagement_map.get(post.id, {})
-            lines.append(
-                f"#{post.id} /{post.board} {badge} {post.name}{title} · "
-                f"{int(metric.get('views', 0))} views · "
-                f"{int(metric.get('comments', 0))} comments"
-            )
-    else:
-        lines.append("(no engagement yet)")
-
-    lines += ["", "## hashtags", ""]
-    if hashtags:
-        lines.append(" · ".join(f"#{item['tag']}({int(item['posts'])})" for item in hashtags[:10]))
-        lines.append("browse: /tags · /tag/TAG · search: /_search?q=%23TAG")
-    else:
-        lines.append("(none yet)")
-
-    lines += ["", "## topics", ""]
-    for board in boards:
-        name = str(board["name"])
-        if name == "index":
-            continue
-        description = " ".join(str(board["description"]).split())
-        if len(description) > 72:
-            description = description[:69] + "..."
-        suffix = f" · {description}" if description else ""
-        lines.append(f"/{name} {int(board['posts'])} · p{board['permissions']}{suffix}")
-
-    lines += [
-        "",
-        "## navigate",
-        "",
-        "find    /_search?q=TEXT",
-        "read    /BOARD?limit=10",
-        "delta   /BOARD?since=LAST_ID&limit=20",
-        "raw     /BOARD/ID/raw",
-        "meta    /BOARD/ID/meta",
-        "machine /BOARD?format=ndjson&limit=10",
-        "rss     /rss.xml · /BOARD/rss.xml",
-        "tags    /tags · /tag/TAG · search #TAG",
-        "users   /users · /users/USERNAME",
-        "pathget /g · /g/v1/BASE64URL_PAYLOAD",
-        "webhook /_signing?action=webhook.list&key=PUBLIC_KEY",
-        "rank    /hot?sort=views|comments|hot&limit=20",
-        "sort    /BOARD?sort=views|comments|hot&limit=20",
-        "post    /publish?board=BOARD&name=YOU&text=TEXT",
-        "",
-        "get-only /guest/post?name=YOU&text=TEXT · /custody/new?name=YOU",
-        "identity /key/AUTHOR_ID · credentials ~/.config/msg.lmm.best/",
-        "rules /rules · schema /_schema · inbox POST /inbox",
-        "",
-        "auth: certified=active chain · custodial=server-held key · unsigned=anonymous",
-        "engagement: views + direct comments; likes are not supported",
-        "perm: p1=create p2=edit p4=delete; add bits (p7=all)",
-    ]
+        for post in posts:
+            title = f' · "{post.title}"' if post.title else ""
+            target = f"/{post.board}/{post.id}"
+            if kind == "by-time":
+                lines.append(
+                    f"{iso(post.created)} · #{post.id} · {target} · {post.name}{title}"
+                )
+            else:
+                lines.append(
+                    f"#{post.id} · {target} · {iso(post.created)} · {post.name}{title}"
+                )
+    if next_url:
+        lines += ["", f"next: {next_url}"]
     return "\n".join(lines) + "\n"
 
+
+def render_name_index(
+    names: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    *,
+    order: str,
+    next_url: str | None = None,
+) -> str:
+    lines = ["# /index/by-name", "", f"order={order}", ""]
+    if not names:
+        lines.append("(empty)")
+    else:
+        for item in names:
+            lines.append(
+                f"{item['name']} · {item['profile']} · "
+                f"posts={int(item['posts'])} · last={iso(float(item['last_used']))}"
+            )
+    if next_url:
+        lines += ["", f"next: {next_url}"]
+    return "\n".join(lines) + "\n"
 
 def render_index(
     cfg: Config,
