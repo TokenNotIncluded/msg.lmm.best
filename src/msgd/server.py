@@ -2675,9 +2675,7 @@ class Handler(BaseHTTPRequestHandler):
         key_cursor = cursor.get("key") if cursor else None
         if kind == "by-reply":
             reply_cursor = cursor.get("id") if cursor else None
-            if reply_cursor is not None and (
-                not isinstance(reply_cursor, int) or reply_cursor < 1
-            ):
+            if reply_cursor is not None and (not isinstance(reply_cursor, int) or reply_cursor < 1):
                 raise StoreError("invalid by-reply cursor", 400)
             entries = store.list_reply_groups(
                 cursor_id=reply_cursor,
@@ -2709,9 +2707,7 @@ class Handler(BaseHTTPRequestHandler):
                     order=order,
                 )
                 cursor_field = "author_id"
-            cursor_value = (
-                str(entries[limit - 1][cursor_field]) if len(entries) > limit else None
-            )
+            cursor_value = str(entries[limit - 1][cursor_field]) if len(entries) > limit else None
 
         truncated = len(entries) > limit
         entries = entries[:limit]
