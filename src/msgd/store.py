@@ -100,6 +100,7 @@ RESERVED_BOARDS = {
     "_revocations",
     "publish",
     "inbox",
+    "index",
     "file",
     "key",
     "_profile",
