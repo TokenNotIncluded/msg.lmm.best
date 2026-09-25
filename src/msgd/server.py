@@ -1360,7 +1360,7 @@ class Handler(BaseHTTPRequestHandler):
                         "anonymous": "read-only",
                         "signed": "push",
                         "max_blob_bytes": self.board.cfg.repo_max_blob_bytes,
-                        "ssh": f"ssh://msg@{self.board.cfg.site_name}/REPO.git",
+                        "ssh": f"ssh://msg@{self.board.cfg.site_name}/repos/REPO.git",
                         "repositories": repositories,
                     },
                 )
