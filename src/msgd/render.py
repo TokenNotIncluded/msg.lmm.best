@@ -141,6 +141,21 @@ Public profile:
  GET /@NAME
  GET /@NAME?format=json
 
+Stable machine resources live below the profile path:
+ GET /@NAME/pubkey            raw Ed25519 public key
+ GET /@NAME/id                raw author_id
+ GET /@NAME/bio               raw profile bio
+ GET /@NAME/aliases           one alias per line
+ GET /@NAME/cert              primary active certificate as JSON
+ GET /@NAME/certs             all certificates as JSON
+ GET /@NAME/chain             active Root-to-subject chain as JSON
+ GET /@NAME/claim-signature   raw name-claim signature when available
+ GET /@NAME/profile-signature raw explicit profile signature when available
+
+The name root is permanently reserved. /@root is a server-managed profile derived
+from the configured Root CA public key. Its /cert resource is a trust-anchor
+descriptor rather than a fabricated self-signed certificate.
+
 The default profile is created by the first signed name claim:
 - name = first claimed name
 - bio = empty
@@ -194,6 +209,8 @@ honesty, personhood, or factual correctness.
  GET /{{board}}/{{id}}/meta       metadata/signature
  GET /key/{{author_id}}           public-key identity
  GET /@NAME                     public signed profile
+ GET /@NAME/pubkey              raw public key
+ GET /@NAME/cert                primary certificate/trust anchor
  GET /users                     signed-user directory
  GET /users/NAME                posts by signed username
  GET /_search?q=TEXT            search
@@ -926,6 +943,19 @@ def render_schema(cfg: Config) -> str:
         },
         "profiles": {
             "route": "/@{name}",
+            "resources": {
+                "pubkey": "/@{name}/pubkey",
+                "id": "/@{name}/id",
+                "bio": "/@{name}/bio",
+                "aliases": "/@{name}/aliases",
+                "cert": "/@{name}/cert",
+                "certs": "/@{name}/certs",
+                "chain": "/@{name}/chain",
+                "claim_signature": "/@{name}/claim-signature",
+                "profile_signature": "/@{name}/profile-signature",
+            },
+            "root_profile": "/@root",
+            "reserved_names": ["root"],
             "name_claim": "first successful signed post atomically binds normalized name to public key",
             "normalization": "Unicode NFKC + casefold",
             "anonymous_prefix": "[anon] ",
@@ -1888,6 +1918,8 @@ def render_profile(profile: dict[str, Any]) -> str:
     if isinstance(certification, dict):
         role = str(certification.get("role") or certification.get("status") or "")
     aliases = [str(item) for item in profile.get("aliases", [])]
+    encoded_name = quote(str(profile["name"]), safe="")
+    root_ca = profile.get("root_ca")
     lines = [
         f"# @{profile['name']}",
         "",
@@ -1898,32 +1930,59 @@ def render_profile(profile: dict[str, Any]) -> str:
         f"public_key: {profile['public_key']}",
         f"aliases: {', '.join('@' + alias for alias in aliases) if aliases else '(none)'}",
         f"certification: {role or 'none'}",
-        "",
-        "## identity proof",
-        "",
-        f"claim_post: #{profile['claim_post_id']}"
-        if profile.get("claim_post_id")
-        else "claim_post: (evicted/deleted or migrated)",
-        f"claim_signature: {profile.get('claim_signature') or '(legacy claim; signature unavailable)'}",
-        f"profile_version: {profile.get('profile_version', 0)}",
-        f"profile_signed: {'yes' if profile.get('profile_signed') else 'no'}",
     ]
-    if profile.get("profile_signed"):
+
+    if isinstance(root_ca, dict):
         lines += [
-            f"profile_payload_b64: {profile['profile_payload_b64']}",
-            f"profile_signature: {profile['profile_signature']}",
             "",
-            "verify: base64-decode profile_payload_b64 and verify profile_signature with public_key (Ed25519)",
+            "## root ca",
+            "",
+            "This is the server-managed Root CA trust anchor, not a normal claimed user.",
+            "It is configured directly by the deployment and has no parent issuer.",
+            f"algorithm: {root_ca['algorithm']}",
+            "trust_anchor: /_ca",
+            "audit: /ca",
         ]
     else:
         lines += [
-            "profile_signature: (default profile; not explicitly customized yet)",
             "",
-            "The name binding is still proven by the signed post claim above.",
-            "Customize: /_signing?action=profile.update&key=PUBLIC_KEY&name=NAME&bio=TEXT",
+            "## identity proof",
+            "",
+            f"claim_post: #{profile['claim_post_id']}"
+            if profile.get("claim_post_id")
+            else "claim_post: (evicted/deleted or migrated)",
+            f"claim_signature: {profile.get('claim_signature') or '(legacy claim; signature unavailable)'}",
+            f"profile_version: {profile.get('profile_version', 0)}",
+            f"profile_signed: {'yes' if profile.get('profile_signed') else 'no'}",
         ]
-    return "\n".join(lines) + "\n"
+        if profile.get("profile_signed"):
+            lines += [
+                f"profile_payload_b64: {profile['profile_payload_b64']}",
+                f"profile_signature: {profile['profile_signature']}",
+                "",
+                "verify: base64-decode profile_payload_b64 and verify profile_signature with public_key (Ed25519)",
+            ]
+        else:
+            lines += [
+                "profile_signature: (default profile; not explicitly customized yet)",
+                "",
+                "The name binding is still proven by the signed post claim above.",
+                "Customize: /_signing?action=profile.update&key=PUBLIC_KEY&name=NAME&bio=TEXT",
+            ]
 
+    lines += [
+        "",
+        "## stable resources",
+        "",
+        f"public key: /@{encoded_name}/pubkey",
+        f"author id: /@{encoded_name}/id",
+        f"bio: /@{encoded_name}/bio",
+        f"aliases: /@{encoded_name}/aliases",
+        f"primary certificate/trust anchor: /@{encoded_name}/cert",
+        f"all certificates: /@{encoded_name}/certs",
+        f"active certificate chain: /@{encoded_name}/chain",
+    ]
+    return "\n".join(lines) + "\n"
 
 def render_tags(tags: list[dict[str, Any]]) -> str:
     lines = [
