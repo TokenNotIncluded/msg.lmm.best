@@ -197,14 +197,25 @@ class AdminCliCase(unittest.TestCase):
         policy = set_policy(self.api, self.root_key, "main", 1)
         self.assertEqual(policy["permissions"], 1)
 
+        text = "temporary admin deletion test"
+        signing = self.api.json_get(
+            "/_signing",
+            {
+                "action": "post.create",
+                "key": public_b64(self.root_key),
+                "board": "main",
+                "text": text,
+            },
+        )
         created = self.api.post(
             "/publish",
             {
                 "board": "main",
-                "text": "temporary admin deletion test",
+                "text": text,
                 "key": public_b64(self.root_key),
-                "sig": self._signed_create_sig("main", "temporary admin deletion test"),
-                **self._signed_create_nonce("main", "temporary admin deletion test"),
+                "sig": sign_payload(self.root_key, signing["payload_b64"]),
+                "nonce": signing["nonce"],
+                "issued": str(signing["issued"]),
             },
         )
         post_id = int(
@@ -217,33 +228,6 @@ class AdminCliCase(unittest.TestCase):
         deleted = delete_post(self.api, self.root_key, post_id)
         self.assertIn("action=delete", deleted)
         self.assertIsNone(self.server.board.store.get_post(post_id))
-
-    def _signed_create_material(self, board: str, text: str) -> tuple[dict, str]:
-        signing = self.api.json_get(
-            "/_signing",
-            {
-                "action": "post.create",
-                "key": public_b64(self.root_key),
-                "board": board,
-                "text": text,
-            },
-        )
-        return signing, sign_payload(self.root_key, signing["payload_b64"])
-
-    def _signed_create_sig(self, board: str, text: str) -> str:
-        signing, signature = self._signed_create_material(board, text)
-        self._last_create_signing = signing
-        return signature
-
-    def _signed_create_nonce(self, board: str, text: str) -> dict[str, str]:
-        signing = getattr(self, "_last_create_signing", None)
-        if signing is None:
-            signing, _ = self._signed_create_material(board, text)
-        self._last_create_signing = None
-        return {
-            "nonce": signing["nonce"],
-            "issued": str(signing["issued"]),
-        }
 
     def test_ca_system_post_cannot_be_deleted_even_by_root_cli(self) -> None:
         self.create_csr(Ed25519PrivateKey.generate())
