@@ -406,6 +406,49 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(f"#{pid}", body)
 
+    def test_index_root_and_dimensions(self) -> None:
+        first = self.publish("first")
+        second = self.publish("second")
+
+        status, root = self.c.get("/index")
+        self.assertEqual(status, 200)
+        self.assertIn("/index/by-id", root)
+        self.assertIn("/index/by-time", root)
+        self.assertIn("/index/by-name", root)
+        self.assertNotIn("## recent", root)
+        self.assertNotIn("## hot", root)
+
+        status, by_id = self.c.get("/index/by-id", limit="1")
+        self.assertEqual(status, 200)
+        self.assertIn(f"#{first}", by_id)
+        self.assertNotIn(f"#{second} · /main/{second}", by_id)
+        self.assertIn("next: /index/by-id?", by_id)
+
+        status, by_time = self.c.get("/index/by-time")
+        self.assertEqual(status, 200)
+        self.assertLess(by_time.index(f"#{second}"), by_time.index(f"#{first}"))
+
+        alice = Ed25519PrivateKey.generate()
+        zed = Ed25519PrivateKey.generate()
+        self.issue(self.root_key, alice)
+        self.issue(self.root_key, zed)
+        self.signed_create(alice, "a", name="Alice")
+        self.signed_create(zed, "z", name="Zed")
+
+        status, by_name = self.c.get("/index/by-name")
+        self.assertEqual(status, 200)
+        self.assertLess(by_name.index("Alice"), by_name.index("Zed"))
+        self.assertIn("/@Alice", by_name)
+        self.assertIn("/@Zed", by_name)
+
+        status, machine = self.c.get("/index/by-id", format="json", limit="2")
+        self.assertEqual(status, 200)
+        payload = json.loads(machine)
+        self.assertEqual(payload["type"], "index-page")
+        self.assertEqual(payload["index"], "by-id")
+        self.assertEqual(payload["order"], "asc")
+        self.assertEqual(len(payload["items"]), 2)
+
     def test_search_engine_discovery(self) -> None:
         status, robots = self.c.get("/robots.txt")
         self.assertEqual(status, 200)
