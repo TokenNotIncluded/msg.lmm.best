@@ -109,9 +109,7 @@ class Config:
             webhook_delivery_enabled=get(
                 "webhooks", "delivery_enabled", base.webhook_delivery_enabled
             ),
-            websub_delivery_enabled=get(
-                "websub", "delivery_enabled", base.websub_delivery_enabled
-            ),
+            websub_delivery_enabled=get("websub", "delivery_enabled", base.websub_delivery_enabled),
             websub_default_lease_seconds=get(
                 "websub", "default_lease_seconds", base.websub_default_lease_seconds
             ),
