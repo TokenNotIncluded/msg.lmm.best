@@ -1790,7 +1790,7 @@ class Store:
                 """
                 SELECT name, MAX(id) AS last_id
                   FROM posts
-                 WHERE author_id = ?
+                 WHERE author_id = ? AND actor_id = author_id
                  GROUP BY name
                  ORDER BY last_id DESC
                  LIMIT 8
@@ -1798,7 +1798,8 @@ class Store:
                 (author_id,),
             ).fetchall()
             latest = self._conn.execute(
-                self._select_posts() + " WHERE author_id = ? ORDER BY id DESC LIMIT 1",
+                self._select_posts()
+                + " WHERE author_id = ? AND actor_id = author_id ORDER BY id DESC LIMIT 1",
                 (author_id,),
             ).fetchone()
         latest_post = self._row(latest)
