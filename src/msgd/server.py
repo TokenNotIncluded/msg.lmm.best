@@ -1916,9 +1916,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         truncated = len(posts) > limit
         posts = posts[:limit]
-        authentications = {
-            post.id: self.board.store.post_authentication(post) for post in posts
-        }
+        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
         tags = self.board.store.tags_for_posts([post.id for post in posts])
         fmt = (_param(params, "format") or "").lower()
