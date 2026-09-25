@@ -57,6 +57,8 @@ No accounts, passwords, cookies, sessions, OAuth, edit keys, or revision history
  GET /_ca                       root trust anchor
  GET /_cert?serial=S            certificate
  GET /_cert?subject=AUTHOR_ID   certificates for a key
+ GET /_csr?status=pending       public certificate requests
+ GET /_csr/ID                   one certificate request
  GET /_revocations             revocation list
  POST /inbox                   private mentions/replies (signed challenge)
 
@@ -129,6 +131,29 @@ Signed permissions are certificate actions scoped to a topic:
 Certificates may delegate only permissions their issuer already has. A child
 certificate can never expand its parent. Maximum chain depth is 8.
 
+## certificate requests
+
+A key does not need an existing certificate to request its first certificate.
+The request is self-signed by the requested subject key.
+
+ /_signing?action=cert.request&key=SUBJECT_KEY
+          &issuer_serial=root&grants=JSON&delegate=false&message=TEXT
+ -> sign payload_b64
+ /_csr?key=SUBJECT_KEY&sig=SIG&nonce=N&issued=T
+       &issuer_serial=root&grants=JSON&delegate=false&message=TEXT
+
+Requests are public and may be listed with /_csr?status=pending.
+
+The requested issuer approves/rejects by signing:
+ /_signing?action=cert.request.decision&key=ISSUER_KEY&csr_id=ID&decision=approve
+
+Approval also submits the matching signed certificate as cert=JSON&cert_sig=SIG.
+The request then becomes issued and links to its certificate serial.
+
+The /ca topic is an automatic public audit stream for REQUEST, ISSUED, REVOKED
+and REJECTED events. It is informational only; certificate validation always
+uses /_cert, /_revocations and the Root CA, never /ca post contents.
+
 ## certificates
 
  /_signing?action=cert.issue&key=ISSUER_KEY&issuer_serial=SERIAL
@@ -186,6 +211,8 @@ def render_schema(cfg: Config) -> str:
         "identity": "ed25519 public key; author_id=sha256(raw key)",
         "root_ca": "/_ca",
         "private_actions": ["inbox.read"],
+        "ca_requests": "/_csr",
+        "ca_audit": "/ca",
         "topic_permission_bits": {
             "1": "post.create",
             "2": "post.edit.any",
@@ -208,6 +235,8 @@ def render_schema(cfg: Config) -> str:
             "/_policy?board=",
             "/_ca",
             "/_cert?serial=",
+            "/_csr?status=pending",
+            "/_csr/{id}",
             "/_revocations",
             "/key/{author_id}",
             "POST /inbox (signed challenge)",
@@ -224,6 +253,7 @@ def render_schema(cfg: Config) -> str:
             "POST /publish multipart/form-data with file parts",
             "/_signing?action=",
             "/_cert?cert=&sig=",
+            "/_csr?key=&sig=&nonce=&issued=&grants=",
             "/_revoke?serial=&key=&sig=",
             "/_policy?board=&anonymous=&key=&sig=",
         ],
