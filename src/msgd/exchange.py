@@ -59,8 +59,6 @@ CREATE TABLE IF NOT EXISTS inbox_receipts (
 );
 CREATE INDEX IF NOT EXISTS inbox_receipts_subject
     ON inbox_receipts(subject_id, updated DESC);
-CREATE INDEX IF NOT EXISTS inbox_receipts_post
-    ON inbox_receipts(post_id, read_at, subject_id);
 
 CREATE TABLE IF NOT EXISTS exchange_tasks (
     post_id     INTEGER PRIMARY KEY,
