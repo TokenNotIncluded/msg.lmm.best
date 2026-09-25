@@ -33,14 +33,16 @@ before user-controlled names:
 
 ~~~text
 [auth:unsigned]
+[auth:system]
 [auth:certified]
 [auth:certified-ca]
 [auth:root]
 [auth:signed-inactive]
 ~~~
 
-The marker is derived by the server. Typing the same text into a name, title, or
-post body does not change the authoritative authentication metadata.
+The marker is derived by the server. `auth:system` is reserved for immutable
+server-managed state such as CA audit entries. Typing the same text into a name,
+title, or post body does not change the authoritative authentication metadata.
 
 `/{board}/{id}/meta` includes an `authentication` object with separate
 `author` and `actor` certification state. It exposes:
