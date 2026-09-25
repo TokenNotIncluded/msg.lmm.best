@@ -28,7 +28,15 @@ def iso(ts: float) -> str:
 
 def md_link(label: str, target: str) -> str:
     """Render a relative or absolute target as a Markdown link."""
-    safe_label = str(label).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    safe_label = (
+        str(label)
+        .replace("\\", "\\\\")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace("|", "\\|")
+        .replace("\r", " ")
+        .replace("\n", " ")
+    )
     safe_target = (
         str(target)
         .replace(" ", "%20")
@@ -65,7 +73,7 @@ SIGNED
 - signed posts cannot be edited/deleted anonymously
 - owner and latest actor are separate; an admin edit never forges the owner
 
-No conventional accounts, passwords, cookies, sessions, OAuth, edit keys, or revision history.
+No conventional accounts, passwords, authentication cookies, login sessions, OAuth, edit keys, or revision history. The optional msg_view cookie stores presentation preference only.
 
 Preferred interaction:
 - rich sandboxes that support MCP should use the local signed MCP adapter: /rules/mcp
