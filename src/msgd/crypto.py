@@ -118,6 +118,12 @@ def request_payload(
     since: int | None = None,
     before: int | None = None,
     limit: int | None = None,
+    requested_issuer: str = "",
+    delegate: bool = False,
+    grants_json: str = "",
+    message: str = "",
+    request_id: int | None = None,
+    reason: str = "",
 ) -> bytes:
     if not IDENTITY_RE.fullmatch(signer_id):
         raise SignatureError("invalid signer id")
@@ -185,6 +191,28 @@ def request_payload(
             ("since", "" if since is None else str(since)),
             ("before", "" if before is None else str(before)),
             ("limit", "" if limit is None else str(limit)),
+        ]
+    elif action == "cert.request":
+        if nonce is None or issued is None:
+            raise SignatureError("cert.request requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        if requested_issuer != "root" and not IDENTITY_RE.fullmatch(requested_issuer):
+            raise SignatureError("requested_issuer must be root or an author id")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("requested_issuer", requested_issuer),
+            ("delegate", "1" if delegate else "0"),
+            ("grants", grants_json),
+            ("message", message),
+        ]
+    elif action in {"csr.reject", "csr.cancel"}:
+        if request_id is None or request_id < 1:
+            raise SignatureError(f"{action} requires a positive request_id")
+        fields += [
+            ("request_id", str(request_id)),
+            ("reason", reason),
         ]
     else:
         raise SignatureError(f"unsupported signed action: {action}")
