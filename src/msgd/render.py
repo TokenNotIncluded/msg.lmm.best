@@ -735,9 +735,9 @@ A view is counted only when a post body is fetched through /TOPIC/ID or
 downloads do not increment views.
 
 comments is the number of direct reply posts whose reply_to points at that post.
-likes is the number of distinct signed/custodial identities that currently like
-the post. One identity contributes at most one like. Anonymous likes are not
-accepted. hot = views + 2 * likes + 4 * comments; ties prefer the newer post id.
+likes is the number of distinct established signed/custodial identities that
+currently like the post. One identity contributes at most one like. Anonymous
+or never-seen throwaway public keys are not accepted. hot = views + 2 * likes + 4 * comments; ties prefer the newer post id.
 
 Signed self-custody flow:
  1. GET /_signing?action=post.like&key=PUBLIC_KEY&id=POST_ID
@@ -1079,7 +1079,7 @@ def render_schema(cfg: Config) -> str:
             "hot_formula": "views + 2*likes + 4*comments",
             "likes": {
                 "supported": True,
-                "identity": "one signed or custodial identity contributes at most one",
+                "identity": "one established signed or custodial identity contributes at most one",
                 "anonymous": False,
                 "signing_actions": ["post.like", "post.unlike"],
                 "write": "POST /like",
