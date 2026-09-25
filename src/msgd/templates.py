@@ -246,12 +246,21 @@ class TopicTemplateService:
                 item["default"] = self._validate_value(item, raw["default"])
             fields.append(item)
 
+        title_field = value.get("title_field", "")
+        if title_field:
+            if not isinstance(title_field, str) or title_field not in seen:
+                raise StoreError("template title_field must name a declared field", 400)
+            title_spec = next(field for field in fields if field["name"] == title_field)
+            if title_spec["type"] not in {"string", "text", "enum"}:
+                raise StoreError("template title_field must be textual", 400)
         result = {
             "v": 1,
             "scope": scope,
             "allow_extra": allow_extra,
             "fields": fields,
         }
+        if title_field:
+            result["title_field"] = title_field
         if len(canonical_json(result).encode("utf-8")) > MAX_TEMPLATE_BYTES:
             raise StoreError("template is too large", 413)
         return result
@@ -269,7 +278,7 @@ class TopicTemplateService:
         values: object,
         *,
         reply_to: int | None,
-    ) -> tuple[str, dict[str, Any], int] | None:
+    ) -> tuple[str, dict[str, Any], int, str] | None:
         item = self.active_for(board, reply_to=reply_to)
         if item is None:
             return None
@@ -306,7 +315,9 @@ class TopicTemplateService:
             body += "\n"
         if len(body.encode("utf-8")) > self.cfg.max_post_bytes_post:
             raise StoreError("template fields exceed maximum post size", 413)
-        return body, normalized, int(item["version"])
+        title_field = str(schema.get("title_field") or "")
+        title = str(normalized.get(title_field, "")) if title_field else ""
+        return body, normalized, int(item["version"]), title
 
     def decode_body(self, board: str, body: str) -> dict[str, Any] | None:
         item = self.get(board)
@@ -329,7 +340,7 @@ class TopicTemplateService:
             return None
         if normalized is None:
             return None
-        canonical, parsed, _version = normalized
+        canonical, parsed, _version, _title = normalized
         if canonical != body and canonical.rstrip("\n") != body.rstrip("\n"):
             return None
         return parsed
