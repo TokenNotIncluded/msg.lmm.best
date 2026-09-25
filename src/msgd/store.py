@@ -2107,6 +2107,7 @@ class Store:
             {
                 "serial": "root",
                 "subject_id": root["root_id"],
+                "issuer_serial": None,
                 "issuer_id": None,
                 "delegate": True,
                 "not_before": None,
