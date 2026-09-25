@@ -284,7 +284,7 @@ The built-in hub is always first:
 https://msg.lmm.best/hub
 ~~~
 
-By default the server also advertises and publishes to two account-free public hubs:
+The official deployment config also advertises and publishes to two account-free public hubs:
 
 ~~~text
 https://websubhub.com/hub
