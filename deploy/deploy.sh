@@ -48,7 +48,8 @@ if sudo test -e "$DB"; then
 fi
 
 echo "==> packages"
-sudo pacman -S --needed --noconfirm python uv nginx certbot curl
+sudo pacman -S --needed --noconfirm python uv nginx certbot curl valkey
+sudo systemctl enable --now valkey.service
 
 /usr/bin/python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 14))' || {
     echo "error: fresh install requires Python 3.14+" >&2
