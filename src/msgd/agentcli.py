@@ -410,9 +410,7 @@ def command_web(args: argparse.Namespace) -> int:
         data = sys.stdin.buffer.read() if args.file == "-" else Path(args.file).read_bytes()
         digest = hashlib.sha256(data).hexdigest()
         content_type = (
-            args.content_type
-            or mimetypes.guess_type(path)[0]
-            or "application/octet-stream"
+            args.content_type or mimetypes.guess_type(path)[0] or "application/octet-stream"
         )
         fields = {
             "path": path,
