@@ -412,9 +412,17 @@ class ServerCase(unittest.TestCase):
 
         status, root = self.c.get("/index")
         self.assertEqual(status, 200)
-        self.assertIn("/index/by-id", root)
-        self.assertIn("/index/by-time", root)
-        self.assertIn("/index/by-name", root)
+        for name in (
+            "by-id",
+            "by-time",
+            "by-updated",
+            "by-name",
+            "by-author",
+            "by-board",
+            "by-tag",
+            "by-reply",
+        ):
+            self.assertIn(f"/index/{name}", root)
         self.assertNotIn("## recent", root)
         self.assertNotIn("## hot", root)
 
@@ -432,8 +440,10 @@ class ServerCase(unittest.TestCase):
         zed = Ed25519PrivateKey.generate()
         self.issue(self.root_key, alice)
         self.issue(self.root_key, zed)
-        self.signed_create(alice, "a", name="Alice")
-        self.signed_create(zed, "z", name="Zed")
+        alice_id = public_identity_for_test(alice)
+        zed_id = public_identity_for_test(zed)
+        self.signed_create(alice, "a #z", name="Alice")
+        self.signed_create(zed, "z #a", name="Zed")
 
         status, by_name = self.c.get("/index/by-name")
         self.assertEqual(status, 200)
@@ -441,13 +451,49 @@ class ServerCase(unittest.TestCase):
         self.assertIn("/@Alice", by_name)
         self.assertIn("/@Zed", by_name)
 
-        status, machine = self.c.get("/index/by-id", format="json", limit="2")
+        status, by_author = self.c.get("/index/by-author")
+        self.assertEqual(status, 200)
+        self.assertIn(alice_id, by_author)
+        self.assertIn(zed_id, by_author)
+        self.assertIn(f"/key/{alice_id}", by_author)
+
+        status, by_tag = self.c.get("/index/by-tag")
+        self.assertEqual(status, 200)
+        self.assertLess(by_tag.index("#a"), by_tag.index("#z"))
+        self.assertIn("/tag/a", by_tag)
+        self.assertIn("/tag/z", by_tag)
+
+        status, by_board = self.c.get("/index/by-board")
+        self.assertEqual(status, 200)
+        self.assertIn("/main", by_board)
+        self.assertIn("/guest", by_board)
+
+        status, reply_body = self.c.get(
+            "/publish",
+            board="main",
+            text="r",
+            reply_to=str(first),
+        )
+        self.assertEqual(status, 201, reply_body)
+        status, by_reply = self.c.get("/index/by-reply")
+        self.assertEqual(status, 200)
+        self.assertIn(f"#{first} /main/{first}", by_reply)
+        self.assertIn("replies=1", by_reply)
+
+        status, edit_body = self.c.get("/publish", edit=str(first), text="first")
+        self.assertEqual(status, 200, edit_body)
+        status, by_updated = self.c.get("/index/by-updated")
+        self.assertEqual(status, 200)
+        self.assertLess(by_updated.index(f"#{first}"), by_updated.index(f"#{second}"))
+
+        status, machine = self.c.get("/index/by-tag", format="json", limit="1")
         self.assertEqual(status, 200)
         payload = json.loads(machine)
         self.assertEqual(payload["type"], "index-page")
-        self.assertEqual(payload["index"], "by-id")
+        self.assertEqual(payload["index"], "by-tag")
         self.assertEqual(payload["order"], "asc")
-        self.assertEqual(len(payload["items"]), 2)
+        self.assertEqual(len(payload["items"]), 1)
+        self.assertIn("path", payload["items"][0])
 
     def test_search_engine_discovery(self) -> None:
         status, robots = self.c.get("/robots.txt")
