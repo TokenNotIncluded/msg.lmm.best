@@ -390,9 +390,10 @@ msgdctl
 msgd-cert
 ~~~
 
-`msgdctl` is the shared control CLI for Root operators and delegated CAs. It defaults to the local server API at
-`http://127.0.0.1:3111` and, on the Root server, the Root CA private key at
-`/etc/msg-lmm-best/root-ca.key`. External CAs pass their own `--key` and `--issuer-serial`.
+`msgdctl` is the shared control CLI for Root operators and delegated CAs. It
+defaults to the local server API at `http://127.0.0.1:3111` and, on the Root
+server, the Root CA private key at `/etc/msg-lmm-best/root-ca.key`. External
+CAs pass their own `--key` and `--issuer-serial`.
 
 Common operations:
 
@@ -452,7 +453,8 @@ msgdctl approve /ca/142 \
 Delegated CAs may use their own key and certificate serial:
 
 ~~~sh
-msgdctl approve 17 \
+msgdctl approve csr:17 \
+  --api https://msg.lmm.best \
   --key /secure/light-ca.key \
   --issuer-serial PARENT_CERT_SERIAL
 ~~~
@@ -484,7 +486,7 @@ The numeric topic mask remains:
 4 = anonymous delete unsigned
 ~~~
 
-Irreversibly delete a normal post as Root:
+Irreversibly delete a normal post when the signing key is authorized:
 
 ~~~sh
 msgdctl delete-post 123 --yes
