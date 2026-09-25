@@ -83,6 +83,18 @@ class AgentCliCase(unittest.TestCase):
         self.assertIn("action=create", out)
         post_id = int(dict(line.split("=", 1) for line in out.splitlines() if "=" in line)["id"])
 
+        code, out, err = self.run_cli("like", str(post_id))
+        self.assertEqual(code, 0, err)
+        self.assertIn("action=like", out)
+        self.assertIn("likes=1", out)
+        self.assertEqual(self.server.board.store.like_count(post_id), 1)
+
+        code, out, err = self.run_cli("unlike", str(post_id))
+        self.assertEqual(code, 0, err)
+        self.assertIn("action=unlike", out)
+        self.assertIn("likes=0", out)
+        self.assertEqual(self.server.board.store.like_count(post_id), 0)
+
         code, out, err = self.run_cli("edit", str(post_id), "updated from cli")
         self.assertEqual(code, 0, err)
         self.assertIn("action=edit", out)
@@ -125,6 +137,51 @@ class AgentCliCase(unittest.TestCase):
         )
         self.assertEqual(code, 0, err)
         self.assertIn('"status":"pending"', out)
+
+    def test_exchange_commands(self) -> None:
+        code, out, err = self.run_cli("state", "set", "cursor", '{"last":7}')
+        self.assertEqual(code, 0, err)
+        self.assertIn('"value":"{\\\"last\\\":7}"', out)
+
+        code, out, err = self.run_cli("state", "get", "cursor")
+        self.assertEqual(code, 0, err)
+        self.assertIn('"name":"cursor"', out)
+
+        code, out, err = self.run_cli("watch", "add", "board", "main")
+        self.assertEqual(code, 0, err)
+        watch_id = json.loads(out)["id"]
+
+        code, out, err = self.run_cli("watch", "list")
+        self.assertEqual(code, 0, err)
+        self.assertIn(watch_id, out)
+
+        code, out, err = self.run_cli("post", "main", "task body", "--name", "AgentCli")
+        self.assertEqual(code, 0, err)
+        post_id = int(dict(line.split("=", 1) for line in out.splitlines() if "=" in line)["id"])
+
+        code, out, err = self.run_cli("outbox", "--format", "json")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f'"id":{post_id}', out)
+
+        code, out, err = self.run_cli("task", "open", str(post_id))
+        self.assertEqual(code, 0, err)
+        self.assertIn('"status":"open"', out)
+
+        code, out, err = self.run_cli("task", "list", "--scope", "mine")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f'"post_id":{post_id}', out)
+
+        code, out, err = self.run_cli("thread", str(post_id), "--format", "json")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f'"root_id":{post_id}', out)
+
+        code, out, err = self.run_cli("since", str(post_id - 1), "--format", "json")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f'"id":{post_id}', out)
+
+        code, out, err = self.run_cli("watch", "delete", watch_id)
+        self.assertEqual(code, 0, err)
+        self.assertIn('"deleted":true', out)
 
     def test_git_credential_helper_mints_short_lived_signed_proof(self) -> None:
         host = urllib.parse.urlparse(self.base).netloc
