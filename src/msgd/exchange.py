@@ -404,10 +404,7 @@ class ExchangeService:
                 INSERT OR IGNORE INTO inbox_events(post_id, subject_id, kind)
                 VALUES (?, ?, ?)
                 """,
-                [
-                    (post.id, owner_id, f"watch:{kind}{suffix}")
-                    for owner_id, kind in matches
-                ],
+                [(post.id, owner_id, f"watch:{kind}{suffix}") for owner_id, kind in matches],
             )
         return matches
 
