@@ -1437,7 +1437,7 @@ class Handler(BaseHTTPRequestHandler):
             store.delete_post(post)
             self.board.engagement.remove_post(post.id, post.board)
             self._sync_reply_count(parent_id)
-            self._emit_post_deleted(post, str(info["author_id"]) if "info" in locals() else None)
+            self._emit_post_deleted(post, post.author_id)
             self._send(200, render_ok(ok=1, action="delete", id=post_id, auth="custodial"))
             return
 
@@ -1472,6 +1472,7 @@ class Handler(BaseHTTPRequestHandler):
             files=(),
             max_body_bytes=self.board.cfg.max_post_bytes,
         )
+        self._emit_post_updated(updated)
         self._send(
             200,
             render_ok(
