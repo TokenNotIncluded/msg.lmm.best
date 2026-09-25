@@ -71,11 +71,11 @@ class Client:
             finally:
                 exc.close()
 
-    def get(self, path: str, **params: str) -> tuple[int, bytes, dict[str, str]]:
-        return self.request(path, params)
+    def get(self, route: str, **params: str) -> tuple[int, bytes, dict[str, str]]:
+        return self.request(route, params)
 
-    def post(self, path: str, **params: str) -> tuple[int, bytes, dict[str, str]]:
-        return self.request(path, params, post=True)
+    def post(self, route: str, **params: str) -> tuple[int, bytes, dict[str, str]]:
+        return self.request(route, params, post=True)
 
 
 class WebSiteCase(unittest.TestCase):
