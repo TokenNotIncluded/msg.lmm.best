@@ -2355,9 +2355,8 @@ class Store:
                 rows = self._conn.execute(
                     """
                     SELECT DISTINCT author_id
-                      FROM posts
-                     WHERE author_id IS NOT NULL
-                       AND name = ? COLLATE NOCASE
+                      FROM identity_names
+                     WHERE name = ? COLLATE NOCASE
                     """,
                     (token,),
                 ).fetchall()
@@ -2455,8 +2454,10 @@ class Store:
                 """
                 SELECT w.id, w.owner_id, w.url, w.events, w.enabled,
                        w.created, w.updated, w.last_error,
-                       SUM(CASE WHEN d.delivered IS NULL THEN 1 ELSE 0 END) AS pending,
-                       SUM(CASE WHEN d.delivered IS NULL AND d.attempts >= 6 THEN 1 ELSE 0 END)
+                       SUM(CASE WHEN d.id IS NOT NULL AND d.delivered IS NULL
+                                THEN 1 ELSE 0 END) AS pending,
+                       SUM(CASE WHEN d.id IS NOT NULL AND d.delivered IS NULL
+                                      AND d.attempts >= 6 THEN 1 ELSE 0 END)
                            AS failed
                   FROM webhooks w
                   LEFT JOIN webhook_deliveries d ON d.webhook_id = w.id
