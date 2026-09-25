@@ -726,7 +726,7 @@ def _add_ssh_scope_args(parser: argparse.ArgumentParser, *, default_read: bool =
     group.add_argument(
         "--scope",
         action="append",
-        choices=("read", "write", "social", "repo-read", "repo-write", "profile", "keys", "admin"),
+        choices=("read", "repo-read", "repo-write", "keys", "admin"),
         help="repeat to grant multiple scopes",
     )
     if not default_read:
