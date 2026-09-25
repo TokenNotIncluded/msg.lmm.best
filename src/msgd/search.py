@@ -49,9 +49,7 @@ def _timestamp(value: str, field: str) -> float:
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise SearchSyntaxError(
-            f"{field}: use YYYY-MM-DD, ISO-8601, or unix seconds"
-        ) from exc
+        raise SearchSyntaxError(f"{field}: use YYYY-MM-DD, ISO-8601, or unix seconds") from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.timestamp()
