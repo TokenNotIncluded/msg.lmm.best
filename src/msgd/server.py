@@ -417,7 +417,10 @@ class Handler(BaseHTTPRequestHandler):
             self._webhook(params)
             return
 
-        if head in {"publish", "_cert", "_csr", "_revoke", "_policy", "_profile"} and method == "HEAD":
+        if (
+            head in {"publish", "_cert", "_csr", "_revoke", "_policy", "_profile"}
+            and method == "HEAD"
+        ):
             self._send(
                 405,
                 render_error(405, "HEAD cannot write"),
@@ -658,11 +661,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if not valid_board_name(head) and self.board.store.board_info(head) is None:
-            hint = (
-                f"{head!r} is reserved"
-                if head in RESERVED_BOARDS
-                else board_name_error(head)
-            )
+            hint = f"{head!r} is reserved" if head in RESERVED_BOARDS else board_name_error(head)
             self._error(404, f"no such channel: {head}", hint)
             return
 
@@ -1694,9 +1693,7 @@ class Handler(BaseHTTPRequestHandler):
         posts = self.board.store.posts_by_tag(normalized, limit=limit + 1, order=order)
         truncated = len(posts) > limit
         posts = posts[:limit]
-        authentications = {
-            post.id: self.board.store.post_authentication(post) for post in posts
-        }
+        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
         tags = self.board.store.tags_for_posts([post.id for post in posts])
 
@@ -1984,11 +1981,7 @@ class Handler(BaseHTTPRequestHandler):
                 role=actor_cert.get("role") if isinstance(actor_cert, dict) else None,
                 author_id=post.author_id,
                 name=post.name,
-                profile=(
-                    f"/@{quote(post.name, safe='')}"
-                    if post.author_id is not None
-                    else None
-                ),
+                profile=(f"/@{quote(post.name, safe='')}" if post.author_id is not None else None),
                 files=len(files),
                 evicted=evicted or None,
                 url=f"https://{self.board.cfg.site_name}/{post.board}/{post.id}",
