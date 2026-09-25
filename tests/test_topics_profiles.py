@@ -297,7 +297,8 @@ class TopicsProfilesCase(unittest.TestCase):
             name="Alice",
             bio="not mine",
         )
-        self.assertEqual(status, 403, denied)
+        self.assertEqual(status, 409, denied)
+        self.assertIn(public_b64(self.alice), denied)
 
     def test_hashtag_topics_reindex_search_and_delete(self) -> None:
         status, body = self.c.get(
@@ -340,6 +341,7 @@ class TopicsProfilesCase(unittest.TestCase):
             edit=str(post_id),
             name="Tagger",
             text="replacement #newtopic",
+            title="",
         )
         self.assertEqual(status, 200, edit_body)
 
