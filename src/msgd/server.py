@@ -417,9 +417,7 @@ class Handler(BaseHTTPRequestHandler):
                     store.list_boards(),
                     store.stats(),
                     recent=recent,
-                    authentications={
-                        post.id: store.post_authentication(post) for post in recent
-                    },
+                    authentications={post.id: store.post_authentication(post) for post in recent},
                 ),
             )
             return
