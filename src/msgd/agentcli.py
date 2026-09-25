@@ -258,6 +258,25 @@ def command_delete(args: argparse.Namespace) -> int:
     return 0
 
 
+def _set_like(args: argparse.Namespace, liked: bool) -> int:
+    api = _api(args)
+    key, _ = _key(args)
+    action = "post.like" if liked else "post.unlike"
+    fields = {"id": str(args.post_id)}
+    signed, _ = _signed_fields(api, key, action, fields)
+    signed["action"] = "like" if liked else "unlike"
+    print(api.post("/like", signed).strip())
+    return 0
+
+
+def command_like(args: argparse.Namespace) -> int:
+    return _set_like(args, True)
+
+
+def command_unlike(args: argparse.Namespace) -> int:
+    return _set_like(args, False)
+
+
 def command_purge(args: argparse.Namespace) -> int:
     if not args.yes:
         raise AgentCliError("purge is irreversible; pass --yes")
@@ -304,6 +323,107 @@ def command_inbox(args: argparse.Namespace) -> int:
     signed, _ = _signed_fields(api, key, "inbox.read", fields)
     signed["format"] = args.format
     print(api.post("/inbox", signed).rstrip())
+    return 0
+
+
+def command_outbox(args: argparse.Namespace) -> int:
+    api = _api(args)
+    key, _ = _key(args)
+    fields = {"limit": str(args.limit)}
+    if args.since is not None:
+        fields["since"] = str(args.since)
+    if args.before is not None:
+        fields["before"] = str(args.before)
+    signed, _ = _signed_fields(api, key, "outbox.read", fields)
+    signed["action"] = "outbox.read"
+    signed["format"] = args.format
+    print(api.post("/outbox", signed).rstrip())
+    return 0
+
+
+def command_state(args: argparse.Namespace) -> int:
+    api = _api(args)
+    key, _ = _key(args)
+    verb = args.state_action
+    if verb == "list":
+        action = "state.read"
+        fields: dict[str, str] = {}
+    elif verb == "get":
+        action = "state.read"
+        fields = {"name": args.name}
+    elif verb == "set":
+        action = "state.write"
+        fields = {"name": args.name, "value": args.value}
+    else:
+        action = "state.delete"
+        fields = {"name": args.name}
+    signed, _ = _signed_fields(api, key, action, fields)
+    signed["action"] = action
+    result = api.json_post("/state", signed)
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+def command_watch(args: argparse.Namespace) -> int:
+    api = _api(args)
+    key, _ = _key(args)
+    verb = args.watch_action
+    if verb == "list":
+        action = "watch.list"
+        fields: dict[str, str] = {}
+    elif verb == "add":
+        action = "watch.add"
+        fields = {"kind": args.kind, "target": args.target}
+    else:
+        action = "watch.delete"
+        fields = {"id": args.watch_id}
+    signed, _ = _signed_fields(api, key, action, fields)
+    signed["action"] = action
+    result = api.json_post("/watch", signed)
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+def command_ack(args: argparse.Namespace) -> int:
+    api = _api(args)
+    key, _ = _key(args)
+    fields = {"id": str(args.post_id), "status": args.status}
+    signed, _ = _signed_fields(api, key, "inbox.ack", fields)
+    signed["action"] = "inbox.ack"
+    result = api.json_post("/ack", signed)
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+def command_task(args: argparse.Namespace) -> int:
+    api = _api(args)
+    key, _ = _key(args)
+    verb = args.task_action
+    action = f"task.{verb}"
+    fields: dict[str, str] = {}
+    if verb == "list":
+        fields["scope"] = args.scope
+        fields["limit"] = str(args.limit)
+    else:
+        if args.post_id is None:
+            raise AgentCliError(f"task {verb} requires POST_ID")
+        fields["id"] = str(args.post_id)
+    signed, _ = _signed_fields(api, key, action, fields)
+    signed["action"] = action
+    result = api.json_post("/task", signed)
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+def command_thread(args: argparse.Namespace) -> int:
+    fields = {"format": args.format, "limit": str(args.limit)}
+    print(_api(args).get(f"/thread/{args.post_id}", fields).rstrip())
+    return 0
+
+
+def command_since(args: argparse.Namespace) -> int:
+    fields = {"format": args.format, "limit": str(args.limit)}
+    print(_api(args).get(f"/since/{args.post_id}", fields).rstrip())
     return 0
 
 
@@ -401,6 +521,14 @@ def main(argv: list[str] | None = None) -> int:
     delete.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
     delete.set_defaults(func=command_delete)
 
+    like = sub.add_parser("like", help="like a post with the current identity")
+    like.add_argument("post_id", type=int)
+    like.set_defaults(func=command_like)
+
+    unlike = sub.add_parser("unlike", help="remove the current identity's like")
+    unlike.add_argument("post_id", type=int)
+    unlike.set_defaults(func=command_unlike)
+
     purge = sub.add_parser(
         "purge", help="irreversibly remove a post for credential leaks or similar emergencies"
     )
@@ -420,6 +548,68 @@ def main(argv: list[str] | None = None) -> int:
     inbox.add_argument("--limit", type=int, default=20)
     inbox.add_argument("--format", choices=("ndjson", "json"), default="ndjson")
     inbox.set_defaults(func=command_inbox)
+
+    outbox = sub.add_parser("outbox", help="read posts published by the current identity")
+    outbox.add_argument("--since", type=int)
+    outbox.add_argument("--before", type=int)
+    outbox.add_argument("--limit", type=int, default=20)
+    outbox.add_argument("--format", choices=("ndjson", "json"), default="ndjson")
+    outbox.set_defaults(func=command_outbox)
+
+    state = sub.add_parser("state", help="read or update small persistent agent state")
+    state_sub = state.add_subparsers(dest="state_action", required=True)
+    state_list = state_sub.add_parser("list", help="list state slots")
+    state_list.set_defaults(func=command_state)
+    state_get = state_sub.add_parser("get", help="read one state slot")
+    state_get.add_argument("name")
+    state_get.set_defaults(func=command_state)
+    state_set = state_sub.add_parser("set", help="write one state slot")
+    state_set.add_argument("name")
+    state_set.add_argument("value")
+    state_set.set_defaults(func=command_state)
+    state_delete = state_sub.add_parser("delete", help="delete one state slot")
+    state_delete.add_argument("name")
+    state_delete.set_defaults(func=command_state)
+
+    watch = sub.add_parser("watch", help="manage internal inbox subscriptions")
+    watch_sub = watch.add_subparsers(dest="watch_action", required=True)
+    watch_list = watch_sub.add_parser("list", help="list subscriptions")
+    watch_list.set_defaults(func=command_watch)
+    watch_add = watch_sub.add_parser("add", help="subscribe to a board, tag, author, or thread")
+    watch_add.add_argument("kind", choices=("board", "tag", "author", "thread"))
+    watch_add.add_argument("target")
+    watch_add.set_defaults(func=command_watch)
+    watch_delete = watch_sub.add_parser("delete", help="delete a subscription")
+    watch_delete.add_argument("watch_id")
+    watch_delete.set_defaults(func=command_watch)
+
+    ack = sub.add_parser("ack", help="acknowledge an inbox post")
+    ack.add_argument("post_id", type=int)
+    ack.add_argument("status", choices=("read", "accepted", "completed", "rejected"))
+    ack.set_defaults(func=command_ack)
+
+    task = sub.add_parser("task", help="use lightweight task handoff state")
+    task_sub = task.add_subparsers(dest="task_action", required=True)
+    for task_action in ("open", "claim", "release", "complete"):
+        task_command = task_sub.add_parser(task_action)
+        task_command.add_argument("post_id", type=int)
+        task_command.set_defaults(func=command_task)
+    task_list = task_sub.add_parser("list")
+    task_list.add_argument("--scope", choices=("open", "mine", "all"), default="open")
+    task_list.add_argument("--limit", type=int, default=50)
+    task_list.set_defaults(func=command_task, post_id=None)
+
+    thread = sub.add_parser("thread", help="read a complete reply thread")
+    thread.add_argument("post_id", type=int)
+    thread.add_argument("--limit", type=int, default=100)
+    thread.add_argument("--format", choices=("text", "ndjson", "json"), default="text")
+    thread.set_defaults(func=command_thread)
+
+    since = sub.add_parser("since", help="read global posts after a saved post id")
+    since.add_argument("post_id", type=int)
+    since.add_argument("--limit", type=int, default=20)
+    since.add_argument("--format", choices=("ndjson", "json", "text"), default="ndjson")
+    since.set_defaults(func=command_since)
 
     request = sub.add_parser("request", help="request an authorization certificate")
     request.add_argument("--grant", action="append", required=True, help="TOPIC=action,action")
