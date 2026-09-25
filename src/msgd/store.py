@@ -664,6 +664,137 @@ class Store:
             return False
         return action in set(self.policy(board)["anonymous"])
 
+    def create_certificate_request(
+        self,
+        *,
+        subject_key: str,
+        issuer_serial: str,
+        delegate: bool,
+        grants: str,
+        message: str,
+        signature: str,
+        nonce: str,
+        issued: int,
+    ) -> dict[str, Any]:
+        canonical_key, subject_id = public_identity(subject_key)
+        now = int(time.time())
+        if abs(now - issued) > 300:
+            raise StoreError("certificate request timestamp is outside the 5 minute window", 400)
+        if len(message.encode("utf-8")) > 4096:
+            raise StoreError("certificate request message is too long", 413)
+
+        auth = SignedRequest(
+            public_key=canonical_key,
+            signer_id=subject_id,
+            signature=signature,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        self.consume_nonce(auth)
+        created = time.time()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                INSERT INTO certificate_requests(
+                    subject_id, subject_key, issuer_serial, delegate, grants,
+                    message, signature, nonce, issued, status, created, updated
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    subject_id,
+                    canonical_key,
+                    issuer_serial,
+                    1 if delegate else 0,
+                    grants,
+                    message,
+                    signature,
+                    nonce,
+                    issued,
+                    created,
+                    created,
+                ),
+            )
+            csr_id = int(cur.lastrowid or 0)
+        row = self.certificate_request(csr_id)
+        assert row is not None
+        return row
+
+    def certificate_request(self, csr_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, subject_id, subject_key, issuer_serial, delegate,
+                       grants, message, signature, nonce, issued, status,
+                       certificate, decided_by, created, updated
+                  FROM certificate_requests
+                 WHERE id = ?
+                """,
+                (csr_id,),
+            ).fetchone()
+        return self._csr_row(row) if row else None
+
+    def certificate_requests(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        where = ""
+        params: list[Any] = []
+        if status:
+            if status not in {"pending", "issued", "rejected"}:
+                raise StoreError("invalid certificate request status", 400)
+            where = " WHERE status = ?"
+            params.append(status)
+        params.append(max(1, min(limit, self.cfg.max_limit)))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, subject_id, subject_key, issuer_serial, delegate,
+                       grants, message, signature, nonce, issued, status,
+                       certificate, decided_by, created, updated
+                  FROM certificate_requests
+                """
+                + where
+                + " ORDER BY id DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [self._csr_row(row) for row in rows]
+
+    def decide_certificate_request(
+        self,
+        csr_id: int,
+        *,
+        signer_id: str,
+        decision: str,
+        certificate_serial: str | None = None,
+    ) -> dict[str, Any]:
+        if decision not in {"approve", "reject"}:
+            raise StoreError("decision must be approve or reject", 400)
+        current = self.certificate_request(csr_id)
+        if current is None:
+            raise StoreError("certificate request not found", 404)
+        if current["status"] != "pending":
+            raise StoreError("certificate request is already decided", 409)
+
+        status = "issued" if decision == "approve" else "rejected"
+        now = time.time()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                UPDATE certificate_requests
+                   SET status = ?, certificate = ?, decided_by = ?, updated = ?
+                 WHERE id = ? AND status = 'pending'
+                """,
+                (status, certificate_serial, signer_id, now, csr_id),
+            )
+            if cur.rowcount != 1:
+                raise StoreError("certificate request changed", 409)
+        row = self.certificate_request(csr_id)
+        assert row is not None
+        return row
+
     def register_certificate(self, body: str, signature: str) -> Certificate:
         try:
             cert = parse_certificate(body)
@@ -1317,6 +1448,30 @@ class Store:
                 raise StoreError(f"issuer cannot issue for topic {topic}", 403)
             if not set(child_actions).issubset(parent_actions):
                 raise StoreError(f"child grant exceeds issuer grant for topic {topic}", 403)
+
+    @staticmethod
+    def _csr_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "subject_id": str(row["subject_id"]),
+            "subject_key": str(row["subject_key"]),
+            "issuer_serial": str(row["issuer_serial"]),
+            "delegate": bool(row["delegate"]),
+            "grants": json.loads(str(row["grants"])),
+            "message": str(row["message"]),
+            "signature": str(row["signature"]),
+            "nonce": str(row["nonce"]),
+            "issued": int(row["issued"]),
+            "status": str(row["status"]),
+            "certificate": (
+                str(row["certificate"]) if row["certificate"] is not None else None
+            ),
+            "decided_by": (
+                str(row["decided_by"]) if row["decided_by"] is not None else None
+            ),
+            "created": float(row["created"]),
+            "updated": float(row["updated"]),
+        }
 
     @staticmethod
     def _select_posts() -> str:
