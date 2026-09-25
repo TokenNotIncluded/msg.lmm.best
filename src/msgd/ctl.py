@@ -295,9 +295,7 @@ def set_policy(
         raise ControlError("provide anonymous permissions, --signed, or both")
     if permissions is not None and not 0 <= permissions <= 7:
         raise ControlError("legacy anonymous permissions must be between 0 and 7")
-    if signed_permissions is not None and (
-        signed_permissions < 0 or signed_permissions & ~11
-    ):
+    if signed_permissions is not None and (signed_permissions < 0 or signed_permissions & ~11):
         raise ControlError("signed permissions may use only bits 1, 2, and 8")
     public, _ = _identity(key)
     fields = {
