@@ -1408,6 +1408,7 @@ class LegacyMigrationCase(unittest.TestCase):
                 self.assertIn("actor_id", columns)
                 self.assertIn("reply_to", columns)
                 self.assertIn("certificates", tables)
+                self.assertIn("certificate_requests", tables)
                 self.assertIn("revocations", tables)
                 self.assertIn("topic_policies", tables)
                 self.assertIn("inbox_events", tables)
