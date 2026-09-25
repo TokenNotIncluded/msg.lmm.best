@@ -1208,7 +1208,9 @@ class Handler(BaseHTTPRequestHandler):
                 "public_key": canonical_key,
                 "name": profile.get("name") if profile else None,
                 "profile": (
-                    f"/@{quote(str(profile['name']), safe='')}" if profile and profile.get("name") else None
+                    f"/@{quote(str(profile['name']), safe='')}"
+                    if profile and profile.get("name")
+                    else None
                 ),
             }
 
