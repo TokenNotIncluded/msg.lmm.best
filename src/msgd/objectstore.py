@@ -150,6 +150,7 @@ class GitObjectStore:
         parent: str | None = None,
         timestamp: float | None = None,
         message: str = "store post revision",
+        activate: bool = True,
     ) -> ContentRevision:
         if post_id < 1:
             raise ObjectStoreError("post id must be positive")
@@ -188,9 +189,17 @@ class GitObjectStore:
                 .decode()
                 .strip()
             )
-            ref = f"refs/msg/posts/{post_id}"
-            self._run(["update-ref", ref, commit_oid])
+            if activate:
+                self.set_post_ref(post_id, commit_oid)
             return ContentRevision(commit_oid, body_oid, attachment_oids)
+
+    def set_post_ref(self, post_id: int, commit_oid: str) -> None:
+        if post_id < 1:
+            raise ObjectStoreError("post id must be positive")
+        commit_oid = self._oid(commit_oid)
+        with self._lock:
+            self._run(["cat-file", "-e", f"{commit_oid}^{commit}"])
+            self._run(["update-ref", f"refs/msg/posts/{post_id}", commit_oid])
 
     def delete_post_ref(self, post_id: int) -> None:
         if post_id < 1 or not self.available:
