@@ -11,7 +11,7 @@ import ssl
 import threading
 import time
 from contextlib import suppress
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from msgd.config import Config
 from msgd.render import render_rss
@@ -122,22 +122,21 @@ def _verification_url(
     lease_seconds: int,
 ) -> str:
     parsed = urlsplit(callback)
-    query = parse_qsl(parsed.query, keep_blank_values=True)
-    query.extend(
-        [
-            ("hub.mode", mode),
-            ("hub.topic", topic),
-            ("hub.challenge", challenge),
-        ]
-    )
+    fields = [
+        ("hub.mode", mode),
+        ("hub.topic", topic),
+        ("hub.challenge", challenge),
+    ]
     if mode == "subscribe":
-        query.append(("hub.lease_seconds", str(lease_seconds)))
+        fields.append(("hub.lease_seconds", str(lease_seconds)))
+    verification_query = urlencode(fields)
+    query = f"{parsed.query}&{verification_query}" if parsed.query else verification_query
     return urlunsplit(
         (
             parsed.scheme,
             parsed.netloc,
             parsed.path,
-            urlencode(query),
+            query,
             parsed.fragment,
         )
     )
