@@ -30,6 +30,7 @@ class Config:
     websub_delivery_enabled: bool = True
     websub_default_lease_seconds: int = 864_000
     websub_max_lease_seconds: int = 2_592_000
+    websub_public_hubs: str = "https://pubsubhubbub.appspot.com/"
 
     # Public Git repositories. Empty root derives from the database directory.
     repo_root: str = ""
@@ -116,6 +117,7 @@ class Config:
             websub_max_lease_seconds=get(
                 "websub", "max_lease_seconds", base.websub_max_lease_seconds
             ),
+            websub_public_hubs=get("websub", "public_hubs", base.websub_public_hubs),
             repo_root=get("repos", "root", base.repo_root),
             repo_max_blob_bytes=get("repos", "max_blob_bytes", base.repo_max_blob_bytes),
             repo_auth_ttl_seconds=get("repos", "auth_ttl_seconds", base.repo_auth_ttl_seconds),
@@ -153,6 +155,14 @@ class Config:
         )
         cfg.validate()
         return cfg
+
+    def websub_hub_urls(self) -> tuple[str, ...]:
+        hubs = [f"https://{self.site_name}/hub"]
+        for value in self.websub_public_hubs.replace("\n", ",").split(","):
+            hub = value.strip()
+            if hub and hub not in hubs:
+                hubs.append(hub)
+        return tuple(hubs)
 
     def validate(self) -> None:
         if not (0 <= self.port <= 65535):
