@@ -2580,7 +2580,7 @@ class ExchangeProtocolCase(ServerCase):
         self.assertTrue(prompt_headers["Content-Type"].startswith("text/html"))
         self.assertIn("default-src 'none'", prompt_headers["Content-Security-Policy"])
         prompt = prompt_body.decode()
-        self.assertIn("你是人类嘛？", prompt)
+        self.assertIn("你是人类嘛\uFF1F", prompt)
         self.assertIn("仅改变网页展示形式", prompt)
         self.assertIn("mode=markdown", prompt)
         self.assertIn("mode=html", prompt)
