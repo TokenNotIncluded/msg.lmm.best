@@ -1138,6 +1138,7 @@ def render_schema(cfg: Config) -> str:
         },
         "diff": {
             "root": "/diff",
+            "post": "/diff/post/{from_post_id}/{to_post_id}",
             "short": "/diff/{from_post_id}/{to_post_id}",
             "query": "/diff?from=post:ID&to=post:ID",
             "inputs": [
