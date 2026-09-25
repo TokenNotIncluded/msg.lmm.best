@@ -1010,8 +1010,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if action == "topic.policy":
             board = _required(params, "board")
-        if board != board.lower():
-            raise StoreError("channel name must be lowercase", 400)
+            if board != board.lower():
+                raise StoreError("channel name must be lowercase", 400)
+            if not valid_board_name(board):
+                raise StoreError(board_name_error(board), 400)
             if board == "ca":
                 raise StoreError("/ca policy is system-managed", 403)
             anonymous = _topic_permissions(params)
