@@ -19,6 +19,7 @@ CERT_MAGIC = b"msg.lmm.best/cert/v1\n"
 SERIAL_RE = re.compile(r"^[0-9a-f]{32}$")
 IDENTITY_RE = re.compile(r"^[0-9a-f]{64}$")
 NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 ACTIONS = frozenset(
     {
@@ -30,6 +31,8 @@ ACTIONS = frozenset(
         "topic.policy",
         "cert.issue",
         "cert.revoke",
+        "web.write",
+        "web.delete",
     }
 )
 
@@ -150,6 +153,10 @@ def request_payload(
     keystore_name: str = "",
     keystore_ciphertext: str = "",
     keystore_sha256: str = "",
+    web_path: str = "",
+    web_sha256: str = "",
+    web_bytes: int | None = None,
+    web_content_type: str = "",
 ) -> bytes:
     if not IDENTITY_RE.fullmatch(signer_id):
         raise SignatureError("invalid signer id")
@@ -346,6 +353,26 @@ def request_payload(
             ("webhook_events", canonical_json(sorted(webhook_events))),
             ("webhook_enabled", "1" if webhook_enabled else "0"),
         ]
+    elif action in {"web.write", "web.delete"}:
+        if nonce is None or issued is None:
+            raise SignatureError(f"{action} requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("web_path", web_path),
+        ]
+        if action == "web.write":
+            if web_bytes is None or web_bytes < 0:
+                raise SignatureError("web.write requires a non-negative byte count")
+            if not SHA256_RE.fullmatch(web_sha256):
+                raise SignatureError("web.write requires a lowercase sha256")
+            fields += [
+                ("web_sha256", web_sha256),
+                ("web_bytes", str(web_bytes)),
+                ("web_content_type", web_content_type),
+            ]
     elif action == "profile.update":
         if nonce is None or issued is None:
             raise SignatureError("profile.update requires nonce and issued")
@@ -441,6 +468,8 @@ def parse_certificate(body: str) -> Certificate:
         for action in actions:
             if not isinstance(action, str) or action not in ACTIONS:
                 raise SignatureError(f"invalid grant action: {action!r}")
+            if action.startswith("web.") and topic != "*":
+                raise SignatureError("web grants require topic='*'")
             current.add(action)
 
     normalized_grants = [

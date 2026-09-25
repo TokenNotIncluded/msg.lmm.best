@@ -86,6 +86,7 @@ from msgd.store import (
     valid_board_name,
 )
 from msgd.webhooks import WebhookService, normalize_events, validate_webhook_url
+from msgd.websites import WebSiteService
 from msgd.websub import WebSubService
 
 Params = dict[str, list[str]]
@@ -152,6 +153,7 @@ class Board:
         self.store = Store(cfg)
         self.exchange = ExchangeService(cfg, self.store)
         self.repos = RepoService(cfg)
+        self.web = WebSiteService(cfg, self.store)
         self.ssh_keys = SSHKeyStore(cfg)
         self.engagement = Engagement(cfg.valkey_url, prefix=cfg.valkey_prefix)
         if cfg.valkey_required and not self.engagement.available:
@@ -707,6 +709,7 @@ class Handler(BaseHTTPRequestHandler):
                 "_policy",
                 "_profile",
                 "_keystore",
+                "_web",
                 "_ssh",
             }
             and method == "HEAD"
@@ -758,6 +761,18 @@ class Handler(BaseHTTPRequestHandler):
             if self._limited(True):
                 return
             self._keystore(params)
+            return
+        if head == "_web":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "signed POST required"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            if self._limited(True):
+                return
+            self._web(params)
             return
         if head == "_ca":
             info = self.board.store.root_info()
@@ -990,12 +1005,8 @@ class Handler(BaseHTTPRequestHandler):
             self._search(params)
             return
         if head.startswith("@"):
-            if len(head) < 2 or len(segments) > 3:
-                self._error(
-                    404,
-                    "invalid profile path",
-                    "try /@NAME, /@NAME/pubkey, or /@NAME/keystore/ENTRY",
-                )
+            if len(head) < 2:
+                self._error(404, "invalid profile path", "try /@NAME")
                 return
             profile = self.board.store.profile_by_name(head[1:])
             if profile is None:
@@ -1009,6 +1020,37 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             resource = segments[1].casefold()
+            if resource == "w":
+                if method not in {"GET", "HEAD"}:
+                    self._send(
+                        405,
+                        render_error(405, "static web paths are read-only; use signed POST /_web"),
+                        extra_headers={"Allow": "GET, HEAD"},
+                    )
+                    return
+                site_path = "/".join(segments[2:])
+                web_file = self.board.web.read(str(profile["author_id"]), site_path)
+                if web_file is None:
+                    self._error(404, "web file not found")
+                    return
+                self._send(
+                    200,
+                    web_file.data,
+                    content_type=web_file.content_type,
+                    extra_headers={
+                        "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-downloads",
+                        "X-Web-Owner": str(profile["author_id"]),
+                    },
+                )
+                return
+
+            if len(segments) > 3:
+                self._error(
+                    404,
+                    "invalid profile path",
+                    "try /@NAME, /@NAME/pubkey, /@NAME/w/, or /@NAME/keystore/ENTRY",
+                )
+                return
             if len(segments) == 3 and resource != "keystore":
                 self._error(404, f"profile resource has no child path: {resource}")
                 return
@@ -1868,6 +1910,66 @@ class Handler(BaseHTTPRequestHandler):
                     "public_key": curve25519_public_key(canonical_key),
                     "format": KEYSTORE_FORMAT,
                     "sha256": digest or None,
+                    **payload_info(payload),
+                },
+            )
+            return
+
+        if action in {"web.write", "web.delete"}:
+            if store.profile_by_author(signer_id) is None:
+                raise StoreError("web hosting requires an established signed profile", 403)
+            if not self.board.web.allowed(signer_id, action):
+                raise StoreError(f"certificate does not grant {action}", 403)
+            web_path = self.board.web.normalize_path(_required(params, "path"))
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            web_sha256 = ""
+            web_bytes: int | None = None
+            web_content_type = ""
+            if action == "web.write":
+                web_sha256 = (_required(params, "sha256") or "").lower()
+                if not PATH_GET_SHA256_RE.fullmatch(web_sha256):
+                    raise StoreError("sha256 must be 64 lowercase hex characters", 400)
+                web_bytes = _int_required(params, "bytes")
+                if web_bytes < 0:
+                    raise StoreError("bytes must be non-negative", 400)
+                if web_bytes > self.board.cfg.web_max_site_bytes:
+                    raise StoreError(
+                        f"web file exceeds per-site quota={self.board.cfg.web_max_site_bytes}",
+                        413,
+                    )
+                web_content_type = (
+                    _param(params, "content_type") or "application/octet-stream"
+                ).strip()
+                if (
+                    not web_content_type
+                    or len(web_content_type) > 255
+                    or any(ord(ch) < 32 or ord(ch) == 127 for ch in web_content_type)
+                ):
+                    raise StoreError("invalid web content_type", 400)
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+                web_path=web_path,
+                web_sha256=web_sha256,
+                web_bytes=web_bytes,
+                web_content_type=web_content_type,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "version": 1,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "path": web_path,
+                    "sha256": web_sha256 or None,
+                    "bytes": web_bytes,
+                    "content_type": web_content_type or None,
+                    "quota_bytes": self.board.cfg.web_max_site_bytes,
                     **payload_info(payload),
                 },
             )
@@ -2748,6 +2850,92 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, result)
             return
         self._json(200, store.keystore_delete(auth=auth, name=name))
+
+    def _web(self, params: Params) -> None:
+        action = _required(params, "action")
+        if action not in {"web.write", "web.delete"}:
+            raise StoreError("invalid web action", 400)
+
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        nonce = _required(params, "nonce")
+        issued = _int_required(params, "issued")
+        version = _int_required(params, "version")
+        if version != 1:
+            raise StoreError("web action version must be 1", 400)
+
+        canonical_key, signer_id = public_identity(key)
+        profile = self.board.store.profile_by_author(signer_id)
+        if profile is None:
+            raise StoreError("web hosting requires an established signed profile", 403)
+        if not self.board.web.allowed(signer_id, action):
+            raise StoreError(f"certificate does not grant {action}", 403)
+
+        web_path = self.board.web.normalize_path(_required(params, "path"))
+        web_sha256 = ""
+        web_bytes: int | None = None
+        web_content_type = ""
+        data = b""
+
+        if action == "web.write":
+            encoded = _param(params, "content_b64")
+            if encoded is None:
+                raise StoreError("content_b64 is required", 400)
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise StoreError("content_b64 must be valid base64", 400) from exc
+            web_bytes = len(data)
+            if web_bytes > self.board.cfg.web_max_site_bytes:
+                raise StoreError(
+                    f"web file exceeds per-site quota={self.board.cfg.web_max_site_bytes}",
+                    413,
+                )
+            web_sha256 = hashlib.sha256(data).hexdigest()
+            web_content_type = (
+                _param(params, "content_type") or "application/octet-stream"
+            ).strip()
+            if (
+                not web_content_type
+                or len(web_content_type) > 255
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in web_content_type)
+            ):
+                raise StoreError("invalid web content_type", 400)
+
+        payload = request_payload(
+            action=action,
+            signer_id=signer_id,
+            version=version,
+            nonce=nonce,
+            issued=issued,
+            web_path=web_path,
+            web_sha256=web_sha256,
+            web_bytes=web_bytes,
+            web_content_type=web_content_type,
+        )
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=version,
+            nonce=nonce,
+            issued=issued,
+        )
+
+        if action == "web.write":
+            result = self.board.web.write(
+                auth=auth,
+                path=web_path,
+                data=data,
+                content_type=web_content_type,
+            )
+        else:
+            result = self.board.web.delete(auth=auth, path=web_path)
+
+        result["owner"] = str(profile["name"])
+        result["url"] = f"/@{quote(str(profile['name']), safe='')}/w/{quote(web_path, safe='/')}"
+        result.update(self._write_client_metadata(params))
+        self._json(200, result)
 
     def _profile_update(self, params: Params) -> None:
         key = _required(params, "key")
@@ -5874,6 +6062,8 @@ def _grants(value: str) -> dict[str, tuple[str, ...]]:
         invalid = set(normalized) - ACTIONS
         if invalid:
             raise StoreError(f"unknown grant actions: {sorted(invalid)}", 400)
+        if item["topic"] != "*" and any(action.startswith("web.") for action in normalized):
+            raise StoreError("web grants require topic='*'", 400)
         grants[item["topic"]] = normalized
     return grants
 
