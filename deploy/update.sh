@@ -62,7 +62,7 @@ command -v uv >/dev/null || {
 }
 
 echo "==> Valkey"
-sudo pacman -S --needed --noconfirm valkey
+sudo pacman -S --needed --noconfirm valkey git
 sudo systemctl enable --now valkey.service
 test -x /usr/bin/python3 || {
     echo "error: /usr/bin/python3 is missing" >&2
@@ -97,6 +97,18 @@ if ! sudo grep -q '^\[analytics\]' "$CONFIG"; then
 valkey_url = redis://127.0.0.1:6379/0
 valkey_prefix = msgd
 valkey_required = true
+EOF
+fi
+
+if ! sudo grep -q '^\[repos\]' "$CONFIG"; then
+    echo "==> enable public Git repositories"
+    sudo tee -a "$CONFIG" >/dev/null <<'EOF'
+
+[repos]
+root = /var/lib/msg-lmm-best/repos
+max_blob_bytes = 1048576
+auth_ttl_seconds = 300
+max_request_bytes = 67108864
 EOF
 fi
 

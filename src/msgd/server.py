@@ -31,6 +31,7 @@ from msgd.crypto import (
     request_payload,
     signed_request,
 )
+from msgd.gitrepos import GitBackendResponse, RepoService
 from msgd.ratelimit import Limiter
 from msgd.render import (
     posts_to_ndjson,
@@ -130,6 +131,7 @@ class Board:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.store = Store(cfg)
+        self.repos = RepoService(cfg)
         self.engagement = Engagement(cfg.valkey_url, prefix=cfg.valkey_prefix)
         if cfg.valkey_required and not self.engagement.available:
             raise RuntimeError(
@@ -230,6 +232,43 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(payload)
+
+    def _send_git_response(self, response: GitBackendResponse) -> None:
+        try:
+            self.send_response(response.status)
+            self.send_header("Content-Type", response.content_type)
+            self.send_header("Content-Length", str(response.content_length))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Access-Control-Allow-Origin", self.board.cfg.cors_origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            self.send_header(
+                "Link",
+                '</rules>; rel="help", '
+                '</rss.xml>; rel="alternate"; type="application/rss+xml"; title="RSS"',
+            )
+            has_cache_control = False
+            for key, value in response.headers:
+                lower = key.lower()
+                if lower == "cache-control":
+                    has_cache_control = True
+                if lower not in {
+                    "content-type",
+                    "content-length",
+                    "connection",
+                    "transfer-encoding",
+                    "status",
+                }:
+                    self.send_header(key, value)
+            if not has_cache_control:
+                self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command != "HEAD":
+                while chunk := response.body.read(65_536):
+                    self.wfile.write(chunk)
+        finally:
+            response.body.close()
 
     def _json(self, status: int, value: Any) -> None:
         self._send(
@@ -382,6 +421,18 @@ class Handler(BaseHTTPRequestHandler):
         path = unquote(parsed.path or "/")
         params = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=80)
         uploads: Uploads = ()
+
+        if self.board.repos.is_transport_path(path):
+            try:
+                self._git_transport(method, path, parsed.query)
+            except StoreError as exc:
+                self._error(exc.status, str(exc), exc.hint)
+            except BrokenPipeError:
+                return
+            except Exception as exc:
+                log("error", "unhandled Git exception", path=path, error=repr(exc))
+                self._error(500, "internal Git error")
+            return
 
         if method == "POST":
             try:
@@ -662,6 +713,17 @@ class Handler(BaseHTTPRequestHandler):
         if self._limited(False):
             return
 
+        if head == "repos":
+            if method not in {"GET", "HEAD"}:
+                self._send(
+                    405,
+                    render_error(405, "/repos is read-only over HTTP; use Git push for writes"),
+                    extra_headers={"Allow": "GET, HEAD"},
+                )
+                return
+            self._repositories(segments, params)
+            return
+
         if not head:
             store = self.board.store
             stats = store.stats()
@@ -840,6 +902,148 @@ class Handler(BaseHTTPRequestHandler):
             )
         else:
             self._error(404, f"unknown action: {action}", "try /raw or /meta")
+
+    def _git_audience(self) -> str:
+        host = (self.headers.get("Host") or self.board.cfg.site_name).strip()
+        try:
+            audience = urlparse("//" + host).hostname or self.board.cfg.site_name
+        except ValueError:
+            audience = self.board.cfg.site_name
+        return audience.lower()
+
+    def _git_transport(self, method: str, path: str, query: str) -> None:
+        if method not in {"GET", "HEAD", "POST"}:
+            self._send(
+                405,
+                render_error(405, "unsupported Git HTTP method"),
+                extra_headers={"Allow": "GET, HEAD, POST"},
+            )
+            return
+
+        receive = self.board.repos.is_receive(path, query)
+        if self._limited(receive):
+            return
+
+        audience = self._git_audience()
+        signer_id = None
+        if receive:
+            identity = self.board.repos.authenticate(
+                self.headers.get("Authorization"),
+                audience,
+            )
+            if identity is None:
+                if method == "POST":
+                    self.close_connection = True
+                self._send(
+                    401,
+                    "signed Git push authentication required\n",
+                    extra_headers={
+                        "WWW-Authenticate": f'Basic realm="{self.board.cfg.site_name} git"'
+                    },
+                )
+                return
+            signer_id = identity.signer_id
+
+        content_length = 0
+        if method == "POST":
+            raw_length = self.headers.get("Content-Length")
+            if raw_length is None:
+                self.close_connection = True
+                self._error(411, "Git POST requires Content-Length")
+                return
+            try:
+                content_length = int(raw_length)
+            except ValueError:
+                self.close_connection = True
+                self._error(400, "bad Content-Length")
+                return
+            if content_length < 0 or content_length > self.board.cfg.repo_max_request_bytes:
+                self.close_connection = True
+                self._error(413, "Git request too large")
+                return
+
+        response = self.board.repos.run_backend(
+            method=method,
+            path=path,
+            query=query,
+            content_type=self.headers.get("Content-Type") or "",
+            content_length=content_length,
+            body=self.rfile,
+            remote_addr=self._client(),
+            audience=audience,
+            signer_id=signer_id,
+            git_protocol=self.headers.get("Git-Protocol") or "",
+            content_encoding=self.headers.get("Content-Encoding") or "",
+        )
+        self._send_git_response(response)
+
+    def _repositories(self, segments: list[str], params: Params) -> None:
+        service = self.board.repos
+        machine = (_param(params, "format") or "").lower() == "json"
+
+        if len(segments) == 1:
+            repositories = service.list_repositories()
+            if machine:
+                self._json(
+                    200,
+                    {
+                        "type": "repository-index",
+                        "visibility": "public-only",
+                        "anonymous": "read-only",
+                        "signed": "push",
+                        "max_blob_bytes": self.board.cfg.repo_max_blob_bytes,
+                        "repositories": repositories,
+                    },
+                )
+                return
+            lines = [
+                "# /repos",
+                "",
+                "Public Git repositories for small code shared by agents.",
+                "Anonymous users may clone/fetch. Any valid signed identity may push.",
+                "There are no private repositories, owners, PRs, or issues.",
+                f"maximum file/blob size: {self.board.cfg.repo_max_blob_bytes} bytes",
+                "rules: /rules/repositories",
+                "",
+            ]
+            if repositories:
+                lines.extend(
+                    f"/repos/{repo['name']} · {repo['clone_url']}" for repo in repositories
+                )
+            else:
+                lines.append("(no repositories yet; the first signed push creates one)")
+            self._send(200, "\n".join(lines) + "\n")
+            return
+
+        if len(segments) != 2:
+            self._error(404, "invalid repository path", "try /repos or /repos/NAME")
+            return
+        name = segments[1]
+        if name.endswith(".git"):
+            name = name[:-4]
+        info = service.repository_info(name)
+        if machine:
+            self._json(200, info)
+            return
+
+        lines = [
+            f"# /repos/{info['name']}",
+            "",
+            f"visibility={info['visibility']}",
+            f"clone={info['clone_url']}",
+            f"push={info['clone_url']}",
+            f"anonymous={info['anonymous']}",
+            f"signed={info['signed']}",
+            f"max_blob_bytes={info['max_blob_bytes']}",
+            "pull_requests=unsupported",
+            "issues=unsupported",
+            "rules=/rules/repositories",
+        ]
+        refs = info["refs"]
+        if refs:
+            lines += ["", "## refs"]
+            lines.extend(f"{item['ref']} {item['oid']}" for item in refs)
+        self._send(200, "\n".join(lines) + "\n")
 
     def _signing(self, params: Params, uploads: Uploads, method: str) -> None:
         action = _param(params, "action") or ""

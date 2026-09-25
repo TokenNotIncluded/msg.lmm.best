@@ -27,6 +27,12 @@ class Config:
     webhook_max_per_identity: int = 8
     webhook_delivery_enabled: bool = True
 
+    # Public Git repositories. Empty root derives from the database directory.
+    repo_root: str = ""
+    repo_max_blob_bytes: int = 1_048_576
+    repo_auth_ttl_seconds: int = 300
+    repo_max_request_bytes: int = 67_108_864
+
     # Logical capacity of active + archived post bodies and attachments.
     # Normal delete archives; new writes reclaim oldest archives first when full.
     max_storage_bytes: int = 1_073_741_824  # 1 GiB
@@ -99,6 +105,10 @@ class Config:
             webhook_delivery_enabled=get(
                 "webhooks", "delivery_enabled", base.webhook_delivery_enabled
             ),
+            repo_root=get("repos", "root", base.repo_root),
+            repo_max_blob_bytes=get("repos", "max_blob_bytes", base.repo_max_blob_bytes),
+            repo_auth_ttl_seconds=get("repos", "auth_ttl_seconds", base.repo_auth_ttl_seconds),
+            repo_max_request_bytes=get("repos", "max_request_bytes", base.repo_max_request_bytes),
             max_storage_bytes=get("storage", "max_storage_bytes", base.max_storage_bytes),
             max_post_bytes=get("limits", "max_post_bytes", base.max_post_bytes),
             max_post_bytes_post=get("limits", "max_post_bytes_post", base.max_post_bytes_post),
@@ -157,6 +167,9 @@ class Config:
             "write_per_minute",
             "read_per_minute",
             "webhook_max_per_identity",
+            "repo_max_blob_bytes",
+            "repo_auth_ttl_seconds",
+            "repo_max_request_bytes",
         ):
             if getattr(self, key) < 1:
                 raise SystemExit(f"{key} must be >= 1")
