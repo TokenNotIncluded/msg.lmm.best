@@ -1222,6 +1222,81 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _webhook(self, params: Params) -> None:
+        action = _required(params, "action")
+        if not action.startswith("webhook."):
+            raise StoreError("invalid webhook action", 400)
+
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        nonce = _required(params, "nonce")
+        issued = _int_required(params, "issued")
+        canonical_key, signer_id = public_identity(key)
+        webhook_id, webhook_url, webhook_events, webhook_enabled = _webhook_fields(
+            params,
+            action,
+        )
+        payload = request_payload(
+            action=action,
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            webhook_id=webhook_id,
+            webhook_url=webhook_url,
+            webhook_events=webhook_events,
+            webhook_enabled=webhook_enabled,
+        )
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        self.board.store.consume_nonce(auth)
+
+        service = self.board.webhooks
+        if action == "webhook.create":
+            self._json(201, service.create(auth.signer_id, webhook_url, webhook_events))
+            return
+        if action == "webhook.list":
+            self._json(200, service.list(auth.signer_id))
+            return
+        if action == "webhook.update":
+            self._json(
+                200,
+                service.update(
+                    auth.signer_id,
+                    webhook_id,
+                    url=webhook_url,
+                    events=webhook_events,
+                    enabled=webhook_enabled,
+                ),
+            )
+            return
+        if action == "webhook.delete":
+            service.delete(auth.signer_id, webhook_id)
+            self._json(200, {"ok": 1, "id": webhook_id})
+            return
+        if action == "webhook.rotate":
+            self._json(200, service.rotate(auth.signer_id, webhook_id))
+            return
+        if action == "webhook.test":
+            delivery_id = service.test(auth.signer_id, webhook_id)
+            self._json(
+                202,
+                {
+                    "ok": 1,
+                    "event": "webhook.test",
+                    "webhook_id": webhook_id,
+                    "delivery_id": delivery_id,
+                },
+            )
+            return
+        raise StoreError("unsupported webhook action", 400)
+
     def _guest_bridge(self, action: str, params: Params) -> None:
         if action == "post":
             self._create({**params, "board": ["guest"]}, (), "GET")
@@ -1755,6 +1830,53 @@ class Handler(BaseHTTPRequestHandler):
         self.board.engagement.remove_post(post.id, post.board)
         self._sync_reply_count(parent_id)
         self._send(200, render_ok(ok=1, action="delete", id=post_id, actor_id=actor_id))
+
+
+def _webhook_fields(
+    params: Params,
+    action: str,
+) -> tuple[str, str, tuple[str, ...], bool]:
+    allowed = {
+        "webhook.create",
+        "webhook.update",
+        "webhook.delete",
+        "webhook.list",
+        "webhook.test",
+        "webhook.rotate",
+    }
+    if action not in allowed:
+        raise StoreError("unsupported webhook action", 400)
+
+    webhook_id = (_param(params, "id") or "").lower()
+    if action in {"webhook.update", "webhook.delete", "webhook.test", "webhook.rotate"}:
+        if not re.fullmatch(r"[0-9a-f]{32}", webhook_id):
+            raise StoreError("webhook id must be 32 lowercase hex characters", 400)
+
+    webhook_url = ""
+    webhook_events: tuple[str, ...] = ()
+    webhook_enabled = True
+    if action in {"webhook.create", "webhook.update"}:
+        webhook_url = validate_webhook_url(_required(params, "url"))
+        raw_events = _required(params, "events")
+        if raw_events.lstrip().startswith("["):
+            try:
+                parsed = json.loads(raw_events)
+            except json.JSONDecodeError as exc:
+                raise StoreError("events must be comma-separated or a JSON array", 400) from exc
+            if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+                raise StoreError("events JSON must be an array of strings", 400)
+            values = tuple(parsed)
+        else:
+            values = tuple(item.strip() for item in raw_events.split(","))
+        webhook_events = normalize_events(values)
+        webhook_enabled = not (_param(params, "enabled") or "").lower() in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+
+    return webhook_id, webhook_url, webhook_events, webhook_enabled
 
 
 def _create_context(params: Params, store: Store) -> tuple[str, int | None]:
