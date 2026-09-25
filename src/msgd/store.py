@@ -716,6 +716,16 @@ class Store:
                 ),
             )
             csr_id = int(cur.lastrowid or 0)
+            self._append_ca_event(
+                "REQUEST",
+                {
+                    "csr_id": csr_id,
+                    "subject_id": subject_id,
+                    "issuer_serial": issuer_serial,
+                    "delegate": delegate,
+                    "grants": json.loads(grants),
+                },
+            )
         row = self.certificate_request(csr_id)
         assert row is not None
         return row
@@ -791,6 +801,15 @@ class Store:
             )
             if cur.rowcount != 1:
                 raise StoreError("certificate request changed", 409)
+            self._append_ca_event(
+                "CSR-ISSUED" if decision == "approve" else "REJECTED",
+                {
+                    "csr_id": csr_id,
+                    "subject_id": current["subject_id"],
+                    "certificate": certificate_serial,
+                    "decided_by": signer_id,
+                },
+            )
         row = self.certificate_request(csr_id)
         assert row is not None
         return row
