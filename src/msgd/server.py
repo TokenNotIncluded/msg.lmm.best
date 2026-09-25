@@ -3636,6 +3636,177 @@ class Handler(BaseHTTPRequestHandler):
         )
 
 
+
+EXCHANGE_ACTIONS = frozenset(
+    {
+        "outbox.read",
+        "state.read",
+        "state.write",
+        "state.delete",
+        "watch.add",
+        "watch.delete",
+        "watch.list",
+        "inbox.ack",
+        "task.open",
+        "task.claim",
+        "task.release",
+        "task.complete",
+        "task.list",
+    }
+)
+
+
+def _exchange_action_for_head(head: str, action: str) -> bool:
+    prefixes = {
+        "outbox": {"outbox.read"},
+        "state": {"state.read", "state.write", "state.delete"},
+        "watch": {"watch.add", "watch.delete", "watch.list"},
+        "ack": {"inbox.ack"},
+        "task": {
+            "task.open",
+            "task.claim",
+            "task.release",
+            "task.complete",
+            "task.list",
+        },
+    }
+    return action in prefixes.get(head, set())
+
+
+def _exchange_signing_spec(
+    board: Board,
+    action: str,
+    signer_id: str,
+    params: Params,
+    *,
+    signing: bool,
+) -> tuple[bytes, dict[str, Any]]:
+    if action not in EXCHANGE_ACTIONS:
+        raise StoreError("unsupported exchange action", 400)
+
+    nonce = _param(params, "nonce")
+    if signing and nonce is None:
+        nonce = secrets.token_hex(16)
+    if nonce is None:
+        raise StoreError("nonce is required", 400)
+    issued = _int_required(
+        params,
+        "issued",
+        int(time.time()) if signing else None,
+    )
+    common: dict[str, Any] = {"nonce": nonce, "issued": issued}
+
+    if action == "outbox.read":
+        since, before, limit = _inbox_window(params, board.cfg)
+        payload = request_payload(
+            action=action,
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            since=since,
+            before=before,
+            limit=limit,
+        )
+        return payload, {**common, "since": since, "before": before, "limit": limit}
+
+    if action in {"state.read", "state.write", "state.delete"}:
+        supplied_name = _param(params, "name")
+        if action == "state.read" and not supplied_name:
+            state_name = ""
+        else:
+            state_name = board.exchange.normalize_state_name(supplied_name)
+        state_value = _required(params, "value") if action == "state.write" else ""
+        payload = request_payload(
+            action=action,
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            state_name=state_name,
+            state_value=state_value,
+        )
+        meta = {**common, "name": state_name or None}
+        if action == "state.write":
+            meta["value"] = state_value
+        return payload, meta
+
+    if action in {"watch.add", "watch.delete", "watch.list"}:
+        watch_id = ""
+        watch_kind = ""
+        watch_target = ""
+        if action == "watch.add":
+            watch_kind = _required(params, "kind").lower().strip()
+            watch_target = board.exchange.normalize_watch_target(
+                watch_kind,
+                _required(params, "target"),
+            )
+        elif action == "watch.delete":
+            watch_id = _required(params, "id").lower().strip()
+            if not re.fullmatch(r"[0-9a-f]{32}", watch_id):
+                raise StoreError("watch id must be 32 lowercase hex characters", 400)
+        payload = request_payload(
+            action=action,
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            watch_id=watch_id,
+            watch_kind=watch_kind,
+            watch_target=watch_target,
+        )
+        return payload, {
+            **common,
+            "id": watch_id or None,
+            "kind": watch_kind or None,
+            "target": watch_target or None,
+        }
+
+    if action == "inbox.ack":
+        post_id = _int_required(params, "id")
+        ack_status = _required(params, "status").lower().strip()
+        if ack_status not in ACK_STATUSES:
+            raise StoreError(f"ack status must be one of {sorted(ACK_STATUSES)}", 400)
+        payload = request_payload(
+            action=action,
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            post_id=post_id,
+            ack_status=ack_status,
+        )
+        return payload, {**common, "id": post_id, "status": ack_status}
+
+    post_id: int | None = None
+    scope = ""
+    limit: int | None = None
+    if action == "task.list":
+        scope = (_param(params, "scope") or "open").lower().strip()
+        if scope not in {"open", "mine", "all"}:
+            raise StoreError("task scope must be open, mine, or all", 400)
+        limit = _int(params, "limit", min(50, board.cfg.max_limit), 1, board.cfg.max_limit)
+        assert limit is not None
+    else:
+        post_id = _int_required(params, "id")
+    payload = request_payload(
+        action=action,
+        signer_id=signer_id,
+        version=1,
+        nonce=nonce,
+        issued=issued,
+        post_id=post_id,
+        task_scope=scope,
+        limit=limit,
+    )
+    return payload, {
+        **common,
+        "id": post_id,
+        "scope": scope or None,
+        "limit": limit,
+    }
+
+
 def _webhook_fields(
     params: Params,
     action: str,
