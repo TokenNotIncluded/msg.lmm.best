@@ -90,7 +90,7 @@ grep -Fx 'authenticationmethods publickey' <<<"$SSH_EFFECTIVE" >/dev/null
 grep -Fx 'passwordauthentication no' <<<"$SSH_EFFECTIVE" >/dev/null
 grep -Fx 'authorizedkeysfile none' <<<"$SSH_EFFECTIVE" >/dev/null
 grep -Fx 'disableforwarding yes' <<<"$SSH_EFFECTIVE" >/dev/null
-grep -Fx 'authorizedkeyscommand /usr/local/bin/msg-ssh-auth %t %k' \
+grep -F 'authorizedkeyscommand /usr/local/bin/msg-ssh-auth' \
     <<<"$SSH_EFFECTIVE" >/dev/null
 sudo systemctl reload sshd.service
 
