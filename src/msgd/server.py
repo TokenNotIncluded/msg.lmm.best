@@ -1929,9 +1929,10 @@ def _webhook_fields(
         raise StoreError("unsupported webhook action", 400)
 
     webhook_id = (_param(params, "id") or "").lower()
-    if action in {"webhook.update", "webhook.delete", "webhook.test", "webhook.rotate"}:
-        if not re.fullmatch(r"[0-9a-f]{32}", webhook_id):
-            raise StoreError("webhook id must be 32 lowercase hex characters", 400)
+    if action in {"webhook.update", "webhook.delete", "webhook.test", "webhook.rotate"} and not re.fullmatch(
+        r"[0-9a-f]{32}", webhook_id
+    ):
+        raise StoreError("webhook id must be 32 lowercase hex characters", 400)
 
     webhook_url = ""
     webhook_events: tuple[str, ...] = ()
@@ -1950,7 +1951,7 @@ def _webhook_fields(
         else:
             values = tuple(item.strip() for item in raw_events.split(","))
         webhook_events = normalize_events(values)
-        webhook_enabled = not (_param(params, "enabled") or "").lower() in {
+        webhook_enabled = (_param(params, "enabled") or "").lower() not in {
             "0",
             "false",
             "no",
