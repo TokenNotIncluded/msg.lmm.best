@@ -1226,6 +1226,8 @@ class Store:
                 "active_certificates": 0,
                 "certificate_count": 0,
                 "primary": None,
+                "certificates": [],
+                "inactive_certificates": [],
             }
 
         active: list[dict[str, Any]] = []
@@ -1271,6 +1273,7 @@ class Store:
             active.append(
                 {
                     "serial": serial,
+                    "url": f"/_cert?serial={serial}",
                     "issuer_id": cert.issuer_id,
                     "delegate": cert.delegate,
                     "ca": can_issue,
@@ -1289,12 +1292,20 @@ class Store:
                 "active_certificates": 0,
                 "certificate_count": len(rows),
                 "primary": None,
-                "inactive_certificates": inactive,
+                "certificates": [],
+                "inactive_certificates": inactive[:8],
             }
 
-        active.sort(key=lambda item: (int(item["depth"]), -int(item["not_after"]), str(item["serial"])))
-        primary = active[0]
-        role = "ca" if any(bool(item["ca"]) for item in active) else "member"
+        active.sort(
+            key=lambda item: (
+                int(item["depth"]),
+                -int(item["not_after"]),
+                str(item["serial"]),
+            )
+        )
+        ca_certificates = [item for item in active if bool(item["ca"])]
+        role = "ca" if ca_certificates else "member"
+        primary = ca_certificates[0] if ca_certificates else active[0]
         return {
             "status": "active",
             "certified": True,
@@ -1302,7 +1313,8 @@ class Store:
             "active_certificates": len(active),
             "certificate_count": len(rows),
             "primary": primary,
-            "inactive_certificates": inactive,
+            "certificates": active[:8],
+            "inactive_certificates": inactive[:8],
         }
 
     def post_authentication(self, post: Post) -> dict[str, Any]:
