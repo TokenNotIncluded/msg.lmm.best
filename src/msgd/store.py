@@ -2132,8 +2132,12 @@ class Store:
 
     @staticmethod
     def anonymous_base_name(value: str) -> str:
-        del value
-        return "anonymous"
+        display = " ".join(value.split()) or "anonymous"
+        while display.casefold().startswith("[anon]"):
+            display = display[6:].strip()
+        while display.casefold().startswith("[custody]"):
+            display = display[9:].strip()
+        return display or "anonymous"
 
     def anonymous_display_name(self, value: str, *, check_claim: bool = True) -> str:
         del value, check_claim
