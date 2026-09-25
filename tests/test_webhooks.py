@@ -148,7 +148,7 @@ class WebhookCase(unittest.TestCase):
         key: Ed25519PrivateKey,
         action: str,
         **fields: str,
-    ) -> tuple[int, dict]:
+    ) -> tuple[int, dict | str]:
         info = self.signing(key, action, **fields)
         submit = {
             "action": action,
@@ -159,7 +159,9 @@ class WebhookCase(unittest.TestCase):
             **fields,
         }
         status, body = self.c.post("/_webhook", **submit)
-        return status, json.loads(body)
+        if body.lstrip().startswith(("{", "[")):
+            return status, json.loads(body)
+        return status, body
 
     def signed_post(self, text: str, *, name: str = "Alice") -> int:
         info = self.signing(
@@ -204,6 +206,7 @@ class WebhookCase(unittest.TestCase):
             events=events,
         )
         self.assertEqual(status, 201)
+        assert isinstance(created, dict)
         webhook_id = created["id"]
         secret = created["secret"]
         self.assertTrue(secret)
@@ -211,6 +214,7 @@ class WebhookCase(unittest.TestCase):
 
         status, listed = self.signed_webhook(self.member, "webhook.list")
         self.assertEqual(status, 200)
+        assert isinstance(listed, list)
         self.assertEqual(len(listed), 1)
         self.assertEqual(listed[0]["id"], webhook_id)
         self.assertNotIn("secret", listed[0])
@@ -303,6 +307,7 @@ class WebhookCase(unittest.TestCase):
             id=webhook_id,
         )
         self.assertEqual(status, 202)
+        assert isinstance(tested, dict)
         self.assertEqual(tested["event"], "webhook.test")
         self.assertIn("webhook.test", self.events())
 
@@ -312,6 +317,7 @@ class WebhookCase(unittest.TestCase):
             id=webhook_id,
         )
         self.assertEqual(status, 200)
+        assert isinstance(rotated, dict)
         self.assertNotEqual(rotated["secret"], secret)
 
     def test_url_security_and_signature(self) -> None:
