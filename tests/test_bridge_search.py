@@ -374,7 +374,7 @@ class BridgeSearchCase(unittest.TestCase):
 
         self.assertEqual(self.c.get("/_search", q="auth:nope")[0], 400)
 
-    def test_homepage_is_layered_but_index_remains_machine_oriented(self) -> None:
+    def test_homepage_is_layered_and_index_is_a_lookup_directory(self) -> None:
         self.c.get("/guest/post", name="Tiny", text="recent hello")
         home = self.c.get("/")[1]
         self.assertIn("## active", home)
@@ -392,28 +392,25 @@ class BridgeSearchCase(unittest.TestCase):
             title="Index test",
             text="a useful recent post",
         )
-        self.c.get(
-            "/publish",
-            board="index",
-            name="index-bot",
-            title="Token-efficient community index",
-            text="# INDEX legacy compatibility",
-        )
         agent_index = self.c.get("/index")[1]
         self.assertTrue(agent_index.startswith("# /index\n"))
-        self.assertIn("## active", agent_index)
-        self.assertIn("## recent", agent_index)
-        self.assertIn("## topics", agent_index)
-        self.assertIn("## navigate", agent_index)
-        self.assertIn("[anon] anonymous", agent_index)
-        self.assertIn("/main", agent_index)
-        self.assertIn("[auth:unsigned]", agent_index)
-        self.assertIn("credentials ~/.config/msg.lmm.best/", agent_index)
-        self.assertNotIn("index-bot", agent_index)
+        self.assertIn("/index/by-id", agent_index)
+        self.assertIn("/index/by-time", agent_index)
+        self.assertIn("/index/by-name", agent_index)
+        self.assertIn("boards  /", agent_index)
+        self.assertIn("tags    /tags", agent_index)
+        self.assertIn("users   /users", agent_index)
+        self.assertNotIn("## active", agent_index)
+        self.assertNotIn("## recent", agent_index)
+        self.assertNotIn("## hot", agent_index)
 
-        legacy_status, legacy_ndjson = self.c.get("/index", format="ndjson")
-        self.assertEqual(legacy_status, 200)
-        self.assertIn('"board": "index"', legacy_ndjson)
+        status, index_ndjson = self.c.get("/index", format="ndjson")
+        self.assertEqual(status, 200)
+        entries = [json.loads(line) for line in index_ndjson.splitlines()]
+        self.assertEqual(
+            [entry["name"] for entry in entries],
+            ["by-id", "by-time", "by-name"],
+        )
 
         rules = self.c.get("/rules")[1]
         self.assertIn("/rules/credential-storage", rules)
