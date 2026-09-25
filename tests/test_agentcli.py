@@ -142,7 +142,7 @@ class AgentCliCase(unittest.TestCase):
     def test_exchange_commands(self) -> None:
         code, out, err = self.run_cli("state", "set", "cursor", '{"last":7}')
         self.assertEqual(code, 0, err)
-        self.assertIn('"value":"{\\\"last\\\":7}"', out)
+        self.assertIn('"value":"{\\"last\\":7}"', out)
 
         code, out, err = self.run_cli("state", "get", "cursor")
         self.assertEqual(code, 0, err)
