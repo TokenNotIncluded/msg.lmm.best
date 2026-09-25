@@ -678,6 +678,291 @@ class Store:
             return False
         return action in set(self.policy(board)["anonymous"])
 
+    @staticmethod
+    def _grant_list(
+        grants: dict[str, tuple[str, ...] | list[str] | set[str]],
+    ) -> list[dict[str, object]]:
+        if not grants:
+            raise StoreError("certificate grants are required", 400)
+        result: list[dict[str, object]] = []
+        for topic, actions in sorted(grants.items()):
+            if topic != "*" and not BOARD_RE.fullmatch(topic):
+                raise StoreError(f"invalid grant topic: {topic!r}", 400)
+            normalized = sorted(set(actions))
+            if not normalized:
+                raise StoreError("grant actions are required", 400)
+            invalid = set(normalized) - ACTIONS
+            if invalid:
+                raise StoreError(f"invalid grant actions: {sorted(invalid)}", 400)
+            result.append({"topic": topic, "actions": normalized})
+        return result
+
+    @staticmethod
+    def _grant_map(value: object) -> dict[str, set[str]]:
+        if not isinstance(value, list):
+            raise StoreError("invalid stored grants", 500)
+        result: dict[str, set[str]] = {}
+        for item in value:
+            if not isinstance(item, dict):
+                raise StoreError("invalid stored grant", 500)
+            topic = item.get("topic")
+            actions = item.get("actions")
+            if not isinstance(topic, str) or not isinstance(actions, list):
+                raise StoreError("invalid stored grant", 500)
+            result[topic] = {str(action) for action in actions}
+        return result
+
+    def _create_system_post(self, title: str, body: str) -> Post:
+        board = "ca"
+        body, title, name, nbytes = self.prepare_post(
+            body=body,
+            title=title,
+            name="ca-audit",
+            max_body_bytes=self.cfg.max_post_bytes_post,
+        )
+        self.ensure_board(board)
+        now = time.time()
+        with self._lock, self._conn:
+            seq = int(
+                self._conn.execute(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM posts WHERE board = ?",
+                    (board,),
+                ).fetchone()["n"]
+            )
+            cur = self._conn.execute(
+                """
+                INSERT INTO posts(
+                    board, seq, name, title, body, created, updated, nbytes,
+                    system
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (board, seq, name, title, body, now, now, nbytes),
+            )
+            post_id = int(cur.lastrowid or 0)
+        post = self.get_post(post_id)
+        if post is None:
+            raise StoreError("failed to create CA audit post", 500)
+        return post
+
+    def _audit_ca(self, kind: str, title: str, lines: list[str]) -> None:
+        body = "\n".join([f"type={kind}", *lines, "authority=/_csr /_cert /_revocations"])
+        self._create_system_post(title, body)
+
+    def create_csr(
+        self,
+        *,
+        auth: SignedRequest,
+        grants: dict[str, tuple[str, ...]],
+        delegate: bool,
+        requested_issuer: str,
+        message: str,
+    ) -> dict[str, Any]:
+        if requested_issuer and not valid_author_id(requested_issuer):
+            raise StoreError("requested_issuer must be an author id", 400)
+        if len(message.encode("utf-8")) > 4096:
+            raise StoreError("CSR message exceeds 4096 bytes", 413)
+        grant_list = self._grant_list(grants)
+        self.consume_nonce(auth)
+        now = time.time()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                INSERT INTO certificate_requests(
+                    subject_key, subject_id, requested_issuer, grants,
+                    delegate, message, created, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+                """,
+                (
+                    auth.public_key,
+                    auth.signer_id,
+                    requested_issuer,
+                    canonical_json(grant_list),
+                    1 if delegate else 0,
+                    message,
+                    now,
+                ),
+            )
+            csr_id = int(cur.lastrowid or 0)
+        csr = self.csr(csr_id)
+        if csr is None:
+            raise StoreError("failed to create CSR", 500)
+        self._audit_ca(
+            "request",
+            f"[REQUEST] CSR #{csr_id}",
+            [
+                f"csr=/_csr?id={csr_id}",
+                f"subject={auth.signer_id}",
+                f"requested_issuer={requested_issuer or 'any'}",
+                f"delegate={str(delegate).lower()}",
+                f"grants={canonical_json(grant_list)}",
+                *( [f"message={message[:300]}"] if message else [] ),
+            ],
+        )
+        return csr
+
+    def csr(self, csr_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, subject_key, subject_id, requested_issuer, grants,
+                       delegate, message, created, status, decided, decision_by,
+                       reason, certificate_serial
+                  FROM certificate_requests
+                 WHERE id = ?
+                """,
+                (csr_id,),
+            ).fetchone()
+        return self._csr_row(row)
+
+    def list_csrs(
+        self,
+        *,
+        status: str | None = None,
+        subject_id: str | None = None,
+        requested_issuer: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if status:
+            if status not in {"pending", "issued", "rejected", "cancelled"}:
+                raise StoreError("invalid CSR status", 400)
+            where.append("status = ?")
+            params.append(status)
+        if subject_id:
+            if not valid_author_id(subject_id):
+                raise StoreError("invalid subject id", 400)
+            where.append("subject_id = ?")
+            params.append(subject_id)
+        if requested_issuer:
+            if not valid_author_id(requested_issuer):
+                raise StoreError("invalid requested issuer", 400)
+            where.append("requested_issuer = ?")
+            params.append(requested_issuer)
+        sql = (
+            "SELECT id, subject_key, subject_id, requested_issuer, grants, delegate,"
+            " message, created, status, decided, decision_by, reason,"
+            " certificate_serial FROM certificate_requests"
+        )
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(max(1, min(limit, self.cfg.max_limit)))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._csr_row(row) for row in rows if row is not None]
+
+    def can_issue_csr(self, signer_id: str, csr: dict[str, Any]) -> bool:
+        root = self.root_info()
+        if root is not None and signer_id == root["root_id"]:
+            return not csr["requested_issuer"] or csr["requested_issuer"] == signer_id
+        if csr["requested_issuer"] and csr["requested_issuer"] != signer_id:
+            return False
+        grants = self._grant_map(csr["grants"])
+        return all(
+            "cert.issue" in self.permissions_for(signer_id, topic)
+            for topic in grants
+        )
+
+    def cancel_csr(self, csr_id: int, signer_id: str, reason: str = "") -> dict[str, Any]:
+        csr = self.csr(csr_id)
+        if csr is None:
+            raise StoreError("CSR not found", 404)
+        if csr["status"] != "pending":
+            raise StoreError("CSR is not pending", 409)
+        if csr["subject_id"] != signer_id:
+            raise StoreError("only the CSR subject may cancel it", 403)
+        now = time.time()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE certificate_requests
+                   SET status='cancelled', decided=?, decision_by=?, reason=?
+                 WHERE id=? AND status='pending'
+                """,
+                (now, signer_id, reason[:500], csr_id),
+            )
+        result = self.csr(csr_id)
+        assert result is not None
+        self._audit_ca(
+            "cancelled",
+            f"[CANCELLED] CSR #{csr_id}",
+            [f"csr=/_csr?id={csr_id}", f"subject={csr['subject_id']}", f"reason={reason[:300]}"],
+        )
+        return result
+
+    def reject_csr(self, csr_id: int, signer_id: str, reason: str = "") -> dict[str, Any]:
+        csr = self.csr(csr_id)
+        if csr is None:
+            raise StoreError("CSR not found", 404)
+        if csr["status"] != "pending":
+            raise StoreError("CSR is not pending", 409)
+        if not self.can_issue_csr(signer_id, csr):
+            raise StoreError("not allowed to decide this CSR", 403)
+        now = time.time()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE certificate_requests
+                   SET status='rejected', decided=?, decision_by=?, reason=?
+                 WHERE id=? AND status='pending'
+                """,
+                (now, signer_id, reason[:500], csr_id),
+            )
+        result = self.csr(csr_id)
+        assert result is not None
+        self._audit_ca(
+            "rejected",
+            f"[REJECTED] CSR #{csr_id}",
+            [
+                f"csr=/_csr?id={csr_id}",
+                f"subject={csr['subject_id']}",
+                f"by={signer_id}",
+                f"reason={reason[:300]}",
+            ],
+        )
+        return result
+
+    def _validate_csr_certificate(self, csr: dict[str, Any], cert: Certificate) -> None:
+        if csr["status"] != "pending":
+            raise StoreError("CSR is not pending", 409)
+        if cert.subject_id != csr["subject_id"] or cert.subject_key != csr["subject_key"]:
+            raise StoreError("certificate subject does not match CSR", 403)
+        if csr["requested_issuer"] and cert.issuer_id != csr["requested_issuer"]:
+            raise StoreError("certificate issuer does not match requested issuer", 403)
+        if cert.delegate and not csr["delegate"]:
+            raise StoreError("certificate delegation exceeds CSR", 403)
+        requested = self._grant_map(csr["grants"])
+        for topic, actions in cert.grants.items():
+            allowed = set(requested.get("*", set()))
+            if topic != "*":
+                allowed.update(requested.get(topic, set()))
+            if not set(actions).issubset(allowed):
+                raise StoreError(f"certificate grants exceed CSR for topic {topic}", 403)
+
+    @staticmethod
+    def _csr_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "subject_key": str(row["subject_key"]),
+            "subject_id": str(row["subject_id"]),
+            "requested_issuer": str(row["requested_issuer"] or ""),
+            "grants": json.loads(str(row["grants"])),
+            "delegate": bool(row["delegate"]),
+            "message": str(row["message"]),
+            "created": round(float(row["created"]), 3),
+            "status": str(row["status"]),
+            "decided": round(float(row["decided"]), 3) if row["decided"] is not None else None,
+            "decision_by": str(row["decision_by"] or ""),
+            "reason": str(row["reason"] or ""),
+            "certificate_serial": (
+                str(row["certificate_serial"])
+                if row["certificate_serial"] is not None else None
+            ),
+        }
+
     def register_certificate(self, body: str, signature: str) -> Certificate:
         try:
             cert = parse_certificate(body)
