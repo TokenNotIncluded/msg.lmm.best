@@ -38,6 +38,10 @@ class Config:
     repo_auth_ttl_seconds: int = 300
     repo_max_request_bytes: int = 67_108_864
 
+    # Per-identity static web hosting. Empty root derives from the database directory.
+    web_root: str = ""
+    web_max_site_bytes: int = 10_485_760  # 10 MiB
+
     # OpenSSH restricted-shell integration.
     ssh_shell_command: str = "/usr/local/bin/msg-ssh-shell"
     ssh_max_keys_per_identity: int = 16
@@ -133,6 +137,8 @@ class Config:
             repo_max_blob_bytes=get("repos", "max_blob_bytes", base.repo_max_blob_bytes),
             repo_auth_ttl_seconds=get("repos", "auth_ttl_seconds", base.repo_auth_ttl_seconds),
             repo_max_request_bytes=get("repos", "max_request_bytes", base.repo_max_request_bytes),
+            web_root=get("web", "root", base.web_root),
+            web_max_site_bytes=get("web", "max_site_bytes", base.web_max_site_bytes),
             ssh_shell_command=get("ssh", "shell_command", base.ssh_shell_command),
             ssh_max_keys_per_identity=get(
                 "ssh", "max_keys_per_identity", base.ssh_max_keys_per_identity
@@ -200,6 +206,7 @@ class Config:
             "repo_max_blob_bytes",
             "repo_auth_ttl_seconds",
             "repo_max_request_bytes",
+            "web_max_site_bytes",
             "ssh_max_keys_per_identity",
         ):
             if getattr(self, key) < 1:
