@@ -7,6 +7,7 @@ import re
 import time
 from email.utils import formatdate
 from typing import Any
+from urllib.parse import quote
 from xml.sax.saxutils import escape
 
 from msgd import __version__
@@ -1359,7 +1360,7 @@ def render_dimension_index(
     elif kind == "by-tag":
         for item in entries:
             lines.append(
-                f"#{item['tag']} · /tag/{item['tag']} · "
+                f"#{item['tag']} · /tag/{quote(str(item['tag']), safe='')} · "
                 f"posts={int(item['posts'])} · boards={int(item['boards'])}"
             )
     elif kind == "by-board":
