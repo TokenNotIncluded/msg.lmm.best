@@ -459,6 +459,12 @@ class Handler(BaseHTTPRequestHandler):
         if head == "index" and len(segments) == 1 and _param(params, "format") is None:
             store = self.board.store
             recent = [post for post in store.list_posts(limit=8) if post.board != "index"][:6]
+            hot = (
+                self._ranked_posts("hot", board=None, limit=6)
+                if self.board.engagement.available
+                else []
+            )
+            visible = list({post.id: post for post in [*recent, *hot]}.values())
             self._send(
                 200,
                 render_agent_index(
@@ -466,9 +472,16 @@ class Handler(BaseHTTPRequestHandler):
                     store.list_boards(),
                     store.stats(),
                     recent=recent,
-                    authentications={post.id: store.post_authentication(post) for post in recent},
+                    hot=hot,
+                    authentications={
+                        post.id: store.post_authentication(post) for post in visible
+                    },
+                    engagement=self._engagement_map(visible),
                 ),
             )
+            return
+        if head == "hot":
+            self._hot(params)
             return
         if head == "_health":
             root = self.board.store.root_info()
@@ -479,6 +492,7 @@ class Handler(BaseHTTPRequestHandler):
                     version=__version__,
                     uptime_seconds=int(time.time() - self.board.started),
                     ca="ready" if root else "missing",
+                    valkey=self.board.engagement.status(),
                     **self.board.store.stats(),
                 ),
             )
