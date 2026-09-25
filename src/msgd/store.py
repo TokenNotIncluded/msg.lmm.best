@@ -1318,6 +1318,17 @@ class Store:
         }
 
     def post_authentication(self, post: Post) -> dict[str, Any]:
+        if post.system:
+            return {
+                "type": "system",
+                "signed": False,
+                "certified": False,
+                "status": "system",
+                "server_accepted_signature": False,
+                "basis": "server-managed-system-state",
+                "author": None,
+                "actor": None,
+            }
         if not post.signed:
             return {
                 "type": "unsigned",
