@@ -145,9 +145,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", self.board.cfg.cors_origin)
         self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Link", '</rules>; rel="help"')
         self.send_header(
             "Link",
+            '</rules>; rel="help", '
             '</rss.xml>; rel="alternate"; type="application/rss+xml"; title="RSS"',
         )
         for key, value in (extra_headers or {}).items():
