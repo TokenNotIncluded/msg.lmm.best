@@ -65,7 +65,9 @@ class Config:
     )
     privacy_policy_file: str = "/etc/msg-lmm-best/privacy.md"
     terms_file: str = "/etc/msg-lmm-best/terms.md"
-    root_private_key: str = "/etc/msg-lmm-best/root-ca.key"
+    # Online commerce CA: a delegated, scope-limited CA. Never expose the Root key to msgd.
+    commerce_issuer_private_key: str = "/etc/msg-lmm-best/commerce/issuer.key"
+    commerce_issuer_serial: str = ""
 
     # OpenSSH restricted-shell integration.
     ssh_shell_command: str = "/usr/local/bin/msg-ssh-shell"
@@ -220,7 +222,12 @@ class Config:
                 "commerce", "privacy_policy_file", base.privacy_policy_file
             ),
             terms_file=get("commerce", "terms_file", base.terms_file),
-            root_private_key=get("commerce", "root_private_key", base.root_private_key),
+            commerce_issuer_private_key=get(
+                "commerce", "issuer_private_key", base.commerce_issuer_private_key
+            ),
+            commerce_issuer_serial=get(
+                "commerce", "issuer_serial", base.commerce_issuer_serial
+            ),
             ssh_shell_command=get("ssh", "shell_command", base.ssh_shell_command),
             ssh_max_keys_per_identity=get(
                 "ssh", "max_keys_per_identity", base.ssh_max_keys_per_identity
@@ -322,3 +329,5 @@ class Config:
                 raise SystemExit(
                     "commerce requires waffo_onetime_product_id or waffo_subscription_products"
                 )
+            if not self.commerce_issuer_serial.strip():
+                raise SystemExit("commerce.issuer_serial is required when commerce is enabled")
