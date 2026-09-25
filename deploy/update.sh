@@ -34,6 +34,10 @@ ssh "$HOST" "rm -rf '$STAGE' && mkdir -p '$STAGE'"
 tar -C "$ROOT" -cf - \
     "dist/$WHEEL" \
     deploy/msg-lmm-best.service \
+    deploy/etc/msg-lmm-best/templates/store.json \
+    deploy/etc/msg-lmm-best/templates/ads.json \
+    deploy/etc/msg-lmm-best/privacy.md \
+    deploy/etc/msg-lmm-best/terms.md \
     deploy/sshd/msg-lmm-best.conf \
     deploy/nginx/nginx.conf \
     deploy/nginx/msg.lmm.best.conf \
@@ -107,6 +111,29 @@ sudo UV_NO_CACHE=1 uv pip install --quiet \
 
 echo "==> root CA"
 sudo "$VENV/bin/msgd-cert" init-root
+
+echo "==> topic templates and commerce policy documents"
+sudo install -d -m 0755 /etc/msg-lmm-best/templates /etc/msg-lmm-best/commerce
+for name in store.json ads.json; do
+    if ! sudo test -e "/etc/msg-lmm-best/templates/$name"; then
+        sudo install -m 0644 "$D/etc/msg-lmm-best/templates/$name" "/etc/msg-lmm-best/templates/$name"
+    fi
+done
+for name in privacy.md terms.md; do
+    if ! sudo test -e "/etc/msg-lmm-best/$name"; then
+        sudo install -m 0644 "$D/etc/msg-lmm-best/$name" "/etc/msg-lmm-best/$name"
+    fi
+done
+
+if ! sudo grep -q '^\[topics\]' "$CONFIG"; then
+    echo "==> enable structured topic templates"
+    sudo tee -a "$CONFIG" >/dev/null <<'EOF'
+
+[topics]
+template_dir = /etc/msg-lmm-best/templates
+certificate_only = store,ads
+EOF
+fi
 
 if ! sudo grep -q '^\[analytics\]' "$CONFIG"; then
     echo "==> enable Valkey analytics"
