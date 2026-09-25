@@ -336,7 +336,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             assert limit is not None
             posts = [
-                post for post in self.board.store.list_posts(limit=limit + 10)
+                post
+                for post in self.board.store.list_posts(limit=limit + 10)
                 if post.board != "index"
             ][:limit]
             self._send(
