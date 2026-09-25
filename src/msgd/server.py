@@ -1668,7 +1668,7 @@ class Handler(BaseHTTPRequestHandler):
         if uploads and action not in {"post.create", "post.edit"}:
             raise StoreError("file uploads are only valid for post.create/post.edit signing", 400)
         key = _required(params, "key")
-        canonical_key, signer_id = public_identity(key)
+        _canonical_key, signer_id = public_identity(key)
         store = self.board.store
 
         if action == "post.create":
