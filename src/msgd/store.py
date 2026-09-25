@@ -588,11 +588,11 @@ class Attachment:
     data: bytes
     nbytes: int
     sha256: str
-    object_oid: str | None = None
     created: float
     uploader_name: str
     uploader_id: str | None
     downloads: int
+    object_oid: str | None = None
 
     def manifest(self) -> dict[str, object]:
         return {
