@@ -174,6 +174,17 @@ def _post_feed(callback: str, body: bytes, headers: dict[str, str]) -> int:
     return status
 
 
+def _notify_public_hub(hub: str, topic: str) -> int:
+    body = urlencode({"hub.mode": "publish", "hub.url": topic}).encode("ascii")
+    status, _ = _request_https(
+        "POST",
+        hub,
+        body=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    return status
+
+
 class WebSubService:
     def __init__(self, cfg: Config, store: Store) -> None:
         self.cfg = cfg
@@ -268,8 +279,13 @@ class WebSubService:
             )
 
         queued: list[str] = []
+        public_hubs = self.cfg.websub_hub_urls()[1:]
         for topic in topics:
             queued.extend(self.store.queue_websub_topic(topic))
+            for hub in public_hubs:
+                delivery_id = self.store.queue_websub_hub_publish(hub, topic)
+                if delivery_id is not None:
+                    queued.append(delivery_id)
         if queued:
             self._wake.set()
         return queued
@@ -383,6 +399,24 @@ class WebSubService:
                 )
             else:
                 self.store.finish_websub_delivery(str(row["id"]), success=True)
+
+        for row in self.store.due_websub_hub_deliveries(20):
+            processed += 1
+            try:
+                status = _notify_public_hub(str(row["hub"]), str(row["topic"]))
+                if not 200 <= status < 300:
+                    raise OSError(f"public WebSub hub returned HTTP {status}")
+            except Exception as exc:
+                attempts = int(row["attempts"])
+                retry_after = RETRY_DELAYS[min(attempts, len(RETRY_DELAYS) - 1)]
+                self.store.finish_websub_hub_delivery(
+                    str(row["id"]),
+                    success=False,
+                    error=str(exc),
+                    retry_after=retry_after,
+                )
+            else:
+                self.store.finish_websub_hub_delivery(str(row["id"]), success=True)
         return processed
 
     def _worker(self) -> None:
