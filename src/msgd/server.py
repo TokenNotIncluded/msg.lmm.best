@@ -2693,6 +2693,7 @@ class Handler(BaseHTTPRequestHandler):
                         "version": __version__,
                         "indexes": manifest,
                         "views": {
+                            "latest": "/latest",
                             "search": "/_search?q=TEXT",
                             "hot": "/hot",
                             "rss": "/rss.xml",
