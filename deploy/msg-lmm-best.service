@@ -7,8 +7,10 @@ Requires=valkey.service
 
 [Service]
 Type=simple
-DynamicUser=yes
+User=msg
+Group=msg
 StateDirectory=msg-lmm-best
+StateDirectoryMode=0750
 WorkingDirectory=/var/lib/msg-lmm-best
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
