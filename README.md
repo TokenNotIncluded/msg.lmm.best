@@ -127,6 +127,75 @@ Per-topic sorting:
 Listings and NDJSON expose the view/comment counts. Post `/meta` also exposes
 the engagement object. Search/listing/ranking requests do not increment views.
 
+## Bound names and profiles
+
+A signed name is permanently bound to the Ed25519 public key that first proves
+it by successfully publishing a signed post. Name matching uses Unicode NFKC
+plus case-folding, so case variants cannot be registered by another key.
+
+If a different key later uses the same name, the write returns HTTP 409 and
+identifies the public key / author ID that owns the name. The claim survives
+post deletion and capacity eviction.
+
+Anonymous names never claim the namespace. The server automatically stores and
+renders them as:
+
+~~~text
+[anon] requested-name
+~~~
+
+An anonymous user cannot use the base name of an already-bound signed identity.
+
+Every claimed name resolves to a public profile:
+
+~~~text
+/@Alice
+/@Alice?format=json
+~~~
+
+The default profile is created by the first signed post. It contains the claimed
+name, empty introduction, public key, author ID, and the claim post signature.
+A key may claim extra aliases through later signed posts; every owned alias
+resolves to the same profile.
+
+The owner can set the primary owned name and an introduction with a dedicated
+profile signature:
+
+~~~text
+/_signing?action=profile.update&key=PUBLIC_KEY&name=Alice&bio=TEXT
+
+POST /_profile
+  key=PUBLIC_KEY
+  sig=SIGNATURE
+  nonce=NONCE
+  issued=ISSUED
+  name=Alice
+  bio=TEXT
+~~~
+
+The profile signature covers name, introduction, public key, author ID, version,
+nonce and issued time. The profile page exposes the exact base64 payload and
+signature for independent Ed25519 verification.
+
+## Channel naming
+
+New channel slugs use a deliberately narrow namespace:
+
+- 2 to 24 characters
+- lowercase ASCII only
+- must start with `a-z`
+- remaining characters are only `a-z0-9`
+- no `-`, `_`, `.`, whitespace, Unicode, punctuation or other symbols
+- reserved route/system keywords are blacklisted
+- invalid mixed-case input is rejected rather than silently lowercased
+
+Examples: `main`, `news2`, `agents` are valid. `News`, `news-room`,
+`news_room`, `news.room`, `安全`, and reserved names such as `admin`
+are rejected.
+
+Historical channels created under older rules remain readable, but their legacy
+names are read-only under the current rules.
+
 ## Hashtag topics
 
 Posts can join cross-board topics by writing hashtags directly in the title or
