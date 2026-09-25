@@ -39,6 +39,7 @@ from msgd.render import (
     render_listing,
     render_ok,
     render_post,
+    render_profile,
     render_rss,
     render_rules,
     render_schema,
@@ -54,6 +55,7 @@ from msgd.store import (
     StoreError,
     anonymous_actions,
     anonymous_permission_mask,
+    board_name_error,
     valid_author_id,
     valid_board_name,
 )
@@ -415,7 +417,7 @@ class Handler(BaseHTTPRequestHandler):
             self._webhook(params)
             return
 
-        if head in {"publish", "_cert", "_csr", "_revoke", "_policy"} and method == "HEAD":
+        if head in {"publish", "_cert", "_csr", "_revoke", "_policy", "_profile"} and method == "HEAD":
             self._send(
                 405,
                 render_error(405, "HEAD cannot write"),
@@ -427,6 +429,18 @@ class Handler(BaseHTTPRequestHandler):
             if self._limited(bool(uploads)):
                 return
             self._signing(params, uploads, method)
+            return
+        if head == "_profile":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "signed POST required"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            if self._limited(True):
+                return
+            self._profile_update(params)
             return
         if head == "_ca":
             info = self.board.store.root_info()
@@ -602,6 +616,19 @@ class Handler(BaseHTTPRequestHandler):
         if head == "_search":
             self._search(params)
             return
+        if head.startswith("@"):
+            if len(segments) != 1 or len(head) < 2:
+                self._error(404, "profile name is required")
+                return
+            profile = self.board.store.profile_by_name(head[1:])
+            if profile is None:
+                self._error(404, f"unknown profile: {head[1:]}")
+                return
+            if (_param(params, "format") or "").lower() == "json":
+                self._json(200, profile)
+            else:
+                self._send(200, render_profile(profile))
+            return
         if head == "file":
             if len(segments) != 2:
                 self._error(404, "file id is required")
@@ -630,9 +657,13 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        if not valid_board_name(head):
-            hint = f"{head!r} is reserved" if head in RESERVED_BOARDS else "invalid board name"
-            self._error(404, f"no such board: {head}", hint)
+        if not valid_board_name(head) and self.board.store.board_info(head) is None:
+            hint = (
+                f"{head!r} is reserved"
+                if head in RESERVED_BOARDS
+                else board_name_error(head)
+            )
+            self._error(404, f"no such channel: {head}", hint)
             return
 
         if len(segments) == 1:
@@ -727,7 +758,7 @@ class Handler(BaseHTTPRequestHandler):
             body, title, name, _ = store.prepare_post(
                 body=_required(params, "text"),
                 title=_param(params, "title") or "",
-                name=_param(params, "name") or "anonymous",
+                name=_signed_identity_name(_param(params, "name"), signer_id),
                 max_body_bytes=_body_limit(self.board.cfg, method),
             )
             manifest = _signing_manifest(
@@ -871,6 +902,49 @@ class Handler(BaseHTTPRequestHandler):
                     "url": webhook_url or None,
                     "events": list(webhook_events),
                     "enabled": webhook_enabled,
+                    **payload_info(payload),
+                },
+            )
+            return
+
+        if action == "profile.update":
+            current = store.profile_by_author(signer_id)
+            if current is None:
+                raise StoreError(
+                    "post with a signed name first to create a profile/name claim",
+                    409,
+                )
+            name = _param(params, "name") or str(current["name"])
+            bio = _param(params, "bio")
+            if bio is None:
+                bio = str(current["bio"])
+            if len(bio.encode("utf-8")) > 4096:
+                raise StoreError("profile bio exceeds 4096 UTF-8 bytes", 413)
+            name_key = store.normalize_identity_name(name)
+            claim = store.name_claim(name_key)
+            if claim is None or str(claim["author_id"]) != signer_id:
+                raise StoreError("profile name must be claimed by this public key", 403)
+            version = store.profile_version(signer_id) + 1
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            payload = request_payload(
+                action="profile.update",
+                signer_id=signer_id,
+                version=version,
+                nonce=nonce,
+                issued=issued,
+                profile_name=name,
+                profile_bio=bio,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "version": version,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "name": name,
+                    "bio": bio,
                     **payload_info(payload),
                 },
             )
@@ -1386,6 +1460,48 @@ class Handler(BaseHTTPRequestHandler):
             return
         raise StoreError("unsupported webhook action", 400)
 
+    def _profile_update(self, params: Params) -> None:
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        nonce = _required(params, "nonce")
+        issued = _int_required(params, "issued")
+        canonical_key, signer_id = public_identity(key)
+        current = self.board.store.profile_by_author(signer_id)
+        if current is None:
+            raise StoreError("profile/name claim not found; publish a signed post first", 404)
+        name = _param(params, "name") or str(current["name"])
+        bio = _param(params, "bio")
+        if bio is None:
+            bio = str(current["bio"])
+        version = self.board.store.profile_version(signer_id) + 1
+        payload = request_payload(
+            action="profile.update",
+            signer_id=signer_id,
+            version=version,
+            nonce=nonce,
+            issued=issued,
+            profile_name=name,
+            profile_bio=bio,
+        )
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=version,
+            nonce=nonce,
+            issued=issued,
+        )
+        info = payload_info(payload)
+        self._json(
+            200,
+            self.board.store.update_profile(
+                auth=auth,
+                name=name,
+                bio=bio,
+                payload_b64=info["payload_b64"],
+            ),
+        )
+
     def _guest_bridge(self, action: str, params: Params) -> None:
         if action == "post":
             self._create({**params, "board": ["guest"]}, (), "GET")
@@ -1778,18 +1894,26 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("/ca is a system-managed audit topic; use /_csr", 403)
         if board == "custody":
             raise StoreError("/custody writes use /custody/post", 403)
+        key, sig = _auth_fields(params)
+        canonical_key = None
+        signer_id = None
+        if key is not None:
+            canonical_key, signer_id = public_identity(key)
+        requested_name = (
+            _signed_identity_name(_param(params, "name"), signer_id)
+            if signer_id is not None
+            else (_param(params, "name") or "anonymous")
+        )
         body, title, name, _ = store.prepare_post(
             body=_required(params, "text"),
             title=_param(params, "title") or "",
-            name=_param(params, "name") or "anonymous",
+            name=requested_name,
             max_body_bytes=_body_limit(self.board.cfg, method),
         )
         files = store.prepare_files(uploads)
         manifest = tuple(file.manifest() for file in files)
-        key, sig = _auth_fields(params)
         auth = None
-        if key is not None:
-            canonical_key, signer_id = public_identity(key)
+        if key is not None and canonical_key is not None and signer_id is not None:
             nonce = _required(params, "nonce")
             issued = _int_required(params, "issued")
             payload = request_payload(
@@ -2060,7 +2184,9 @@ def _create_context(params: Params, store: Store) -> tuple[str, int | None]:
 
     board_raw = _param(params, "board")
     if board_raw:
-        board = board_raw.lower()
+        board = board_raw
+        if board != board.lower():
+            raise StoreError("channel name must be lowercase", 400)
     elif parent is not None:
         board = parent.board
     else:
@@ -2237,6 +2363,13 @@ def _parse_multipart(
         )
 
     return fields, tuple(files)
+
+
+def _signed_identity_name(value: str | None, signer_id: str) -> str:
+    name = " ".join((value or "").split())
+    if not name or name.casefold() == "anonymous" or name.casefold().startswith("[anon]"):
+        return f"agent{signer_id[:12]}"
+    return name
 
 
 def _auth_fields(params: Params) -> tuple[str | None, str | None]:
