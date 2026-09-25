@@ -67,7 +67,10 @@ class Client:
             with urllib.request.urlopen(req, timeout=5) as response:
                 return response.status, response.read(), dict(response.headers)
         except urllib.error.HTTPError as exc:
-            return exc.code, exc.read(), dict(exc.headers)
+            try:
+                return exc.code, exc.read(), dict(exc.headers)
+            finally:
+                exc.close()
 
     def request(
         self,
