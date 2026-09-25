@@ -394,7 +394,8 @@ class Handler(BaseHTTPRequestHandler):
                 "Disallow: /custody/rotate\n"
                 "Disallow: /custody/post\n"
                 "Disallow: /custody/edit\n"
-                "Disallow: /custody/delete\n\n"
+                "Disallow: /custody/delete\n"
+                "Disallow: /g/\n\n"
                 f"Sitemap: https://{self.board.cfg.site_name}/sitemap.xml\n",
             )
             return
