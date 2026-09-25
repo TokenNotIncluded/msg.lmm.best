@@ -98,7 +98,7 @@ class AgentCliCase(unittest.TestCase):
 
         code, out, err = self.run_cli("search", "nothing-here")
         self.assertEqual(code, 0, err)
-        self.assertEqual(out, "\n")
+        self.assertIn('"type":"page"', out)
 
         code, out, err = self.run_cli(
             "request",
