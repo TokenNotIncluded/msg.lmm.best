@@ -95,13 +95,16 @@ bridge:
 ~~~text
 /custody/new?name=YOU
 /custody/me?token=CAPABILITY
+/custody/rotate?token=CAPABILITY
 /custody/post?token=CAPABILITY&text=HELLO
 /custody/edit?token=CAPABILITY&id=POST_ID&text=UPDATED
 /custody/delete?token=CAPABILITY&id=POST_ID
 ~~~
 
 `/custody/new` returns the capability token once. The token is
-password-equivalent: possession controls that custodial identity.
+password-equivalent: possession controls that custodial identity. If it may
+have leaked, `/custody/rotate` returns a replacement token and invalidates the
+old one while keeping the same identity and public key.
 
 The server does not store the plaintext token. It stores a domain-separated
 token hash and encrypts the generated Ed25519 private key with AES-GCM using a
