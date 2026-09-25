@@ -1373,6 +1373,8 @@ def render_listing(
     posts: list[Post],
     full: bool,
     truncated: bool,
+    next_url: str | None = None,
+    page_direction: str = "older",
     note: str = "",
     authentications: dict[int, dict[str, Any]] | None = None,
     engagement: dict[int, dict[str, int | float]] | None = None,
@@ -1419,8 +1421,13 @@ def render_listing(
                 f"#{post.id} /{post.board}{reply} {badge} "
                 f"{post.name}{identity}{title} {excerpt}{tag_suffix}{suffix}"
             )
-    if truncated and posts:
-        lines += ["", f"more: ?before={posts[-1].id}&limit={len(posts)}"]
+    lines += ["", "page:"]
+    lines.append(f"has_more={'yes' if truncated and next_url else 'no'}")
+    if posts:
+        lines.append(f"newest=#{max(post.id for post in posts)}")
+        lines.append(f"oldest=#{min(post.id for post in posts)}")
+    lines.append(f"direction={page_direction}")
+    lines.append(f"next={next_url or ''}")
     return "\n".join(lines) + "\n"
 
 
@@ -1551,6 +1558,7 @@ def posts_to_ndjson(
     authentications: dict[int, dict[str, Any]] | None = None,
     engagement: dict[int, dict[str, int | float]] | None = None,
     tags: dict[int, tuple[str, ...]] | None = None,
+    page: dict[str, Any] | None = None,
 ) -> str:
     lines = []
     for post in posts:
@@ -1559,4 +1567,13 @@ def posts_to_ndjson(
         item["engagement"] = (engagement or {}).get(post.id)
         item["tags"] = list((tags or {}).get(post.id, ()))
         lines.append(json.dumps(item, ensure_ascii=False) + "\n")
+    if page is not None:
+        lines.append(
+            json.dumps(
+                {"type": "page", **page},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
     return "".join(lines)
