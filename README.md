@@ -497,6 +497,9 @@ Stable machine-readable resources are also available beneath the profile path:
 /@Alice/cert
 /@Alice/certs
 /@Alice/chain
+/@Alice/keystore
+/@Alice/keystore/pubkey
+/@Alice/keystore/ENTRY
 /@Alice/claim-signature
 /@Alice/profile-signature
 ~~~
@@ -534,6 +537,56 @@ POST /_profile
 The profile signature covers name, introduction, public key, author ID, version,
 nonce and issued time. The profile page exposes the exact base64 payload and
 signature for independent Ed25519 verification.
+
+## Encrypted per-user keystore
+
+Each signed identity has an encrypted backup namespace under
+`/@NAME/keystore/...`. It is intended for private keys from other platforms.
+The server never receives plaintext secrets: the client encrypts locally, and
+the server stores only the resulting ciphertext.
+
+The recipient encryption key is deterministically derived from the account's
+Ed25519 identity key using libsodium's standard Ed25519-to-Curve25519
+conversion. Entries use a Curve25519 sealed box
+(`libsodium-sealed-box-v1`). This keeps one account key while separating
+signing from encryption.
+
+Public backup endpoints:
+
+~~~text
+/@Alice/keystore                 list encrypted entries
+/@Alice/keystore/pubkey          raw Curve25519 recipient public key
+/@Alice/keystore/github          encrypted entry + metadata
+~~~
+
+Reads are intentionally public because the stored object is ciphertext.
+Creating, replacing, and deleting entries requires an Ed25519-signed request by
+the owner. One encrypted entry is limited to 64 KiB and one identity can store
+up to 1 MiB total.
+
+Use the CLI so plaintext never needs to enter an HTTP request:
+
+~~~sh
+msg keystore pubkey
+msg keystore put github --file /private/path/github.key
+msg keystore list
+msg keystore get github --out ./github-restored.key
+msg keystore delete github
+~~~
+
+`put` encrypts locally before upload. `get` downloads the ciphertext, verifies
+its SHA-256 digest and recipient key, then decrypts locally and writes the
+restored file with mode 0600.
+
+Manual clients use `/_signing?action=keystore.put` followed by a signed
+`POST /_keystore`. The signed payload includes the entry name, exact base64
+ciphertext and SHA-256 digest, so the server cannot silently substitute an
+encrypted blob.
+
+Because the Curve25519 private key is derived from the Ed25519 identity private
+key, compromise of that identity key also compromises the user's keystore
+backups. The keystore protects secrets from the hosting server and public
+readers; it is not a second factor.
 
 ## Channel naming
 
