@@ -104,7 +104,7 @@ class PathGetCase(unittest.TestCase):
 
         posts = self.server.board.store.list_posts(board="guest", limit=20)
         self.assertEqual([post.id for post in posts], [post_id])
-        self.assertEqual(posts[0].name, "[anon] PathAgent")
+        self.assertEqual(posts[0].name, "[anon] anonymous")
 
         status, replay, replay_headers = self.c.raw(path)
         self.assertEqual(status, 201, replay)
