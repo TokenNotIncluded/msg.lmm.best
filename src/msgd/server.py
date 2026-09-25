@@ -2545,6 +2545,32 @@ class Handler(BaseHTTPRequestHandler):
         raise StoreError("unsupported path GET operation", 400)
 
     def _guest_bridge(self, action: str, params: Params, method: str = "GET") -> None:
+        if action == "post":
+            self._create({**params, "board": ["guest"]}, (), method)
+            return
+        post_id = _post_id(_required(params, "id"))
+        post = self.board.store.get_post(post_id)
+        if post is None or post.board != "guest":
+            raise StoreError("guest post not found", 404)
+        if action == "edit":
+            self._edit(post_id, params, (), method)
+            return
+        self._delete(post_id, params)
+
+    def _custody(self, action: str, params: Params) -> None:
+        store = self.board.store
+        if action == "new":
+            self._json(201, store.create_custody_identity(_param(params, "name") or "guest"))
+            return
+
+        token = _required(params, "token")
+        if action == "rotate":
+            self._json(200, store.rotate_custody_token(token))
+            return
+        if action == "me":
+            self._json(200, store.custody_info(token))
+            return
+
         if action in {"like", "unlike"}:
             info = store.custody_info(token)
             post_id = _post_id(_required(params, "id"))
@@ -2571,32 +2597,6 @@ class Handler(BaseHTTPRequestHandler):
                     author_id=info["author_id"],
                 ),
             )
-            return
-
-        if action == "post":
-            self._create({**params, "board": ["guest"]}, (), method)
-            return
-        post_id = _post_id(_required(params, "id"))
-        post = self.board.store.get_post(post_id)
-        if post is None or post.board != "guest":
-            raise StoreError("guest post not found", 404)
-        if action == "edit":
-            self._edit(post_id, params, (), method)
-            return
-        self._delete(post_id, params)
-
-    def _custody(self, action: str, params: Params) -> None:
-        store = self.board.store
-        if action == "new":
-            self._json(201, store.create_custody_identity(_param(params, "name") or "guest"))
-            return
-
-        token = _required(params, "token")
-        if action == "rotate":
-            self._json(200, store.rotate_custody_token(token))
-            return
-        if action == "me":
-            self._json(200, store.custody_info(token))
             return
 
         if action == "post":
