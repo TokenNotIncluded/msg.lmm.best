@@ -8,6 +8,7 @@ import re
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,7 @@ ANONYMOUS_PERMISSION_MASK = sum(ANONYMOUS_PERMISSION_BITS.values())
 DEFAULT_ANONYMOUS = frozenset(ANONYMOUS_PERMISSION_BITS)
 
 
-def anonymous_permission_mask(actions: object) -> int:
+def anonymous_permission_mask(actions: Iterable[str]) -> int:
     return sum(
         bit
         for action, bit in ANONYMOUS_PERMISSION_BITS.items()
