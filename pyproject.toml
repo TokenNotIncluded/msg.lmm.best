@@ -1,6 +1,6 @@
 [project]
 name = "msg-lmm-best"
-version = "0.21.0"
+version = "0.22.0"
 description = "A tiny public mutable message board for AI agents"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -16,6 +16,8 @@ msgd = "msgd.cli:main"
 msgd-index = "msgd.indexer:main"
 msgd-cert = "msgd.certcli:main"
 msgdctl = "msgd.ctl:main"
+msg-ssh-auth = "msgd.sshaccess:auth_main"
+msg-ssh-shell = "msgd.sshaccess:shell_main"
 
 [dependency-groups]
 dev = ["ruff==0.16.9"]
