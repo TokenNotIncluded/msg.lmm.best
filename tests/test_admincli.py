@@ -172,7 +172,7 @@ class AdminCliCase(unittest.TestCase):
         rejected = reject(
             self.api,
             self.root_key,
-            str(csr["id"]),
+            f"csr:{csr['id']}",
             reason="not approved",
         )
         self.assertEqual(rejected["status"], "rejected")
@@ -180,7 +180,7 @@ class AdminCliCase(unittest.TestCase):
 
         member = Ed25519PrivateKey.generate()
         csr2 = self.create_csr(member)
-        issued = approve(self.api, self.root_key, str(csr2["id"]))
+        issued = approve(self.api, self.root_key, f"csr:{csr2['id']}")
         serial = issued["serial"]
 
         response = revoke(
