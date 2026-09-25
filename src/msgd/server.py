@@ -40,6 +40,8 @@ from msgd.render import (
     render_error,
     render_inbox,
     render_index,
+    render_latest_pointer,
+    render_latest_root,
     render_listing,
     render_name_index,
     render_ok,
@@ -743,6 +745,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if head == "index":
             self._index(segments, params)
+            return
+        if head == "latest":
+            self._latest(segments, params)
             return
         if head == "hot":
             self._hot(params)
@@ -2688,6 +2693,7 @@ class Handler(BaseHTTPRequestHandler):
                         "version": __version__,
                         "indexes": manifest,
                         "views": {
+                            "latest": "/latest",
                             "search": "/_search?q=TEXT",
                             "hot": "/hot",
                             "rss": "/rss.xml",
@@ -2957,6 +2963,58 @@ class Handler(BaseHTTPRequestHandler):
                 next_url=next_url,
             ),
         )
+
+    def _latest(self, segments: list[str], params: Params) -> None:
+        kinds = (
+            "post",
+            "update",
+            "reply",
+            "user",
+            "profile",
+            "board",
+            "tag",
+            "file",
+        )
+        fmt = (_param(params, "format") or "").lower()
+        if fmt not in {"", "json"}:
+            raise StoreError("format must be json", 400)
+
+        if len(segments) == 1:
+            if fmt == "json":
+                self._json(
+                    200,
+                    {
+                        "type": "latest-root",
+                        "routes": {kind: f"/latest/{kind}" for kind in kinds},
+                        "redirect": "?redirect=1",
+                    },
+                )
+            else:
+                self._send(200, render_latest_root())
+            return
+
+        if len(segments) != 2 or segments[1] not in kinds:
+            self._error(404, "unknown latest pointer", "see /latest")
+            return
+
+        kind = segments[1]
+        item = self.board.store.latest_pointer(kind)
+        if item is None:
+            self._error(404, f"no {kind} is available yet", "see /latest")
+            return
+
+        if _truthy(_param(params, "redirect")):
+            self._send(
+                307,
+                render_ok(target=item["target"]),
+                extra_headers={"Location": str(item["target"])},
+            )
+            return
+
+        if fmt == "json":
+            self._json(200, item)
+            return
+        self._send(200, render_latest_pointer(item))
 
     def _hot(self, params: Params) -> None:
         sort = (_param(params, "sort") or "hot").lower()

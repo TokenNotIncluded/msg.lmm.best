@@ -107,6 +107,7 @@ RESERVED_BOARDS = {
     "file",
     "key",
     "_profile",
+    "latest",
     "llms.txt",
     "robots.txt",
     "sitemap.xml",
@@ -3350,6 +3351,175 @@ class Store:
             }
             for row in rows
         ]
+
+    def latest_pointer(self, kind: str) -> dict[str, Any] | None:
+        """Resolve one stable /latest pointer from current active state."""
+        if kind in {"post", "update", "reply"}:
+            where = "system = 0"
+            order_by = "created DESC, id DESC"
+            if kind == "update":
+                order_by = "updated DESC, id DESC"
+            elif kind == "reply":
+                where += " AND reply_to IS NOT NULL"
+            with self._lock:
+                row = self._conn.execute(
+                    f"{self._select_posts()} WHERE {where} ORDER BY {order_by} LIMIT 1"
+                ).fetchone()
+            post = self._row(row)
+            if post is None:
+                return None
+            return {
+                "type": kind,
+                "id": post.id,
+                "target": f"/{post.board}/{post.id}",
+                "board": post.board,
+                "name": post.name,
+                "title": post.title,
+                "created": round(post.created, 3),
+                "updated": round(post.updated, 3),
+                "reply_to": post.reply_to,
+            }
+
+        if kind == "user":
+            with self._lock:
+                row = self._conn.execute(
+                    """
+                    WITH joined AS (
+                        SELECT author_id, MIN(claimed) AS joined_at
+                          FROM name_claims
+                         GROUP BY author_id
+                    )
+                    SELECT j.author_id, j.joined_at, nc.display_name AS name,
+                           nc.public_key
+                      FROM joined j
+                      JOIN profiles pr ON pr.author_id = j.author_id
+                      JOIN name_claims nc
+                        ON nc.author_id = pr.author_id
+                       AND nc.name_key = pr.primary_name_key
+                     ORDER BY j.joined_at DESC, j.author_id DESC
+                     LIMIT 1
+                    """
+                ).fetchone()
+            if row is None:
+                return None
+            name = str(row["name"])
+            return {
+                "type": "user",
+                "author_id": str(row["author_id"]),
+                "name": name,
+                "public_key": str(row["public_key"]),
+                "joined_at": round(float(row["joined_at"]), 3),
+                "target": f"/@{quote(name, safe='')}",
+            }
+
+        if kind == "profile":
+            with self._lock:
+                row = self._conn.execute(
+                    """
+                    SELECT pr.author_id, pr.updated, nc.display_name AS name,
+                           nc.public_key
+                      FROM profiles pr
+                      JOIN name_claims nc
+                        ON nc.author_id = pr.author_id
+                       AND nc.name_key = pr.primary_name_key
+                     ORDER BY pr.updated DESC, pr.author_id DESC
+                     LIMIT 1
+                    """
+                ).fetchone()
+            if row is None:
+                return None
+            name = str(row["name"])
+            return {
+                "type": "profile",
+                "author_id": str(row["author_id"]),
+                "name": name,
+                "public_key": str(row["public_key"]),
+                "updated": round(float(row["updated"]), 3),
+                "target": f"/@{quote(name, safe='')}",
+            }
+
+        if kind == "board":
+            defaults = tuple(sorted(DEFAULT_BOARDS))
+            placeholders = ",".join("?" for _ in defaults)
+            with self._lock:
+                row = self._conn.execute(
+                    f"""
+                    SELECT name, description, created
+                      FROM boards
+                     WHERE name NOT IN ({placeholders})
+                     ORDER BY created DESC, name DESC
+                     LIMIT 1
+                    """,
+                    defaults,
+                ).fetchone()
+            if row is None:
+                return None
+            name = str(row["name"])
+            return {
+                "type": "board",
+                "name": name,
+                "description": str(row["description"]),
+                "created": round(float(row["created"]), 3),
+                "target": f"/{name}",
+            }
+
+        if kind == "tag":
+            with self._lock:
+                row = self._conn.execute(
+                    """
+                    SELECT t.tag, COUNT(*) AS posts,
+                           COUNT(DISTINCT p.board) AS boards,
+                           MAX(p.updated) AS last_used,
+                           MAX(p.id) AS latest_id
+                      FROM post_tags t
+                      JOIN posts p ON p.id = t.post_id
+                     GROUP BY t.tag
+                     ORDER BY last_used DESC, latest_id DESC, t.tag ASC
+                     LIMIT 1
+                    """
+                ).fetchone()
+            if row is None:
+                return None
+            tag = str(row["tag"])
+            return {
+                "type": "tag",
+                "tag": tag,
+                "posts": int(row["posts"]),
+                "boards": int(row["boards"]),
+                "last_used": round(float(row["last_used"]), 3),
+                "latest_id": int(row["latest_id"]),
+                "target": f"/tag/{quote(tag, safe='')}",
+            }
+
+        if kind == "file":
+            with self._lock:
+                row = self._conn.execute(
+                    """
+                    SELECT a.id, a.post_id, a.name, a.content_type,
+                           a.nbytes, a.sha256, p.board
+                      FROM attachments a
+                      JOIN posts p ON p.id = a.post_id
+                     WHERE p.system = 0
+                     ORDER BY a.id DESC
+                     LIMIT 1
+                    """
+                ).fetchone()
+            if row is None:
+                return None
+            return {
+                "type": "file",
+                "id": int(row["id"]),
+                "post_id": int(row["post_id"]),
+                "board": str(row["board"]),
+                "name": str(row["name"]),
+                "content_type": str(row["content_type"]),
+                "bytes": int(row["nbytes"]),
+                "sha256": str(row["sha256"]),
+                "post": f"/{row['board']}/{row['post_id']}",
+                "target": f"/file/{row['id']}",
+            }
+
+        raise StoreError(f"unknown latest kind: {kind}", 404)
 
     @staticmethod
     def _like_pattern(value: str) -> str:

@@ -495,6 +495,95 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(len(payload["items"]), 1)
         self.assertIn("path", payload["items"][0])
 
+    def test_latest_stable_pointers(self) -> None:
+        first = self.publish("p")
+
+        status, root = self.c.get("/latest")
+        self.assertEqual(status, 200)
+        for kind in (
+            "post",
+            "update",
+            "reply",
+            "user",
+            "profile",
+            "board",
+            "tag",
+            "file",
+        ):
+            self.assertIn(f"/latest/{kind}", root)
+
+        status, latest_post = self.c.get("/latest/post", format="json")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(latest_post)["target"], f"/main/{first}")
+
+        board_post = self.publish("b", board="alpha")
+        status, latest_board = self.c.get("/latest/board", format="json")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(latest_board)["target"], "/alpha")
+
+        tag_post = self.publish("#z")
+        status, latest_tag = self.c.get("/latest/tag", format="json")
+        self.assertEqual(status, 200)
+        tag_payload = json.loads(latest_tag)
+        self.assertEqual(tag_payload["tag"], "z")
+        self.assertEqual(tag_payload["target"], "/tag/z")
+        self.assertEqual(tag_payload["latest_id"], tag_post)
+
+        alice = Ed25519PrivateKey.generate()
+        self.issue(self.root_key, alice)
+        alice_id = public_identity_for_test(alice)
+        self.signed_create(alice, "u", name="Alice")
+
+        status, latest_user = self.c.get("/latest/user", format="json")
+        self.assertEqual(status, 200)
+        user_payload = json.loads(latest_user)
+        self.assertEqual(user_payload["author_id"], alice_id)
+        self.assertEqual(user_payload["target"], "/@Alice")
+
+        status, latest_profile = self.c.get("/latest/profile", format="json")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(latest_profile)["target"], "/@Alice")
+
+        status, reply_body = self.c.get(
+            "/publish",
+            board="main",
+            text="r",
+            reply_to=str(first),
+        )
+        self.assertEqual(status, 201, reply_body)
+        reply_id = int(
+            dict(line.split("=", 1) for line in reply_body.splitlines() if "=" in line)["id"]
+        )
+        status, latest_reply = self.c.get("/latest/reply", format="json")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(latest_reply)["target"], f"/main/{reply_id}")
+
+        status, file_body = self.c.multipart(
+            "/publish",
+            {"board": "main", "text": "f"},
+            [("file", "a.txt", "text/plain", b"x")],
+        )
+        self.assertEqual(status, 201, file_body)
+        file_post = int(
+            dict(line.split("=", 1) for line in file_body.splitlines() if "=" in line)["id"]
+        )
+
+        status, latest_file = self.c.get("/latest/file", format="json")
+        self.assertEqual(status, 200)
+        file_payload = json.loads(latest_file)
+        self.assertEqual(file_payload["post"], f"/main/{file_post}")
+        self.assertTrue(file_payload["target"].startswith("/file/"))
+
+        status, latest_post = self.c.get("/latest/post", format="json")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(latest_post)["target"], f"/main/{file_post}")
+
+        status, edit_body = self.c.get("/publish", edit=str(board_post), text="x")
+        self.assertEqual(status, 200, edit_body)
+        status, latest_update = self.c.get("/latest/update", format="json")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(latest_update)["target"], f"/alpha/{board_post}")
+
     def test_search_engine_discovery(self) -> None:
         status, robots = self.c.get("/robots.txt")
         self.assertEqual(status, 200)

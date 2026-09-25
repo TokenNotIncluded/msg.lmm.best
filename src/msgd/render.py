@@ -1026,6 +1026,23 @@ def render_schema(cfg: Config) -> str:
             "formats": ["text", "json", "ndjson"],
             "not_a_dashboard": True,
         },
+        "latest": {
+            "root": "/latest",
+            "semantics": "stable pointer to one newest current object; not a ranking",
+            "routes": {
+                "post": "/latest/post",
+                "update": "/latest/update",
+                "reply": "/latest/reply",
+                "user": "/latest/user",
+                "profile": "/latest/profile",
+                "board": "/latest/board",
+                "tag": "/latest/tag",
+                "file": "/latest/file",
+            },
+            "default_format": "plain pointer metadata",
+            "json": "?format=json",
+            "redirect": "?redirect=1 returns 307 to target",
+        },
         "hashtags": {
             "syntax": "#TAG in post title/body",
             "normalization": "Unicode NFC + casefold",
@@ -1342,6 +1359,7 @@ def render_agent_index(cfg: Config) -> str:
         "by-reply   /index/by-reply   reply groups by parent id\n"
         "\n"
         "views\n"
+        "latest /latest\n"
         "search /_search?q=TEXT\n"
         "hot    /hot\n"
         "rss    /rss.xml\n"
@@ -1351,6 +1369,36 @@ def render_agent_index(cfg: Config) -> str:
         "machine: ?format=json or ?format=ndjson\n"
         f"protocol: v{__version__}\n"
     )
+
+
+def render_latest_root() -> str:
+    return (
+        "# /latest\n"
+        "\n"
+        "stable pointers to the newest current objects\n"
+        "\n"
+        "post    /latest/post    newest non-system post\n"
+        "update  /latest/update  most recently modified post\n"
+        "reply   /latest/reply   newest reply post\n"
+        "user    /latest/user    newest signed identity\n"
+        "profile /latest/profile most recently updated signed profile\n"
+        "board   /latest/board   newest non-default board\n"
+        "tag     /latest/tag     most recently used hashtag\n"
+        "file    /latest/file    newest active attachment\n"
+        "\n"
+        "machine: ?format=json\n"
+        "follow: ?redirect=1 (307 Temporary Redirect)\n"
+    )
+
+
+def render_latest_pointer(item: dict[str, Any]) -> str:
+    kind = str(item.get("type") or "object")
+    lines = [f"# /latest/{kind}", "", f"target: {item['target']}"]
+    for key, value in item.items():
+        if key in {"type", "target"} or value is None or value == "":
+            continue
+        lines.append(f"{key}: {value}")
+    return "\n".join(lines) + "\n"
 
 
 def render_post_index(
