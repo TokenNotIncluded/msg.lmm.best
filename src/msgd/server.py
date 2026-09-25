@@ -431,8 +431,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if action == "post.create":
             board, reply_to = _create_context(params, store)
-        if board == "ca":
-            raise StoreError("/ca is a system-managed audit topic; use /_csr", 403)
+            if board == "ca":
+                raise StoreError("/ca is a system-managed audit topic; use /_csr", 403)
             body, title, name, _ = store.prepare_post(
                 body=_required(params, "text"),
                 title=_param(params, "title") or "",
@@ -476,6 +476,8 @@ class Handler(BaseHTTPRequestHandler):
             post = store.get_post(_int_required(params, "id"))
             if post is None:
                 raise StoreError("post not found", 404)
+            if post.board == "ca":
+                raise StoreError("/ca is a system-managed audit topic", 403)
             version = post.sig_version + 1 if post.signed else 1
             if action == "post.edit":
                 body, title, name, _ = store.prepare_post(
@@ -1025,6 +1027,8 @@ class Handler(BaseHTTPRequestHandler):
         if _truthy(_param(params, "clear_files")):
             raise StoreError("clear_files is only valid when editing", 400)
         board, reply_to = _create_context(params, store)
+        if board == "ca":
+            raise StoreError("/ca is a system-managed audit topic; use /_csr", 403)
         body, title, name, _ = store.prepare_post(
             body=_required(params, "text"),
             title=_param(params, "title") or "",
