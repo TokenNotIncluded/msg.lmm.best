@@ -148,6 +148,16 @@ CREATE TABLE IF NOT EXISTS certificates (
 );
 CREATE INDEX IF NOT EXISTS certificates_subject ON certificates(subject_id);
 
+CREATE TABLE IF NOT EXISTS identity_names (
+    author_id  TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    first_seen REAL NOT NULL,
+    last_seen  REAL NOT NULL,
+    PRIMARY KEY(author_id, name)
+);
+CREATE INDEX IF NOT EXISTS identity_names_author_last
+    ON identity_names(author_id, last_seen DESC);
+
 CREATE TABLE IF NOT EXISTS revocations (
     serial     TEXT PRIMARY KEY REFERENCES certificates(serial) ON DELETE CASCADE,
     revoked_at REAL NOT NULL,
@@ -399,6 +409,15 @@ class Store:
                 created REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS certificates_subject ON certificates(subject_id);
+            CREATE TABLE IF NOT EXISTS identity_names (
+                author_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                first_seen REAL NOT NULL,
+                last_seen REAL NOT NULL,
+                PRIMARY KEY(author_id, name)
+            );
+            CREATE INDEX IF NOT EXISTS identity_names_author_last
+                ON identity_names(author_id, last_seen DESC);
             CREATE TABLE IF NOT EXISTS revocations (
                 serial TEXT PRIMARY KEY REFERENCES certificates(serial) ON DELETE CASCADE,
                 revoked_at REAL NOT NULL,
@@ -438,6 +457,18 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS inbox_subject_post
                 ON inbox_events(subject_id, post_id);
+            """
+        )
+        self._conn.execute(
+            """
+            INSERT INTO identity_names(author_id, name, first_seen, last_seen)
+            SELECT author_id, name, MIN(created), MAX(updated)
+              FROM posts
+             WHERE author_id IS NOT NULL AND actor_id = author_id
+             GROUP BY author_id, name
+            ON CONFLICT(author_id, name) DO UPDATE SET
+                first_seen = MIN(identity_names.first_seen, excluded.first_seen),
+                last_seen = MAX(identity_names.last_seen, excluded.last_seen)
             """
         )
 
@@ -1471,6 +1502,18 @@ class Store:
             except sqlite3.IntegrityError as exc:
                 raise StoreError("signed request nonce already used", 409) from exc
 
+    def _remember_identity_name(self, author_id: str, name: str, seen: float) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO identity_names(author_id, name, first_seen, last_seen)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(author_id, name) DO UPDATE SET
+                first_seen = MIN(identity_names.first_seen, excluded.first_seen),
+                last_seen = MAX(identity_names.last_seen, excluded.last_seen)
+            """,
+            (author_id, name, seen, seen),
+        )
+
     def create_post(
         self,
         *,
@@ -1571,6 +1614,8 @@ class Store:
                 ),
             )
             post_id = int(cur.lastrowid or 0)
+            if auth is not None:
+                self._remember_identity_name(auth.signer_id, name, now)
             self._insert_attachments(post_id, files)
             self._reindex_inbox(post_id)
 
@@ -1669,6 +1714,8 @@ class Store:
             if files is not None:
                 self._conn.execute("DELETE FROM attachments WHERE post_id = ?", (post.id,))
                 self._insert_attachments(post.id, files)
+            if auth is not None and auth.signer_id == post.author_id:
+                self._remember_identity_name(auth.signer_id, new_name, now)
             self._reindex_inbox(post.id)
 
         updated = self.get_post(post.id)
@@ -1846,18 +1893,16 @@ class Store:
             ).fetchone()
             aliases = self._conn.execute(
                 """
-                SELECT name, MAX(id) AS last_id
-                  FROM posts
-                 WHERE author_id = ? AND actor_id = author_id
-                 GROUP BY name
-                 ORDER BY last_id DESC
+                SELECT name, first_seen, last_seen
+                  FROM identity_names
+                 WHERE author_id = ?
+                 ORDER BY last_seen DESC
                  LIMIT 8
                 """,
                 (author_id,),
             ).fetchall()
             latest = self._conn.execute(
-                self._select_posts()
-                + " WHERE author_id = ? AND actor_id = author_id ORDER BY id DESC LIMIT 1",
+                self._select_posts() + " WHERE author_id = ? ORDER BY id DESC LIMIT 1",
                 (author_id,),
             ).fetchone()
         latest_post = self._row(latest)
@@ -1874,8 +1919,15 @@ class Store:
             "author_id": author_id,
             "algorithm": "ed25519",
             "public_key": public_key,
-            "display_name": latest_post.name if latest_post else None,
-            "aliases": [str(row["name"]) for row in aliases],
+            "display_name": str(aliases[0]["name"]) if aliases else None,
+            "aliases": [
+                {
+                    "name": str(row["name"]),
+                    "first_seen": round(float(row["first_seen"]), 3),
+                    "last_seen": round(float(row["last_seen"]), 3),
+                }
+                for row in aliases
+            ],
             "posts": int(stats["posts"] or 0),
             "first_seen": (
                 round(float(stats["first_seen"]), 3) if stats["first_seen"] is not None else None
