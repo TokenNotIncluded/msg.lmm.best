@@ -476,11 +476,13 @@ CREATE TABLE IF NOT EXISTS websub_hub_pings (
     id           TEXT PRIMARY KEY,
     hub          TEXT NOT NULL,
     topic        TEXT NOT NULL,
+    generation   INTEGER NOT NULL DEFAULT 1,
     created      REAL NOT NULL,
     attempts     INTEGER NOT NULL DEFAULT 0,
     next_attempt REAL NOT NULL,
     delivered    REAL,
-    last_error   TEXT NOT NULL DEFAULT ''
+    last_error   TEXT NOT NULL DEFAULT '',
+    UNIQUE(hub, topic)
 );
 CREATE INDEX IF NOT EXISTS websub_hub_pings_due
     ON websub_hub_pings(delivered, next_attempt, created);
@@ -4275,7 +4277,7 @@ class Store:
                 "SELECT webhook_id, attempts FROM webhook_deliveries WHERE id = ?",
                 (delivery_id,),
             ).fetchone()
-            if row is None:
+            if row is None or int(row["generation"]) != generation:
                 return
             attempts = int(row["attempts"]) + 1
             if success:
@@ -4568,13 +4570,20 @@ class Store:
 
     def queue_websub_hub_ping(self, hub: str, topic: str) -> str:
         now = time.time()
-        ping_id = secrets.token_hex(16)
+        ping_id = hashlib.sha256(f"{hub}\n{topic}".encode()).hexdigest()
         with self._lock, self._conn:
             self._conn.execute(
                 """
                 INSERT INTO websub_hub_pings(
-                    id, hub, topic, created, next_attempt
-                ) VALUES (?, ?, ?, ?, ?)
+                    id, hub, topic, generation, created, next_attempt
+                ) VALUES (?, ?, ?, 1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    generation = websub_hub_pings.generation + 1,
+                    created = excluded.created,
+                    attempts = 0,
+                    next_attempt = excluded.next_attempt,
+                    delivered = NULL,
+                    last_error = ''
                 """,
                 (ping_id, hub, topic, now, now),
             )
@@ -4585,7 +4594,7 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT id, hub, topic, created, attempts, next_attempt
+                SELECT id, hub, topic, generation, created, attempts, next_attempt
                   FROM websub_hub_pings
                  WHERE delivered IS NULL
                    AND attempts < 6
@@ -4600,6 +4609,7 @@ class Store:
     def finish_websub_hub_ping(
         self,
         ping_id: str,
+        generation: int,
         *,
         success: bool,
         error: str = "",
@@ -4608,7 +4618,7 @@ class Store:
         now = time.time()
         with self._lock, self._conn:
             row = self._conn.execute(
-                "SELECT attempts FROM websub_hub_pings WHERE id = ?",
+                "SELECT attempts, generation FROM websub_hub_pings WHERE id = ?",
                 (ping_id,),
             ).fetchone()
             if row is None:
@@ -4619,18 +4629,18 @@ class Store:
                     """
                     UPDATE websub_hub_pings
                        SET attempts = ?, delivered = ?, last_error = ''
-                     WHERE id = ?
+                     WHERE id = ? AND generation = ?
                     """,
-                    (attempts, now, ping_id),
+                    (attempts, now, ping_id, generation),
                 )
             else:
                 self._conn.execute(
                     """
                     UPDATE websub_hub_pings
                        SET attempts = ?, next_attempt = ?, last_error = ?
-                     WHERE id = ?
+                     WHERE id = ? AND generation = ?
                     """,
-                    (attempts, now + retry_after, error[:500], ping_id),
+                    (attempts, now + retry_after, error[:500], ping_id, generation),
                 )
 
     def prune_websub(self) -> None:
