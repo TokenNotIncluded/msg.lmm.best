@@ -1135,13 +1135,9 @@ def render_post_index(
             title = f' · "{post.title}"' if post.title else ""
             target = f"/{post.board}/{post.id}"
             if kind == "by-time":
-                lines.append(
-                    f"{iso(post.created)} · #{post.id} · {target} · {post.name}{title}"
-                )
+                lines.append(f"{iso(post.created)} · #{post.id} · {target} · {post.name}{title}")
             else:
-                lines.append(
-                    f"#{post.id} · {target} · {iso(post.created)} · {post.name}{title}"
-                )
+                lines.append(f"#{post.id} · {target} · {iso(post.created)} · {post.name}{title}")
     if next_url:
         lines += ["", f"next: {next_url}"]
     return "\n".join(lines) + "\n"
