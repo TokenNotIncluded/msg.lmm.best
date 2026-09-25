@@ -1409,6 +1409,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.board.engagement.available:
                 self.board.engagement.set_comments(post.id, post.board, 0)
                 self._sync_reply_count(reply_to)
+            self._emit_post_created(post)
             self._send(
                 201,
                 render_ok(
@@ -1436,6 +1437,7 @@ class Handler(BaseHTTPRequestHandler):
             store.delete_post(post)
             self.board.engagement.remove_post(post.id, post.board)
             self._sync_reply_count(parent_id)
+            self._emit_post_deleted(post, str(info["author_id"]) if "info" in locals() else None)
             self._send(200, render_ok(ok=1, action="delete", id=post_id, auth="custodial"))
             return
 
@@ -1710,6 +1712,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.board.engagement.available:
             self.board.engagement.set_comments(post.id, post.board, 0)
             self._sync_reply_count(reply_to)
+        self._emit_post_created(post)
         authentication = store.post_authentication(post)
         actor_cert = authentication.get("actor") or {}
         self._send(
@@ -1810,6 +1813,7 @@ class Handler(BaseHTTPRequestHandler):
             files=file_update,
             max_body_bytes=_body_limit(self.board.cfg, method),
         )
+        self._emit_post_updated(updated)
         authentication = store.post_authentication(updated)
         actor_cert = authentication.get("actor") or {}
         self._send(
@@ -1870,6 +1874,7 @@ class Handler(BaseHTTPRequestHandler):
         store.delete_post(post)
         self.board.engagement.remove_post(post.id, post.board)
         self._sync_reply_count(parent_id)
+        self._emit_post_deleted(post, actor_id)
         self._send(200, render_ok(ok=1, action="delete", id=post_id, actor_id=actor_id))
 
 
