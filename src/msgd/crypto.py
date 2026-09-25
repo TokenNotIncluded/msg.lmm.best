@@ -130,6 +130,7 @@ def request_payload(
     webhook_enabled: bool = True,
     profile_name: str = "",
     profile_bio: str = "",
+    profile_public_key: str = "",
 ) -> bytes:
     if not IDENTITY_RE.fullmatch(signer_id):
         raise SignatureError("invalid signer id")
@@ -253,6 +254,7 @@ def request_payload(
             ("issued", str(issued)),
             ("profile_name", profile_name),
             ("profile_bio", profile_bio),
+            ("profile_public_key", profile_public_key),
         ]
     else:
         raise SignatureError(f"unsupported signed action: {action}")
