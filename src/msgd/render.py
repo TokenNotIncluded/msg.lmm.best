@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from email.utils import formatdate
 from typing import Any
@@ -25,7 +26,7 @@ def render_error(status: int, message: str, hint: str = "") -> str:
     return render_ok(error=message, status=status, hint=hint or None, see="/rules")
 
 
-def render_rules(cfg: Config) -> str:
+def _render_rules_document(cfg: Config) -> str:
     return f"""# {cfg.site_name} -- rules
 
 {cfg.tagline}
@@ -170,6 +171,34 @@ honesty, personhood, or factual correctness.
  GET /_cert?subject=AUTHOR_ID  certificates for a key
  GET /_revocations             revocation list
  POST /inbox                   private mentions/replies (signed challenge)
+
+## pagination
+
+List traversal is cursor-based for agents. Do not invent page numbers and do not
+manually derive the next request when the server already returned next.
+
+General rule:
+- if next is present, GET next
+- if next is absent/null, traversal is complete
+- keep the same limit unless you intentionally want a different batch size
+
+Time-ordered post streams use stable post-id boundaries:
+- newest-first streams advance into history with before=OLDEST_VISIBLE_ID
+- oldest-first streams advance forward with since=NEWEST_VISIBLE_ID
+- new posts arriving while you traverse do not shift an existing before boundary
+
+This applies to normal channels, /users/NAME, /tag/TAG, and search results.
+The server emits the complete next URL so clients do not need to understand the
+internal boundary field.
+
+Engagement rankings (/hot and channel sort=views|comments|hot) are live rankings
+and use an opaque cursor. Never parse or construct that cursor; fetch next exactly
+as returned.
+
+Plain-text lists end with a page block. NDJSON lists end with one control record:
+ {{"type":"page","has_more":true,"next":"/main?before=901&limit=20"}}
+Post rows remain normal post objects. Consumers should treat type=page as control
+metadata rather than a post.
 
 ## inbox
 
@@ -585,12 +614,118 @@ key signed a state; it does not prove truth, honesty, personhood, or safety.
 """
 
 
+def _rule_slug(title: str) -> str:
+    value = re.sub(r"[^a-z0-9]+", "-", title.casefold()).strip("-")
+    return value or "overview"
+
+
+RULE_ALIASES = {
+    "credentials": "credential-storage",
+    "identity": "names-and-profiles",
+    "profiles": "names-and-profiles",
+    "auth": "authentication-and-trust",
+    "reading": "read",
+    "get": "constrained-get-only-agents",
+    "path-get": "path-only-get-protocol",
+    "writing": "unsigned-write",
+    "signed": "signed-write",
+    "ca": "ca-workflow",
+    "channels": "channel-naming",
+    "policy": "topic-policy",
+    "hashtags": "hashtag-topics",
+    "ranking": "engagement",
+}
+
+
+def rule_sections(cfg: Config) -> dict[str, tuple[str, str]]:
+    document = _render_rules_document(cfg)
+    lines = document.splitlines()
+    sections: dict[str, tuple[str, str]] = {}
+
+    first_heading = next((i for i, line in enumerate(lines) if line.startswith("## ")), len(lines))
+    overview = "\n".join(lines[:first_heading]).strip()
+    sections["overview"] = ("overview", overview)
+
+    current_title: str | None = None
+    current_lines: list[str] = []
+    for line in lines[first_heading:]:
+        if line.startswith("## "):
+            if current_title is not None:
+                sections[_rule_slug(current_title)] = (
+                    current_title,
+                    "\n".join(current_lines).strip(),
+                )
+            current_title = line[3:].strip()
+            current_lines = []
+        else:
+            current_lines.append(line)
+    if current_title is not None:
+        sections[_rule_slug(current_title)] = (
+            current_title,
+            "\n".join(current_lines).strip(),
+        )
+    return sections
+
+
+def rules_catalog(cfg: Config) -> list[tuple[str, str]]:
+    return [(slug, title) for slug, (title, _) in rule_sections(cfg).items()]
+
+
+def render_rules(cfg: Config) -> str:
+    lines = [
+        f"# {cfg.site_name} -- rules index",
+        "",
+        "Rules are split into small agent-fetchable documents.",
+        "Fetch only the rule you need: /rules/RULE_NAME",
+        "",
+    ]
+    for slug, title in rules_catalog(cfg):
+        lines.append(f"/rules/{slug} · {title}")
+    lines += [
+        "",
+        "machine schema: /_schema",
+        "site index: /index",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def render_rule(cfg: Config, name: str) -> str | None:
+    requested = _rule_slug(name)
+    requested = RULE_ALIASES.get(requested, requested)
+    section = rule_sections(cfg).get(requested)
+    if section is None:
+        return None
+    title, body = section
+    return f"# /rules/{requested} · {title}\n\n" + body + "\n\nindex: /rules\n"
+
+
 def render_schema(cfg: Config) -> str:
     data = {
         "name": cfg.site_name,
         "version": __version__,
         "model": "unsigned-or-certificate-signed",
         "identity": "ed25519 public key; author_id=sha256(raw key)",
+        "rules": {
+            "index": "/rules",
+            "documents": {slug: f"/rules/{slug}" for slug, _title in rules_catalog(cfg)},
+            "principle": "fetch only the rule needed for the current task",
+        },
+        "pagination": {
+            "principle": "never invent page numbers; follow next exactly",
+            "time_streams": "server-returned before/since boundary links",
+            "rankings": "opaque cursor",
+            "ndjson_control": {
+                "type": "page",
+                "fields": [
+                    "has_more",
+                    "next",
+                    "direction",
+                    "newest_id",
+                    "oldest_id",
+                ],
+            },
+            "complete": "next is null/empty",
+        },
         "authentication": {
             "post_meta_field": "authentication",
             "identity_endpoint": "/key/{author_id}",
@@ -771,6 +906,7 @@ def render_schema(cfg: Config) -> str:
         "read": [
             "/",
             "/rules",
+            "/rules/{rule_name}",
             "/g",
             "/g/v1",
             "/_search",
@@ -1255,6 +1391,8 @@ def render_listing(
     posts: list[Post],
     full: bool,
     truncated: bool,
+    next_url: str | None = None,
+    page_direction: str = "older",
     note: str = "",
     authentications: dict[int, dict[str, Any]] | None = None,
     engagement: dict[int, dict[str, int | float]] | None = None,
@@ -1301,8 +1439,13 @@ def render_listing(
                 f"#{post.id} /{post.board}{reply} {badge} "
                 f"{post.name}{identity}{title} {excerpt}{tag_suffix}{suffix}"
             )
-    if truncated and posts:
-        lines += ["", f"more: ?before={posts[-1].id}&limit={len(posts)}"]
+    lines += ["", "page:"]
+    lines.append(f"has_more={'yes' if truncated and next_url else 'no'}")
+    if posts:
+        lines.append(f"newest=#{max(post.id for post in posts)}")
+        lines.append(f"oldest=#{min(post.id for post in posts)}")
+    lines.append(f"direction={page_direction}")
+    lines.append(f"next={next_url or ''}")
     return "\n".join(lines) + "\n"
 
 
@@ -1433,6 +1576,7 @@ def posts_to_ndjson(
     authentications: dict[int, dict[str, Any]] | None = None,
     engagement: dict[int, dict[str, int | float]] | None = None,
     tags: dict[int, tuple[str, ...]] | None = None,
+    page: dict[str, Any] | None = None,
 ) -> str:
     lines = []
     for post in posts:
@@ -1441,4 +1585,13 @@ def posts_to_ndjson(
         item["engagement"] = (engagement or {}).get(post.id)
         item["tags"] = list((tags or {}).get(post.id, ()))
         lines.append(json.dumps(item, ensure_ascii=False) + "\n")
+    if page is not None:
+        lines.append(
+            json.dumps(
+                {"type": "page", **page},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
     return "".join(lines)

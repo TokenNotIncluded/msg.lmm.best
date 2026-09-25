@@ -14,7 +14,7 @@ from email.parser import BytesParser
 from email.policy import default as email_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from msgd import __version__
 from msgd.analytics import Engagement
@@ -43,6 +43,7 @@ from msgd.render import (
     render_post,
     render_profile,
     render_rss,
+    render_rule,
     render_rules,
     render_schema,
     render_sitemap,
@@ -230,17 +231,18 @@ class Handler(BaseHTTPRequestHandler):
         *,
         board: str | None,
         limit: int,
+        offset: int = 0,
     ) -> list[Any]:
         if not self.board.engagement.available:
             raise StoreError("Valkey analytics is unavailable", 503)
         scan = min(max(limit * 5, 100), 5000)
-        ids = self.board.engagement.rank(metric, board=board, limit=scan)
+        ids = self.board.engagement.rank(metric, board=board, limit=scan, offset=offset)
         posts = self.board.store.posts_by_ids(ids)
         live_ids = {post.id for post in posts}
         stale = [post_id for post_id in ids if post_id not in live_ids]
         if stale:
             self.board.engagement.remove_ids(stale)
-            ids = self.board.engagement.rank(metric, board=board, limit=scan)
+            ids = self.board.engagement.rank(metric, board=board, limit=scan, offset=offset)
             posts = self.board.store.posts_by_ids(ids)
         if board is not None:
             posts = [post for post in posts if post.board == board]
@@ -370,6 +372,16 @@ class Handler(BaseHTTPRequestHandler):
         head = segments[0] if segments else ""
 
         if head in {"rules", "_rules", "_help", "llms.txt"}:
+            if head == "rules" and len(segments) == 2:
+                rule = render_rule(self.board.cfg, segments[1])
+                if rule is None:
+                    self._error(404, f"unknown rule: {segments[1]}", "see /rules")
+                else:
+                    self._send(200, rule)
+                return
+            if len(segments) > 1:
+                self._error(404, "invalid rules path", "see /rules")
+                return
             self._send(200, render_rules(self.board.cfg))
             return
         if head == "g":
@@ -1908,14 +1920,28 @@ class Handler(BaseHTTPRequestHandler):
         sort = (_param(params, "sort") or "new").lower()
         if sort not in {"new", "newest", "desc", "old", "oldest", "asc"}:
             raise StoreError("user post sort must be new or old", 400)
+        if _param(params, "cursor"):
+            raise StoreError("user time streams use server-returned before/since links", 400)
         order = "asc" if sort in {"old", "oldest", "asc"} else "desc"
         profile, posts = self.board.store.posts_by_username(
             username,
+            since=_int(params, "since", None, 0, None),
+            before=_int(params, "before", None, 0, None),
             limit=limit + 1,
             order=order,
         )
         truncated = len(posts) > limit
         posts = posts[:limit]
+        next_url = _next_time_url(
+            f"/users/{quote(str(profile['name']), safe='')}",
+            params,
+            posts,
+            limit=limit,
+            order=order,
+            has_more=truncated,
+        )
+        page_direction = "newer" if order == "asc" else "older"
+        page = _page_meta(posts, next_url=next_url, direction=page_direction)
         authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
         tags = self.board.store.tags_for_posts([post.id for post in posts])
@@ -1935,12 +1961,13 @@ class Handler(BaseHTTPRequestHandler):
                             }
                             for post in posts
                         ],
+                        "page": page,
                     },
                 )
             else:
                 self._send(
                     200,
-                    posts_to_ndjson(posts, authentications, engagement, tags),
+                    posts_to_ndjson(posts, authentications, engagement, tags, page),
                     content_type="application/x-ndjson; charset=utf-8",
                 )
             return
@@ -1952,6 +1979,8 @@ class Handler(BaseHTTPRequestHandler):
                 posts=posts,
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=truncated,
+                next_url=next_url,
+                page_direction=page_direction,
                 note=(
                     f"signed user @{profile['name']} · "
                     f"author_id={profile['author_id']} · profile=/@{profile['name']}"
@@ -1991,10 +2020,28 @@ class Handler(BaseHTTPRequestHandler):
         sort = (_param(params, "sort") or "new").lower()
         if sort not in {"new", "newest", "desc", "old", "oldest", "asc"}:
             raise StoreError("tag sort must be new or old", 400)
+        if _param(params, "cursor"):
+            raise StoreError("tag time streams use server-returned before/since links", 400)
         order = "asc" if sort in {"old", "oldest", "asc"} else "desc"
-        posts = self.board.store.posts_by_tag(normalized, limit=limit + 1, order=order)
+        posts = self.board.store.posts_by_tag(
+            normalized,
+            since=_int(params, "since", None, 0, None),
+            before=_int(params, "before", None, 0, None),
+            limit=limit + 1,
+            order=order,
+        )
         truncated = len(posts) > limit
         posts = posts[:limit]
+        next_url = _next_time_url(
+            f"/tag/{quote(normalized, safe='')}",
+            params,
+            posts,
+            limit=limit,
+            order=order,
+            has_more=truncated,
+        )
+        page_direction = "newer" if order == "asc" else "older"
+        page = _page_meta(posts, next_url=next_url, direction=page_direction)
         authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
         tags = self.board.store.tags_for_posts([post.id for post in posts])
@@ -2002,7 +2049,7 @@ class Handler(BaseHTTPRequestHandler):
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(posts, authentications, engagement, tags),
+                posts_to_ndjson(posts, authentications, engagement, tags, page),
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
@@ -2014,6 +2061,8 @@ class Handler(BaseHTTPRequestHandler):
                 posts=posts,
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=truncated,
+                next_url=next_url,
+                page_direction=page_direction,
                 note=(
                     f"hashtag #{normalized} · {int(info['posts'])} posts · "
                     f"{int(info['boards'])} boards"
@@ -2035,9 +2084,26 @@ class Handler(BaseHTTPRequestHandler):
 
         limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
         assert limit is not None
-        posts = self._ranked_posts(sort, board=board, limit=limit + 1)
+        scope = _pagination_scope("/hot", params)
+        cursor = _decode_cursor(_param(params, "cursor"), kind="rank", scope=scope)
+        offset = int(cursor.get("offset", 0))
+        if offset < 0:
+            raise StoreError("invalid ranking cursor", 400)
+
+        posts = self._ranked_posts(sort, board=board, limit=limit + 1, offset=offset)
         truncated = len(posts) > limit
         posts = posts[:limit]
+        next_cursor = (
+            _encode_cursor("rank", scope, offset=offset + len(posts)) if truncated else None
+        )
+        next_url = _next_cursor_url(
+            "/hot",
+            params,
+            cursor=next_cursor,
+            limit=limit,
+            has_more=truncated,
+        )
+        page = _page_meta(posts, next_url=next_url, direction="ranked")
         authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
         tags = self.board.store.tags_for_posts([post.id for post in posts])
@@ -2045,7 +2111,7 @@ class Handler(BaseHTTPRequestHandler):
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(posts, authentications, engagement, tags),
+                posts_to_ndjson(posts, authentications, engagement, tags, page),
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
@@ -2056,6 +2122,8 @@ class Handler(BaseHTTPRequestHandler):
                 posts=posts,
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=truncated,
+                next_url=next_url,
+                page_direction="ranked",
                 note="Valkey engagement ranking; likes are unsupported",
                 authentications=authentications,
                 engagement=engagement,
@@ -2080,6 +2148,8 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("invalid author_id", 400)
 
         sort = (_param(params, "sort") or "").lower()
+        next_url: str | None
+        page_direction: str
         if sort in Engagement.SORTS:
             incompatible = [
                 key
@@ -2091,11 +2161,36 @@ class Handler(BaseHTTPRequestHandler):
                     "engagement sort cannot be combined with " + ", ".join(incompatible),
                     400,
                 )
-            posts = self._ranked_posts(sort, board=board, limit=limit + 1)
+            scope = _pagination_scope(f"/{board}", params)
+            cursor = _decode_cursor(_param(params, "cursor"), kind="rank", scope=scope)
+            offset = int(cursor.get("offset", 0))
+            if offset < 0:
+                raise StoreError("invalid ranking cursor", 400)
+            posts = self._ranked_posts(
+                sort,
+                board=board,
+                limit=limit + 1,
+                offset=offset,
+            )
+            truncated = len(posts) > limit
+            posts = posts[:limit]
+            next_cursor = (
+                _encode_cursor("rank", scope, offset=offset + len(posts)) if truncated else None
+            )
+            next_url = _next_cursor_url(
+                f"/{board}",
+                params,
+                cursor=next_cursor,
+                limit=limit,
+                has_more=truncated,
+            )
+            page_direction = "ranked"
             note = f"{info['description']} · sort={sort}"
         else:
             if sort not in {"", "new", "old"}:
                 raise StoreError("sort must be new, old, views, comments, or hot", 400)
+            if _param(params, "cursor"):
+                raise StoreError("time streams use server-returned before/since links", 400)
             order = (
                 "asc"
                 if sort == "old" or (_param(params, "order") or "").lower() == "asc"
@@ -2111,17 +2206,27 @@ class Handler(BaseHTTPRequestHandler):
                 author_id=author_id,
                 search=_param(params, "q"),
             )
+            truncated = len(posts) > limit
+            posts = posts[:limit]
+            next_url = _next_time_url(
+                f"/{board}",
+                params,
+                posts,
+                limit=limit,
+                order=order,
+                has_more=truncated,
+            )
+            page_direction = "newer" if order == "asc" else "older"
             note = info["description"]
 
-        truncated = len(posts) > limit
-        posts = posts[:limit]
+        page = _page_meta(posts, next_url=next_url, direction=page_direction)
         authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
         tags = self.board.store.tags_for_posts([post.id for post in posts])
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(posts, authentications, engagement, tags),
+                posts_to_ndjson(posts, authentications, engagement, tags, page),
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
@@ -2132,6 +2237,8 @@ class Handler(BaseHTTPRequestHandler):
                 posts=posts,
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=truncated,
+                next_url=next_url,
+                page_direction=page_direction,
                 note=note,
                 authentications=authentications,
                 engagement=engagement,
@@ -2151,16 +2258,43 @@ class Handler(BaseHTTPRequestHandler):
         except SearchSyntaxError as exc:
             raise StoreError(str(exc), 400, "/_search for syntax") from exc
 
-        posts, capped = self.board.store.search_posts(spec, limit=limit)
+        scope = _pagination_scope("/_search", params)
+        cursor = _decode_cursor(_param(params, "cursor"), kind="search", scope=scope)
+        cursor_id = cursor.get("id")
+        if cursor_id is not None:
+            try:
+                cursor_id = int(cursor_id)
+            except (TypeError, ValueError) as exc:
+                raise StoreError("invalid search cursor", 400) from exc
+            if cursor_id < 1:
+                raise StoreError("invalid search cursor", 400)
+
+        posts, capped = self.board.store.search_posts(
+            spec,
+            limit=limit,
+            cursor_id=cursor_id,
+        )
         truncated = len(posts) > limit
         visible = posts[:limit]
+        next_cursor = (
+            _encode_cursor("search", scope, id=visible[-1].id) if truncated and visible else None
+        )
+        next_url = _next_cursor_url(
+            "/_search",
+            params,
+            cursor=next_cursor,
+            limit=limit,
+            has_more=truncated,
+        )
+        page_direction = "newer" if spec.order == "asc" else "older"
+        page = _page_meta(visible, next_url=next_url, direction=page_direction)
         authentications = {post.id: self.board.store.post_authentication(post) for post in visible}
         engagement = self._engagement_map(visible)
         tags = self.board.store.tags_for_posts([post.id for post in visible])
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(visible, authentications, engagement, tags),
+                posts_to_ndjson(visible, authentications, engagement, tags, page),
                 content_type="application/x-ndjson; charset=utf-8",
                 extra_headers={"X-Search-Scan-Capped": "1"} if capped else None,
             )
@@ -2175,6 +2309,8 @@ class Handler(BaseHTTPRequestHandler):
                 posts=visible,
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=truncated,
+                next_url=next_url,
+                page_direction=page_direction,
                 note=note,
                 authentications=authentications,
                 engagement=engagement,
@@ -2685,6 +2821,110 @@ def _parse_multipart(
         )
 
     return fields, tuple(files)
+
+
+def _pagination_scope(path: str, params: Params, *, exclude: set[str] | None = None) -> str:
+    skipped = {"cursor", "before", "since", "limit"} | (exclude or set())
+    normalized = {key: list(values) for key, values in sorted(params.items()) if key not in skipped}
+    raw = json.dumps(
+        {"path": path, "params": normalized},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:20]
+
+
+def _encode_cursor(kind: str, scope: str, **values: int | str) -> str:
+    raw = json.dumps(
+        {"v": 1, "kind": kind, "scope": scope, **values},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(
+    value: str | None,
+    *,
+    kind: str,
+    scope: str,
+) -> dict[str, Any]:
+    if not value:
+        return {}
+    if "=" in value or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise StoreError("invalid pagination cursor", 400)
+    padded = value + "=" * ((4 - len(value) % 4) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded)
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error) as exc:
+        raise StoreError("invalid pagination cursor", 400) from exc
+    if (
+        not isinstance(data, dict)
+        or data.get("v") != 1
+        or data.get("kind") != kind
+        or data.get("scope") != scope
+    ):
+        raise StoreError("pagination cursor does not match this listing", 400)
+    return data
+
+
+def _next_time_url(
+    path: str,
+    params: Params,
+    posts: list[Any],
+    *,
+    limit: int,
+    order: str,
+    has_more: bool,
+) -> str | None:
+    if not has_more or not posts:
+        return None
+    pairs: list[tuple[str, str]] = []
+    for key, values in params.items():
+        if key in {"before", "since", "cursor", "limit"}:
+            continue
+        pairs.extend((key, value) for value in values)
+    boundary = "before" if order != "asc" else "since"
+    pairs.append((boundary, str(posts[-1].id)))
+    pairs.append(("limit", str(limit)))
+    return path + "?" + urlencode(pairs)
+
+
+def _next_cursor_url(
+    path: str,
+    params: Params,
+    *,
+    cursor: str | None,
+    limit: int,
+    has_more: bool,
+) -> str | None:
+    if not has_more or not cursor:
+        return None
+    pairs: list[tuple[str, str]] = []
+    for key, values in params.items():
+        if key in {"cursor", "before", "since", "limit"}:
+            continue
+        pairs.extend((key, value) for value in values)
+    pairs.append(("cursor", cursor))
+    pairs.append(("limit", str(limit)))
+    return path + "?" + urlencode(pairs)
+
+
+def _page_meta(
+    posts: list[Any],
+    *,
+    next_url: str | None,
+    direction: str,
+) -> dict[str, Any]:
+    return {
+        "has_more": next_url is not None,
+        "next": next_url,
+        "direction": direction,
+        "newest_id": max((post.id for post in posts), default=None),
+        "oldest_id": min((post.id for post in posts), default=None),
+    }
 
 
 def _path_get_help() -> str:
