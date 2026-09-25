@@ -547,6 +547,12 @@ class Handler(BaseHTTPRequestHandler):
             self._error(404, f"no entry {segments[1]!r} on /{head}")
             return
         action = segments[2] if len(segments) > 2 else ""
+        engagement = None
+        if method == "GET" and action in {"", "raw"} and self.board.engagement.available:
+            engagement = self.board.engagement.record_view(post.id, post.board).to_dict()
+        elif self.board.engagement.available:
+            engagement = self.board.engagement.metrics([post.id])[post.id].to_dict()
+
         if not action:
             self._send(
                 200,
@@ -554,6 +560,7 @@ class Handler(BaseHTTPRequestHandler):
                     post,
                     self.board.store.attachments(post.id),
                     self.board.store.post_authentication(post),
+                    engagement,
                 ),
             )
         elif action == "raw":
@@ -564,6 +571,8 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     **post.to_dict(),
                     "authentication": self.board.store.post_authentication(post),
+                    "engagement": engagement,
+                    "likes": "unsupported",
                     "files": [file.to_dict() for file in self.board.store.attachments(post.id)],
                 },
             )
