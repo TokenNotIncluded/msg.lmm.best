@@ -290,6 +290,12 @@ class PathGetCase(unittest.TestCase):
         self.assertEqual(post.body, "generic path operation")
 
     def test_generic_post_operations_keep_single_request_compatibility(self) -> None:
+        self.server.board.store.set_policy(
+            "main",
+            ("post.create", "post.edit.any", "post.delete.any"),
+            None,
+            1,
+        )
         create = {
             "op": "post.create",
             "rid": "genericreq000001",
