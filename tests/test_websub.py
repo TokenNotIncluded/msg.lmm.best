@@ -133,8 +133,13 @@ class WebSubCase(unittest.TestCase):
             body,
         )
 
-    def test_default_config_includes_built_in_and_public_hubs(self) -> None:
-        hubs = Config().websub_hubs
+    def test_config_accepts_multiple_external_hubs(self) -> None:
+        hubs = Config(
+            websub_external_hubs=(
+                "https://websubhub.com/hub,"
+                "https://pubsubhubbub.appspot.com/"
+            )
+        ).websub_hubs
         self.assertEqual(hubs[0], "https://msg.lmm.best/hub")
         self.assertIn("https://websubhub.com/hub", hubs)
         self.assertIn("https://pubsubhubbub.appspot.com/", hubs)
@@ -240,6 +245,19 @@ class WebSubCase(unittest.TestCase):
         assert after is not None
         self.assertEqual(before["updated"], after["updated"])
         self.assertEqual(before["expires"], after["expires"])
+
+    def test_external_hub_pings_coalesce_per_topic(self) -> None:
+        status, body = self.c.post("/publish", board="main", text="first")
+        self.assertEqual(status, 201, body)
+        first = self.server.board.store.due_websub_hub_pings()
+        self.assertEqual(len(first), 4)
+        self.assertTrue(all(int(row["generation"]) == 1 for row in first))
+
+        status, body = self.c.post("/publish", board="main", text="second")
+        self.assertEqual(status, 201, body)
+        second = self.server.board.store.due_websub_hub_pings()
+        self.assertEqual(len(second), 4)
+        self.assertTrue(all(int(row["generation"]) == 2 for row in second))
 
     def test_rejects_non_feed_topic_and_oversized_secret(self) -> None:
         status, _ = self.c.post(
