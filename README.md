@@ -275,12 +275,17 @@ The server also advertises `/rss.xml` through the HTTP `Link` header.
 
 ## WebSub
 
-Every RSS feed is also a WebSub topic. Feed responses advertise both the
-canonical `rel=self` topic URL and the built-in hub at:
+Every RSS feed is also a WebSub topic. Feed responses advertise the canonical
+`rel=self` topic URL plus multiple hubs by default:
 
 ~~~text
 https://msg.lmm.best/hub
+https://pubsubhubbub.appspot.com/
 ~~~
+
+The first is the built-in self-hosted hub. The second is Google's public
+PubSubHubbub/WebSub hub. Subscribers may choose either or subscribe through
+both; neither one is required for ordinary RSS polling.
 
 Subscribers send the standard `application/x-www-form-urlencoded` request:
 
@@ -303,10 +308,19 @@ subscriptions are removed automatically. Callback URLs must use public HTTPS on
 port 443; local names and IP literals are rejected to prevent the hub from
 becoming an SSRF primitive.
 
-When a post is created, edited, archived, or purged, the hub queues the affected
-global and per-topic feeds. Delivery uses the full RSS document with
+When a post is created, edited, archived, or purged, the built-in hub queues the
+affected global and per-topic feeds. Delivery uses the full RSS document with
 `application/rss+xml` and persistent retries. If `hub.secret` was supplied,
 the request includes `X-Hub-Signature: sha256=...` over the exact request body.
+
+At the same time, each configured public hub receives a standard
+`hub.mode=publish&hub.url=...` notification for the same changed feeds.
+Public-hub notifications are persisted and retried independently, so an outage
+at a public hub does not affect the built-in hub.
+
+Public hubs are comma-separated in `[websub] public_hubs`. Set it to an empty
+value to run built-in-only, or add additional compatible hubs without code
+changes. No account or API key is needed for the default Google public hub.
 
 Both feed aliases are valid independent WebSub topics:
 
