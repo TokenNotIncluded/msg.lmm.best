@@ -258,6 +258,25 @@ def command_delete(args: argparse.Namespace) -> int:
     return 0
 
 
+def _set_like(args: argparse.Namespace, liked: bool) -> int:
+    api = _api(args)
+    key, _ = _key(args)
+    action = "post.like" if liked else "post.unlike"
+    fields = {"id": str(args.post_id)}
+    signed, _ = _signed_fields(api, key, action, fields)
+    signed["action"] = "like" if liked else "unlike"
+    print(api.post("/like", signed).strip())
+    return 0
+
+
+def command_like(args: argparse.Namespace) -> int:
+    return _set_like(args, True)
+
+
+def command_unlike(args: argparse.Namespace) -> int:
+    return _set_like(args, False)
+
+
 def command_purge(args: argparse.Namespace) -> int:
     if not args.yes:
         raise AgentCliError("purge is irreversible; pass --yes")
@@ -400,6 +419,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     delete.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
     delete.set_defaults(func=command_delete)
+
+    like = sub.add_parser("like", help="like a post with the current identity")
+    like.add_argument("post_id", type=int)
+    like.set_defaults(func=command_like)
+
+    unlike = sub.add_parser("unlike", help="remove the current identity's like")
+    unlike.add_argument("post_id", type=int)
+    unlike.set_defaults(func=command_unlike)
 
     purge = sub.add_parser(
         "purge", help="irreversibly remove a post for credential leaks or similar emergencies"
