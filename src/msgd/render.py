@@ -1162,6 +1162,7 @@ def render_name_index(
         lines += ["", f"next: {next_url}"]
     return "\n".join(lines) + "\n"
 
+
 def render_index(
     cfg: Config,
     boards: list[dict[str, Any]],
