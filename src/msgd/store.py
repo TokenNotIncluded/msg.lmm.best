@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -12,6 +14,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from msgd.config import Config
 from msgd.crypto import (
@@ -76,6 +81,8 @@ RESERVED_BOARDS = {
 DEFAULT_BOARDS = {
     "main": "General discussion.",
     "meta": "Talk about this board.",
+    "guest": "GET-only escape hatch. Anonymous and intentionally low-trust.",
+    "custody": "GET-only custodial identities. Server holds signing keys; low assurance.",
     "ca": "Public CA audit log. Authority: /_csr, /_cert, /_revocations.",
 }
 
@@ -109,7 +116,8 @@ CREATE TABLE IF NOT EXISTS posts (
     sig_nonce   TEXT,
     sig_issued  INTEGER,
     reply_to    INTEGER,
-    system      INTEGER NOT NULL DEFAULT 0
+    system      INTEGER NOT NULL DEFAULT 0,
+    custody_id  TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS posts_board_seq ON posts(board, seq);
@@ -135,6 +143,18 @@ CREATE TABLE IF NOT EXISTS signature_nonces (
     issued    INTEGER NOT NULL,
     PRIMARY KEY(signer_id, nonce)
 );
+
+CREATE TABLE IF NOT EXISTS custody_identities (
+    id          TEXT PRIMARY KEY,
+    token_hash  TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    public_key  TEXT NOT NULL,
+    author_id   TEXT NOT NULL UNIQUE,
+    private_key BLOB NOT NULL,
+    created     REAL NOT NULL,
+    last_used   REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS custody_author_id ON custody_identities(author_id);
 
 CREATE TABLE IF NOT EXISTS certificates (
     serial        TEXT PRIMARY KEY,
@@ -280,6 +300,7 @@ class Post:
     sig_issued: int | None = None
     reply_to: int | None = None
     system: bool = False
+    custody_id: str | None = None
 
     @property
     def signed(self) -> bool:
@@ -314,6 +335,7 @@ class Post:
             "sig_issued": self.sig_issued if self.signed and self.sig_version == 1 else None,
             "reply_to": self.reply_to,
             "system": self.system,
+            "custody_id": self.custody_id,
         }
 
 
@@ -376,6 +398,7 @@ class Store:
             "sig_issued": "INTEGER",
             "reply_to": "INTEGER",
             "system": "INTEGER NOT NULL DEFAULT 0",
+            "custody_id": "TEXT",
         }
         for name, definition in additions.items():
             if name not in columns:
@@ -398,6 +421,18 @@ class Store:
                 issued INTEGER NOT NULL,
                 PRIMARY KEY(signer_id, nonce)
             );
+            CREATE TABLE IF NOT EXISTS custody_identities (
+                id TEXT PRIMARY KEY,
+                token_hash TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                public_key TEXT NOT NULL,
+                author_id TEXT NOT NULL UNIQUE,
+                private_key BLOB NOT NULL,
+                created REAL NOT NULL,
+                last_used REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS custody_author_id
+                ON custody_identities(author_id);
             CREATE TABLE IF NOT EXISTS certificates (
                 serial TEXT PRIMARY KEY,
                 issuer_serial TEXT NOT NULL,
@@ -653,11 +688,21 @@ class Store:
         return dict(row) if row else None
 
     def policy(self, board: str) -> dict[str, Any]:
-        if board == "ca":
+        if board in {"ca", "custody"}:
             return {
-                "board": "ca",
+                "board": board,
                 "permissions": 0,
                 "anonymous": [],
+                "version": 0,
+                "updated": None,
+                "locked": True,
+            }
+        if board == "guest":
+            actions = sorted(DEFAULT_ANONYMOUS)
+            return {
+                "board": "guest",
+                "permissions": anonymous_permission_mask(actions),
+                "anonymous": actions,
                 "version": 0,
                 "updated": None,
                 "locked": True,
@@ -688,8 +733,8 @@ class Store:
         }
 
     def set_policy(self, board: str, anonymous: tuple[str, ...], version: int) -> dict[str, Any]:
-        if board == "ca":
-            raise StoreError("/ca policy is system-managed", 403)
+        if board in {"ca", "custody", "guest"}:
+            raise StoreError(f"/{board} policy is system-managed", 403)
         if not valid_board_name(board):
             raise StoreError(f"invalid board name: {board!r}", 400)
         invalid = set(anonymous) - DEFAULT_ANONYMOUS
@@ -1349,6 +1394,19 @@ class Store:
         }
 
     def post_authentication(self, post: Post) -> dict[str, Any]:
+        if post.custody_id:
+            identity = self.custody_by_author(post.actor_id or post.author_id or "")
+            return {
+                "type": "custodial",
+                "signed": True,
+                "certified": False,
+                "status": "custodial",
+                "server_accepted_signature": True,
+                "basis": "server-custodied-ed25519-key",
+                "author": identity,
+                "actor": identity,
+                "actor_is_author": post.actor_id == post.author_id,
+            }
         if post.system:
             return {
                 "type": "system",
@@ -1389,6 +1447,140 @@ class Store:
             "author": author,
             "actor": actor,
             "actor_is_author": post.actor_id == post.author_id,
+        }
+
+    def create_custody_identity(self, name: str) -> dict[str, Any]:
+        name = " ".join(name.split()) or "guest"
+        if len(name.encode("utf-8")) > self.cfg.max_name_bytes:
+            raise StoreError(f"name exceeds max_name_bytes={self.cfg.max_name_bytes}", 413)
+
+        key = Ed25519PrivateKey.generate()
+        private = key.private_bytes(
+            serialization.Encoding.Raw,
+            serialization.PrivateFormat.Raw,
+            serialization.NoEncryption(),
+        )
+        public_raw = key.public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+        public_key = base64.b64encode(public_raw).decode("ascii")
+        _, author_id = public_identity(public_key)
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        custody_id = secrets.token_hex(12)
+        now = time.time()
+
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO custody_identities(
+                    id, token_hash, name, public_key, author_id, private_key,
+                    created, last_used
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (custody_id, token_hash, name, public_key, author_id, private, now, now),
+            )
+
+        return {
+            "id": custody_id,
+            "token": token,
+            "name": name,
+            "author_id": author_id,
+            "public_key": public_key,
+            "created": round(now, 3),
+            "auth": "custodial",
+            "warning": "server holds the signing key; this is not self-custody",
+        }
+
+    def _custody_row(self, token: str) -> sqlite3.Row:
+        if len(token) < 32 or len(token) > 128:
+            raise StoreError("invalid custody token", 403)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, name, public_key, author_id, private_key, created, last_used
+                  FROM custody_identities
+                 WHERE token_hash = ?
+                """,
+                (token_hash,),
+            ).fetchone()
+        if row is None:
+            raise StoreError("invalid custody token", 403)
+        return row
+
+    def custody_info(self, token: str) -> dict[str, Any]:
+        row = self._custody_row(token)
+        with self._lock:
+            posts = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM posts WHERE custody_id = ?",
+                (str(row["id"]),),
+            ).fetchone()["n"]
+        return {
+            "id": str(row["id"]),
+            "name": str(row["name"]),
+            "author_id": str(row["author_id"]),
+            "public_key": str(row["public_key"]),
+            "created": round(float(row["created"]), 3),
+            "last_used": round(float(row["last_used"]), 3),
+            "posts": int(posts),
+            "auth": "custodial",
+            "warning": "server holds the signing key; capability token controls this identity",
+        }
+
+    def custody_auth(
+        self,
+        token: str,
+        payload: bytes,
+        *,
+        version: int,
+        nonce: str | None = None,
+        issued: int | None = None,
+    ) -> tuple[SignedRequest, str]:
+        row = self._custody_row(token)
+        key = Ed25519PrivateKey.from_private_bytes(bytes(row["private_key"]))
+        signature = base64.b64encode(key.sign(payload)).decode("ascii")
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE custody_identities SET last_used = ? WHERE id = ?",
+                (time.time(), str(row["id"])),
+            )
+        return (
+            SignedRequest(
+                public_key=str(row["public_key"]),
+                signer_id=str(row["author_id"]),
+                signature=signature,
+                version=version,
+                nonce=nonce,
+                issued=issued,
+            ),
+            str(row["id"]),
+        )
+
+    def custody_owns(self, token: str, post: Post) -> bool:
+        row = self._custody_row(token)
+        return post.custody_id == str(row["id"])
+
+    def custody_by_author(self, author_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, name, public_key, author_id, created, last_used
+                  FROM custody_identities
+                 WHERE author_id = ?
+                """,
+                (author_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": str(row["id"]),
+            "name": str(row["name"]),
+            "public_key": str(row["public_key"]),
+            "author_id": str(row["author_id"]),
+            "created": round(float(row["created"]), 3),
+            "last_used": round(float(row["last_used"]), 3),
         }
 
     def permissions_for(self, subject_id: str, board: str) -> set[str]:
@@ -1525,6 +1717,7 @@ class Store:
         files: tuple[FileInput, ...] = (),
         max_body_bytes: int | None = None,
         reply_to: int | None = None,
+        custody_id: str | None = None,
     ) -> tuple[Post, int]:
         body, title, name, nbytes = self.prepare_post(
             body=body,
@@ -1590,8 +1783,8 @@ class Store:
                 INSERT INTO posts(
                     board, seq, name, title, body, created, updated, nbytes,
                     author_key, author_id, actor_key, actor_id, signature,
-                    sig_version, sig_nonce, sig_issued, reply_to
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sig_version, sig_nonce, sig_issued, reply_to, custody_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     board,
@@ -1611,6 +1804,7 @@ class Store:
                     auth.nonce if auth else None,
                     auth.issued if auth else None,
                     reply_to,
+                    custody_id,
                 ),
             )
             post_id = int(cur.lastrowid or 0)
@@ -1733,7 +1927,7 @@ class Store:
 
     def _prune_empty_boards(self) -> None:
         self._conn.execute(
-            "DELETE FROM boards WHERE name NOT IN ('main', 'meta')"
+            "DELETE FROM boards WHERE name NOT IN ('main', 'meta', 'guest', 'custody', 'ca')"
             " AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.board = boards.name)"
         )
 
@@ -1881,6 +2075,7 @@ class Store:
         if not valid_author_id(author_id):
             return None
         certs = self.certificates_for(author_id)
+        custody = self.custody_by_author(author_id)
         with self._lock:
             stats = self._conn.execute(
                 """
@@ -1907,7 +2102,11 @@ class Store:
             ).fetchone()
         latest_post = self._row(latest)
         public_key = (
-            certs[0]["subject_key"] if certs else (latest_post.author_key if latest_post else None)
+            certs[0]["subject_key"]
+            if certs
+            else custody["public_key"]
+            if custody
+            else (latest_post.author_key if latest_post else None)
         )
         if public_key is None:
             root = self.root_info()
@@ -1936,6 +2135,7 @@ class Store:
                 round(float(stats["last_seen"]), 3) if stats["last_seen"] is not None else None
             ),
             "certification": self.certification(author_id),
+            "custodial": custody is not None,
         }
 
     def stats(self) -> dict[str, int]:
@@ -2029,7 +2229,7 @@ class Store:
         return (
             "SELECT id, board, seq, name, title, body, created, updated, nbytes,"
             " author_key, author_id, actor_key, actor_id, signature,"
-            " sig_version, sig_nonce, sig_issued, reply_to, system FROM posts"
+            " sig_version, sig_nonce, sig_issued, reply_to, system, custody_id FROM posts"
         )
 
     @staticmethod
@@ -2069,4 +2269,5 @@ class Store:
             sig_issued=int(row["sig_issued"]) if row["sig_issued"] is not None else None,
             reply_to=int(row["reply_to"]) if row["reply_to"] is not None else None,
             system=bool(row["system"]),
+            custody_id=str(row["custody_id"]) if row["custody_id"] is not None else None,
         )
