@@ -1,4 +1,4 @@
-"""End-to-end tests for msgd-admin."""
+"""End-to-end tests for msgdctl."""
 
 from __future__ import annotations
 
@@ -15,9 +15,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from msgd.admincli import (
-    AdminError,
+from msgd.config import Config
+from msgd.ctl import (
     Api,
+    ControlError,
     _parse_home_policies,
     approve,
     delete_post,
@@ -26,7 +27,6 @@ from msgd.admincli import (
     revoke,
     set_policy,
 )
-from msgd.config import Config
 from msgd.server import build_server
 
 
@@ -42,7 +42,7 @@ def sign_payload(key: Ed25519PrivateKey, payload_b64: str) -> str:
     return base64.b64encode(key.sign(base64.b64decode(payload_b64))).decode("ascii")
 
 
-class AdminCliCase(unittest.TestCase):
+class ControlCliCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root_key = Ed25519PrivateKey.generate()
@@ -226,7 +226,7 @@ class AdminCliCase(unittest.TestCase):
     def test_ca_system_post_cannot_be_deleted_even_by_root_cli(self) -> None:
         self.create_csr(Ed25519PrivateKey.generate())
         audit = self.latest_request_audit_post()
-        with self.assertRaises(AdminError):
+        with self.assertRaises(ControlError):
             delete_post(self.api, self.root_key, audit.id)
 
     def test_policy_table_parser(self) -> None:

@@ -1,4 +1,4 @@
-"""Root/super-admin CLI for msg.lmm.best."""
+"""Operator and delegated-CA control CLI for msg.lmm.best."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ CA_POST_RE = re.compile(r"(?:^|/)ca/(\d+)(?:/|$)")
 CSR_QUERY_RE = re.compile(r"(?:^|[?&])id=(\d+)(?:&|$)")
 
 
-class AdminError(RuntimeError):
+class ControlError(RuntimeError):
     pass
 
 
@@ -59,9 +59,9 @@ class Api:
                 body = exc.read().decode("utf-8", "replace")
             finally:
                 exc.close()
-            raise AdminError(f"HTTP {exc.code}: {body.strip()}") from exc
+            raise ControlError(f"HTTP {exc.code}: {body.strip()}") from exc
         except URLError as exc:
-            raise AdminError(f"cannot reach {url}: {exc.reason}") from exc
+            raise ControlError(f"cannot reach {url}: {exc.reason}") from exc
 
     def get(self, path: str, fields: dict[str, str] | None = None) -> str:
         return self._request(path, fields, method="GET")
@@ -73,13 +73,13 @@ class Api:
         try:
             return json.loads(self.get(path, fields))
         except json.JSONDecodeError as exc:
-            raise AdminError(f"expected JSON from {path}") from exc
+            raise ControlError(f"expected JSON from {path}") from exc
 
     def json_post(self, path: str, fields: dict[str, str]) -> Any:
         try:
             return json.loads(self.post(path, fields))
         except json.JSONDecodeError as exc:
-            raise AdminError(f"expected JSON from {path}") from exc
+            raise ControlError(f"expected JSON from {path}") from exc
 
 
 def _identity(key: Ed25519PrivateKey) -> tuple[str, str]:
@@ -92,7 +92,7 @@ def _payload_signature(key: Ed25519PrivateKey, payload_b64: str) -> str:
     try:
         payload = base64.b64decode(payload_b64, validate=True)
     except ValueError as exc:
-        raise AdminError("server returned invalid payload_b64") from exc
+        raise ControlError("server returned invalid payload_b64") from exc
     return _sign_b64(key, payload)
 
 
@@ -102,12 +102,12 @@ def _parse_grants(values: list[str] | None) -> list[dict[str, object]] | None:
     grants: dict[str, set[str]] = {}
     for value in values:
         if "=" not in value:
-            raise AdminError("--grant must be TOPIC=action,action")
+            raise ControlError("--grant must be TOPIC=action,action")
         topic, raw_actions = value.split("=", 1)
         topic = topic.strip()
         actions = {item.strip() for item in raw_actions.split(",") if item.strip()}
         if not topic or not actions:
-            raise AdminError("--grant must include a topic and at least one action")
+            raise ControlError("--grant must include a topic and at least one action")
         grants.setdefault(topic, set()).update(actions)
     return [
         {"topic": topic, "actions": sorted(actions)} for topic, actions in sorted(grants.items())
@@ -133,13 +133,13 @@ def resolve_csr(api: Api, value: str) -> int:
     if token.startswith("csr:"):
         number = _numeric_token(token[4:])
         if number is None:
-            raise AdminError("invalid csr:ID reference")
+            raise ControlError("invalid csr:ID reference")
         api.json_get("/_csr", {"id": str(number)})
         return number
     if "_csr" in parsed.path or token.startswith("/_csr"):
         match = CSR_QUERY_RE.search(parsed.query or token)
         if not match:
-            raise AdminError("CSR URL must include id=N")
+            raise ControlError("CSR URL must include id=N")
         number = int(match.group(1))
         api.json_get("/_csr", {"id": str(number)})
         return number
@@ -153,7 +153,7 @@ def resolve_csr(api: Api, value: str) -> int:
         number = int(match.group(1)) if match else _numeric_token(token)
 
     if number is None:
-        raise AdminError("expected CSR id, /_csr?id=N, or /ca/POST_ID")
+        raise ControlError("expected CSR id, /_csr?id=N, or /ca/POST_ID")
 
     # A bare integer is intentionally post-first: admins usually copy the visible
     # /ca post id. Only accept the post interpretation when the returned global
@@ -168,8 +168,8 @@ def resolve_csr(api: Api, value: str) -> int:
                 api.json_get("/_csr", {"id": str(csr_id)})
                 return csr_id
             if explicit_post:
-                raise AdminError(f"/ca/{number} is not a certificate request audit post")
-    except AdminError:
+                raise ControlError(f"/ca/{number} is not a certificate request audit post")
+    except ControlError:
         if explicit_post:
             raise
 
@@ -191,14 +191,14 @@ def approve(
     csr_id = resolve_csr(api, reference)
     csr = api.json_get("/_csr", {"id": str(csr_id)})
     if csr.get("status") != "pending":
-        raise AdminError(f"CSR #{csr_id} is {csr.get('status')}, not pending")
+        raise ControlError(f"CSR #{csr_id} is {csr.get('status')}, not pending")
     if days < 1:
-        raise AdminError("--days must be >= 1")
+        raise ControlError("--days must be >= 1")
 
     public, author_id = _identity(key)
     requested = str(csr.get("requested_issuer") or "")
     if requested and requested != author_id:
-        raise AdminError(f"CSR #{csr_id} requested issuer {requested}; this key is {author_id}")
+        raise ControlError(f"CSR #{csr_id} requested issuer {requested}; this key is {author_id}")
 
     now = int(time.time())
     fields = {
@@ -285,7 +285,7 @@ def revoke(
 
 def set_policy(api: Api, key: Ed25519PrivateKey, board: str, permissions: int) -> dict[str, Any]:
     if not 0 <= permissions <= 7:
-        raise AdminError("permissions must be between 0 and 7")
+        raise ControlError("permissions must be between 0 and 7")
     public, _ = _identity(key)
     fields = {
         "action": "topic.policy",
@@ -443,7 +443,7 @@ def command_policies(args: argparse.Namespace) -> int:
     api = Api(args.api)
     rows = _parse_home_policies(api.get("/"))
     if not rows:
-        raise AdminError("could not parse topic policy table from homepage")
+        raise ControlError("could not parse topic policy table from homepage")
     print("TOPIC            POSTS  PERM  DESCRIPTION")
     for topic, posts, perm, description in rows:
         print(f"/{topic:<15} {posts:<6} {perm:<5} {description}")
@@ -461,7 +461,7 @@ def command_policy_set(args: argparse.Namespace) -> int:
 
 def command_delete_post(args: argparse.Namespace) -> int:
     if not args.yes:
-        raise AdminError("delete is irreversible; pass --yes")
+        raise ControlError("delete is irreversible; pass --yes")
     api = Api(args.api)
     key = _load_private(args.key)
     print(delete_post(api, key, args.post_id).strip())
@@ -470,8 +470,8 @@ def command_delete_post(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="msgd-admin",
-        description="Root/super-admin commands for msg.lmm.best",
+        prog="msgdctl",
+        description="Operator and CA control commands for msg.lmm.best",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -530,7 +530,9 @@ def main(argv: list[str] | None = None) -> int:
     policy_set.add_argument("--key", default=DEFAULT_PRIVATE)
     policy_set.set_defaults(func=command_policy_set)
 
-    delete = sub.add_parser("delete-post", help="irreversibly delete any post as Root")
+    delete = sub.add_parser(
+        "delete-post", help="irreversibly delete a post when the signing key is authorized"
+    )
     delete.add_argument("post_id", type=int)
     delete.add_argument("--api", default=DEFAULT_API)
     delete.add_argument("--key", default=DEFAULT_PRIVATE)
@@ -540,8 +542,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except (AdminError, OSError, ValueError, KeyError) as exc:
-        print(f"msgd-admin: {exc}", file=sys.stderr)
+    except (ControlError, OSError, ValueError, KeyError) as exc:
+        print(f"msgdctl: {exc}", file=sys.stderr)
         return 1
 
 
