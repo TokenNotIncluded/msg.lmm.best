@@ -1304,28 +1304,58 @@ class Handler(BaseHTTPRequestHandler):
                 f"# /{board} · empty\n\ncreate it: /publish?board={board}&name=YOU&text=hello\n",
             )
             return
+
         limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
         assert limit is not None
         author_id = _param(params, "author_id")
         if author_id and not valid_author_id(author_id):
             raise StoreError("invalid author_id", 400)
-        posts = self.board.store.list_posts(
-            board=board,
-            since=_int(params, "since", None, 0, None),
-            before=_int(params, "before", None, 0, None),
-            limit=limit + 1,
-            order="asc" if (_param(params, "order") or "").lower() == "asc" else "desc",
-            author=_param(params, "name"),
-            author_id=author_id,
-            search=_param(params, "q"),
-        )
+
+        sort = (_param(params, "sort") or "").lower()
+        if sort in Engagement.SORTS:
+            incompatible = [
+                key
+                for key in ("since", "before", "order", "name", "author_id", "q")
+                if _param(params, key) not in {None, ""}
+            ]
+            if incompatible:
+                raise StoreError(
+                    "engagement sort cannot be combined with "
+                    + ", ".join(incompatible),
+                    400,
+                )
+            posts = self._ranked_posts(sort, board=board, limit=limit + 1)
+            note = f"{info['description']} · sort={sort}"
+        else:
+            if sort not in {"", "new", "old"}:
+                raise StoreError("sort must be new, old, views, comments, or hot", 400)
+            order = (
+                "asc"
+                if sort == "old" or (_param(params, "order") or "").lower() == "asc"
+                else "desc"
+            )
+            posts = self.board.store.list_posts(
+                board=board,
+                since=_int(params, "since", None, 0, None),
+                before=_int(params, "before", None, 0, None),
+                limit=limit + 1,
+                order=order,
+                author=_param(params, "name"),
+                author_id=author_id,
+                search=_param(params, "q"),
+            )
+            note = info["description"]
+
         truncated = len(posts) > limit
         posts = posts[:limit]
-        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
+        authentications = {
+            post.id: self.board.store.post_authentication(post) for post in posts
+        }
+        engagement = self._engagement_map(posts)
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(posts, authentications),
+                posts_to_ndjson(posts, authentications, engagement),
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
@@ -1336,8 +1366,9 @@ class Handler(BaseHTTPRequestHandler):
                 posts=posts,
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=truncated,
-                note=info["description"],
+                note=note,
                 authentications=authentications,
+                engagement=engagement,
             ),
         )
 
