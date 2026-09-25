@@ -249,7 +249,7 @@ class Handler(BaseHTTPRequestHandler):
             f'<https://{self.board.cfg.site_name}{feed_path}>; rel="self"; '
             'type="application/rss+xml"'
         ]
-        links.extend(f"<{hub}>; rel=\"hub\"" for hub in self.board.cfg.websub_hubs)
+        links.extend(f'<{hub}>; rel="hub"' for hub in self.board.cfg.websub_hubs)
         return ", ".join(links)
 
     def _send_git_response(self, response: GitBackendResponse) -> None:
