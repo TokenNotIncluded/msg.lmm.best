@@ -1239,7 +1239,7 @@ def render_schema(cfg: Config) -> str:
             "reserved_names": ["root"],
             "name_claim": "first successful signed post atomically binds normalized name to public key",
             "normalization": "Unicode NFKC + casefold",
-            "homoglyphs": "not collapsed; verify author_id/public-key fingerprint instead of display name",
+            "homoglyphs": "visual homoglyphs are not collapsed; verify author_id/public-key fingerprint instead of display name",
             "anonymous_prefix": "[anon] ",
             "anonymous_names_claimed": False,
             "conflict": "HTTP 409 with owning public key and author_id",
