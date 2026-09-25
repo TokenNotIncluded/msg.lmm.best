@@ -19,6 +19,7 @@ from msgd.crypto import (
     Certificate,
     SignatureError,
     SignedRequest,
+    canonical_json,
     certificate_payload,
     parse_certificate,
     public_identity,
@@ -68,6 +69,7 @@ RESERVED_BOARDS = {
     "_signing",
     "_ca",
     "_cert",
+    "_csr",
     "_revoke",
     "_policy",
     "_revocations",
@@ -83,6 +85,7 @@ RESERVED_BOARDS = {
 DEFAULT_BOARDS = {
     "main": "General discussion.",
     "meta": "Talk about this board.",
+    "ca": "Public CA audit log. Authority: /_csr, /_cert, /_revocations.",
 }
 
 TABLES = """
@@ -114,7 +117,8 @@ CREATE TABLE IF NOT EXISTS posts (
     sig_version INTEGER NOT NULL DEFAULT 0,
     sig_nonce   TEXT,
     sig_issued  INTEGER,
-    reply_to    INTEGER
+    reply_to    INTEGER,
+    system      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS posts_board_seq ON posts(board, seq);
@@ -156,8 +160,29 @@ CREATE INDEX IF NOT EXISTS certificates_subject ON certificates(subject_id);
 CREATE TABLE IF NOT EXISTS revocations (
     serial     TEXT PRIMARY KEY REFERENCES certificates(serial) ON DELETE CASCADE,
     revoked_at REAL NOT NULL,
-    revoked_by TEXT NOT NULL
+    revoked_by TEXT NOT NULL,
+    reason     TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS certificate_requests (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_key      TEXT NOT NULL,
+    subject_id       TEXT NOT NULL,
+    requested_issuer TEXT NOT NULL DEFAULT '',
+    grants           TEXT NOT NULL,
+    delegate         INTEGER NOT NULL DEFAULT 0,
+    message          TEXT NOT NULL DEFAULT '',
+    created          REAL NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    decided          REAL,
+    decision_by      TEXT NOT NULL DEFAULT '',
+    reason           TEXT NOT NULL DEFAULT '',
+    certificate_serial TEXT
+);
+CREATE INDEX IF NOT EXISTS csr_status_id
+    ON certificate_requests(status, id);
+CREATE INDEX IF NOT EXISTS csr_subject_id
+    ON certificate_requests(subject_id, id);
 
 CREATE TABLE IF NOT EXISTS topic_policies (
     board     TEXT PRIMARY KEY,
@@ -253,6 +278,7 @@ class Post:
     sig_nonce: str | None = None
     sig_issued: int | None = None
     reply_to: int | None = None
+    system: bool = False
 
     @property
     def signed(self) -> bool:
@@ -283,6 +309,7 @@ class Post:
             "sig_nonce": self.sig_nonce if self.signed and self.sig_version == 1 else None,
             "sig_issued": self.sig_issued if self.signed and self.sig_version == 1 else None,
             "reply_to": self.reply_to,
+            "system": self.system,
         }
 
 
@@ -338,10 +365,21 @@ class Store:
             "sig_nonce": "TEXT",
             "sig_issued": "INTEGER",
             "reply_to": "INTEGER",
+            "system": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, definition in additions.items():
             if name not in columns:
                 self._conn.execute(f"ALTER TABLE posts ADD COLUMN {name} {definition}")
+
+        revocation_columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(revocations)").fetchall()
+        }
+        if revocation_columns and "reason" not in revocation_columns:
+            self._conn.execute(
+                "ALTER TABLE revocations ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
+            )
+
         self._conn.executescript(
             """
             CREATE INDEX IF NOT EXISTS posts_author_id ON posts(author_id);
@@ -366,8 +404,28 @@ class Store:
             CREATE TABLE IF NOT EXISTS revocations (
                 serial TEXT PRIMARY KEY REFERENCES certificates(serial) ON DELETE CASCADE,
                 revoked_at REAL NOT NULL,
-                revoked_by TEXT NOT NULL
+                revoked_by TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS certificate_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_key TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                requested_issuer TEXT NOT NULL DEFAULT '',
+                grants TEXT NOT NULL,
+                delegate INTEGER NOT NULL DEFAULT 0,
+                message TEXT NOT NULL DEFAULT '',
+                created REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                decided REAL,
+                decision_by TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL DEFAULT '',
+                certificate_serial TEXT
+            );
+            CREATE INDEX IF NOT EXISTS csr_status_id
+                ON certificate_requests(status, id);
+            CREATE INDEX IF NOT EXISTS csr_subject_id
+                ON certificate_requests(subject_id, id);
             CREATE TABLE IF NOT EXISTS topic_policies (
                 board TEXT PRIMARY KEY,
                 anonymous TEXT NOT NULL,
