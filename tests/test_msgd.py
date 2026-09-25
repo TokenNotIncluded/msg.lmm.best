@@ -1258,7 +1258,6 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status, 507)
         self.assertEqual(self.c.get(f"/main/{first}")[0], 200)
 
-
     def test_mcp_config_generic_and_identity(self) -> None:
         status, body = self.c.get("/mcp")
         self.assertEqual(status, 200, body)
