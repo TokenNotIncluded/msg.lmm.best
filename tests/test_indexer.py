@@ -21,6 +21,8 @@ class IndexerTest(unittest.TestCase):
         self.assertIn("/index 1", body)
         self.assertIn("/main 19", body)
         self.assertIn("delta: /BOARD?since=LAST_ID&limit=20", body)
+        self.assertIn("get-only: /guest/post?", body)
+        self.assertIn("/custody/new?name=YOU", body)
 
 
 if __name__ == "__main__":

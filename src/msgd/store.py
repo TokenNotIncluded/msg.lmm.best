@@ -1530,6 +1530,56 @@ class Store:
             raise StoreError("invalid custody token", 403)
         return row
 
+    def _custody_private(self, row: sqlite3.Row, token: str) -> bytes:
+        token_bytes = token.encode("utf-8")
+        key_key = hashlib.sha256(b"custody-key\0" + token_bytes).digest()
+        try:
+            return AESGCM(key_key).decrypt(
+                bytes(row["key_nonce"]),
+                bytes(row["key_ciphertext"]),
+                str(row["id"]).encode("ascii"),
+            )
+        except ValueError as exc:
+            raise StoreError("invalid custody token", 403) from exc
+
+    def rotate_custody_token(self, token: str) -> dict[str, Any]:
+        row = self._custody_row(token)
+        private = self._custody_private(row, token)
+
+        new_token = secrets.token_urlsafe(32)
+        new_bytes = new_token.encode("utf-8")
+        new_hash = hashlib.sha256(b"custody-auth\0" + new_bytes).hexdigest()
+        new_key = hashlib.sha256(b"custody-key\0" + new_bytes).digest()
+        nonce = secrets.token_bytes(12)
+        ciphertext = AESGCM(new_key).encrypt(
+            nonce,
+            private,
+            str(row["id"]).encode("ascii"),
+        )
+        old_hash = hashlib.sha256(b"custody-auth\0" + token.encode("utf-8")).hexdigest()
+        now = time.time()
+
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                UPDATE custody_identities
+                   SET token_hash = ?, key_nonce = ?, key_ciphertext = ?, last_used = ?
+                 WHERE id = ? AND token_hash = ?
+                """,
+                (new_hash, nonce, ciphertext, now, str(row["id"]), old_hash),
+            )
+        if cur.rowcount != 1:
+            raise StoreError("custody token was already rotated", 409)
+
+        return {
+            "id": str(row["id"]),
+            "token": new_token,
+            "author_id": str(row["author_id"]),
+            "rotated": round(now, 3),
+            "auth": "custodial",
+            "warning": "old capability token is invalid now; save this new token",
+        }
+
     def custody_info(self, token: str) -> dict[str, Any]:
         row = self._custody_row(token)
         with self._lock:
@@ -1559,16 +1609,7 @@ class Store:
         issued: int | None = None,
     ) -> tuple[SignedRequest, str]:
         row = self._custody_row(token)
-        token_bytes = token.encode("utf-8")
-        key_key = hashlib.sha256(b"custody-key\0" + token_bytes).digest()
-        try:
-            private = AESGCM(key_key).decrypt(
-                bytes(row["key_nonce"]),
-                bytes(row["key_ciphertext"]),
-                str(row["id"]).encode("ascii"),
-            )
-        except ValueError as exc:
-            raise StoreError("invalid custody token", 403) from exc
+        private = self._custody_private(row, token)
         key = Ed25519PrivateKey.from_private_bytes(private)
         signature = base64.b64encode(key.sign(payload)).decode("ascii")
         with self._lock, self._conn:

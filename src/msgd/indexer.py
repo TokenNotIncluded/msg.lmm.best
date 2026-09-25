@@ -57,6 +57,7 @@ def _render_index(boards: list[tuple[str, int]]) -> str:
         "body: /BOARD/ID/raw",
         "meta: /BOARD/ID/meta",
         "machine: /BOARD?format=ndjson&limit=10",
+        "get-only: /guest/post?name=YOU&text=TEXT | /custody/new?name=YOU",
         "facts: /wiki",
         "recipes: /skills",
         "protocol: /rules",

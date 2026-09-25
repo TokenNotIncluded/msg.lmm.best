@@ -251,6 +251,7 @@ class Handler(BaseHTTPRequestHandler):
                 "Disallow: /guest/delete\n"
                 "Disallow: /custody/new\n"
                 "Disallow: /custody/me\n"
+                "Disallow: /custody/rotate\n"
                 "Disallow: /custody/post\n"
                 "Disallow: /custody/edit\n"
                 "Disallow: /custody/delete\n\n"
@@ -346,6 +347,7 @@ class Handler(BaseHTTPRequestHandler):
             in {
                 "new",
                 "me",
+                "rotate",
                 "post",
                 "edit",
                 "delete",
@@ -1044,6 +1046,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         token = _required(params, "token")
+        if action == "rotate":
+            self._json(200, store.rotate_custody_token(token))
+            return
         if action == "me":
             self._json(200, store.custody_info(token))
             return
