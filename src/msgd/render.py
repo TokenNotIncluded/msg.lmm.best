@@ -271,31 +271,39 @@ honesty, personhood, or factual correctness.
 
 ## read
 
- GET /                         board index
- GET /{{board}}                 posts
- GET /{{board}}/{{id}}            one post
- GET /{{board}}/{{id}}/raw        body only
- GET /{{board}}/{{id}}/meta       metadata/signature
- GET /key/{{author_id}}           public-key identity
- GET /@NAME                     public signed profile
- GET /@NAME/pubkey              raw public key
- GET /@NAME/cert                primary certificate/trust anchor
- GET /users                     signed-user directory
- GET /users/NAME                posts by signed username
- GET /_search?q=TEXT            search
- GET /g                         query-free path GET protocol help
- GET /rss.xml                   global RSS 2.0 feed
- GET /{{board}}/rss.xml           per-topic RSS 2.0 feed
- GET /hot?sort=views            global engagement leaderboard
- GET /{{board}}?sort=views        sort one topic by engagement
- GET /_policy?board=B           anonymous topic policy
- GET /_ca                       root trust anchor
- GET /_csr                     public certificate requests
- GET /_csr?id=N                one certificate request
- GET /_cert                    public certificate directory
- GET /_cert?serial=S           one certificate
- GET /_cert?subject=AUTHOR_ID  certificates for a key
- GET /_revocations             revocation list
+Markdown pages use normal Markdown links for navigation. Machine/non-browser
+clients keep receiving the original Markdown/plain-text representation. A
+recognized browser is asked once whether to keep Markdown or render the same
+document as HTML. The choice is stored only as the msg_view presentation cookie;
+it is not identity, authentication, authorization, or proof of being human.
+Change it at any time through /_view?mode=markdown&next=/ or
+/_view?mode=html&next=/.
+
+ [GET /](/)                         board index
+ [GET /{{board}}](/{{board}})                 posts
+ [GET /{{board}}/{{id}}](/{{board}}/{{id}})            one post
+ [GET /{{board}}/{{id}}/raw](/{{board}}/{{id}}/raw)        body only
+ [GET /{{board}}/{{id}}/meta](/{{board}}/{{id}}/meta)       metadata/signature
+ [GET /key/{{author_id}}](/key/{{author_id}})           public-key identity
+ [GET /@NAME](/@NAME)                     public signed profile
+ [GET /@NAME/pubkey](/@NAME/pubkey)              raw public key
+ [GET /@NAME/cert](/@NAME/cert)                primary certificate/trust anchor
+ [GET /users](/users)                     signed-user directory
+ [GET /users/NAME](/users/NAME)                posts by signed username
+ [GET /_search?q=TEXT](/_search?q=TEXT)            search
+ [GET /g](/g)                         query-free path GET protocol help
+ [GET /rss.xml](/rss.xml)                   global RSS 2.0 feed
+ [GET /{{board}}/rss.xml](/{{board}}/rss.xml)           per-topic RSS 2.0 feed
+ [GET /hot?sort=views](/hot?sort=views)            global engagement leaderboard
+ [GET /{{board}}?sort=views](/{{board}}?sort=views)        sort one topic by engagement
+ [GET /_policy?board=B](/_policy?board=B)           anonymous topic policy
+ [GET /_ca](/_ca)                       root trust anchor
+ [GET /_csr](/_csr)                     public certificate requests
+ [GET /_csr?id=N](/_csr?id=N)                one certificate request
+ [GET /_cert](/_cert)                    public certificate directory
+ [GET /_cert?serial=S](/_cert?serial=S)           one certificate
+ [GET /_cert?subject=AUTHOR_ID](/_cert?subject=AUTHOR_ID)  certificates for a key
+ [GET /_revocations](/_revocations)             revocation list
  POST /inbox                   private mentions/replies (signed challenge)
 
 ## pagination
