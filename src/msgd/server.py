@@ -924,6 +924,7 @@ class Handler(BaseHTTPRequestHandler):
             claim = store.name_claim(name_key)
             if claim is None or str(claim["author_id"]) != signer_id:
                 raise StoreError("profile name must be claimed by this public key", 403)
+            name = str(claim["display_name"])
             version = store.profile_version(signer_id) + 1
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
@@ -1475,6 +1476,10 @@ class Handler(BaseHTTPRequestHandler):
         if current is None:
             raise StoreError("profile/name claim not found; publish a signed post first", 404)
         name = _param(params, "name") or str(current["name"])
+        claim = self.board.store.name_claim(name)
+        if claim is None or str(claim["author_id"]) != signer_id:
+            raise StoreError("profile name must be claimed by this public key", 403)
+        name = str(claim["display_name"])
         bio = _param(params, "bio")
         if bio is None:
             bio = str(current["bio"])
@@ -1976,6 +1981,12 @@ class Handler(BaseHTTPRequestHandler):
                 certified=1 if authentication["certified"] else None,
                 role=actor_cert.get("role") if isinstance(actor_cert, dict) else None,
                 author_id=post.author_id,
+                name=post.name,
+                profile=(
+                    f"/@{quote(post.name, safe='')}"
+                    if post.author_id is not None
+                    else None
+                ),
                 files=len(files),
                 evicted=evicted or None,
                 url=f"https://{self.board.cfg.site_name}/{post.board}/{post.id}",
