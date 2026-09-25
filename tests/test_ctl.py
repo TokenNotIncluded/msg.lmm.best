@@ -244,9 +244,9 @@ class ControlCliCase(unittest.TestCase):
 
     def test_policy_table_parser(self) -> None:
         rows = _parse_home_policies(self.api.get("/"))
-        policies = {topic: perm for topic, _, perm, _ in rows}
-        self.assertEqual(policies["ca"], 0)
-        self.assertEqual(policies["main"], 7)
+        policies = {topic: (anonymous, signed) for topic, _, anonymous, signed, _ in rows}
+        self.assertEqual(policies["ca"], (0, 0))
+        self.assertEqual(policies["main"], (1, 11))
 
 
 if __name__ == "__main__":
