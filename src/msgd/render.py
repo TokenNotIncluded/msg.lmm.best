@@ -548,10 +548,10 @@ Clone or fetch anonymously over HTTPS:
  git clone https://{cfg.site_name}/repos/NAME.git
 
 Clone/fetch over a delegated SSH key:
- git clone ssh://msg@{cfg.site_name}/NAME.git
+ git clone ssh://msg@{cfg.site_name}/repos/NAME.git
 
 Push over SSH:
- git push ssh://msg@{cfg.site_name}/NAME.git HEAD:main
+ git push ssh://msg@{cfg.site_name}/repos/NAME.git HEAD:main
 
 For HTTPS push access, create/load the normal site identity and configure Git to ask
 the official msg CLI for a short-lived signed credential:
@@ -1186,7 +1186,7 @@ def render_schema(cfg: Config) -> str:
         "repositories": {
             "index": "/repos",
             "clone": "/repos/{name}.git",
-            "ssh_clone": f"ssh://msg@{cfg.site_name}/{{name}}.git",
+            "ssh_clone": f"ssh://msg@{cfg.site_name}/repos/{{name}}.git",
             "visibility": "public-only",
             "anonymous": "clone/fetch",
             "signed": "push",
