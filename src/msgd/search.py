@@ -207,4 +207,5 @@ examples:
 
 machine output:
  /_search?q=QUERY&format=ndjson&limit=20
+ The last NDJSON record is type=page. If page.next is present, GET it exactly.
 """
