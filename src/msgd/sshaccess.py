@@ -121,6 +121,7 @@ def ssh_access_payload(
     name: str = "",
     scopes: tuple[str, ...] | list[str] | str = (),
     expires: int | None = None,
+    owner_id: str | None = None,
 ) -> bytes:
     if action not in {
         "ssh.list",
@@ -150,6 +151,10 @@ def ssh_access_payload(
         "scopes": list(normalized_scopes),
         "expires": int(expires or 0),
     }
+    if owner_id is not None:
+        if not AUTHOR_ID_RE.fullmatch(owner_id):
+            raise StoreError("invalid SSH key owner id", 400)
+        value["owner_id"] = owner_id
     return SSH_ACCESS_MAGIC + canonical_json(value).encode("utf-8")
 
 
