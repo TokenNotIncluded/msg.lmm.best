@@ -226,6 +226,35 @@ CREATE TABLE IF NOT EXISTS inbox_events (
 );
 CREATE INDEX IF NOT EXISTS inbox_subject_post
     ON inbox_events(subject_id, post_id);
+
+CREATE TABLE IF NOT EXISTS webhooks (
+    id                TEXT PRIMARY KEY,
+    owner_id          TEXT NOT NULL,
+    url               TEXT NOT NULL,
+    events            TEXT NOT NULL,
+    secret_nonce      BLOB NOT NULL,
+    secret_ciphertext BLOB NOT NULL,
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    created           REAL NOT NULL,
+    updated           REAL NOT NULL,
+    last_error        TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS webhooks_owner ON webhooks(owner_id, created);
+
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id           TEXT PRIMARY KEY,
+    webhook_id   TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+    subject_id   TEXT NOT NULL,
+    event        TEXT NOT NULL,
+    data         TEXT NOT NULL,
+    created      REAL NOT NULL,
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    next_attempt REAL NOT NULL,
+    delivered    REAL,
+    last_error   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS webhook_due
+    ON webhook_deliveries(delivered, next_attempt, created);
 """
 
 
@@ -500,6 +529,35 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS inbox_subject_post
                 ON inbox_events(subject_id, post_id);
+
+            CREATE TABLE IF NOT EXISTS webhooks (
+                id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                events TEXT NOT NULL,
+                secret_nonce BLOB NOT NULL,
+                secret_ciphertext BLOB NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created REAL NOT NULL,
+                updated REAL NOT NULL,
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS webhooks_owner
+                ON webhooks(owner_id, created);
+            CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                id TEXT PRIMARY KEY,
+                webhook_id TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+                subject_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                data TEXT NOT NULL,
+                created REAL NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt REAL NOT NULL,
+                delivered REAL,
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS webhook_due
+                ON webhook_deliveries(delivered, next_attempt, created);
             """
         )
         self._conn.execute(
@@ -2297,9 +2355,8 @@ class Store:
                 rows = self._conn.execute(
                     """
                     SELECT DISTINCT author_id
-                      FROM posts
-                     WHERE author_id IS NOT NULL
-                       AND name = ? COLLATE NOCASE
+                      FROM identity_names
+                     WHERE name = ? COLLATE NOCASE
                     """,
                     (token,),
                 ).fetchall()
@@ -2317,6 +2374,300 @@ class Store:
                 """,
                 [(post_id, subject_id, kind) for subject_id, kind in events],
             )
+
+    def inbox_targets(self, post_id: int) -> list[tuple[str, str]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT subject_id, kind
+                  FROM inbox_events
+                 WHERE post_id = ?
+                 ORDER BY subject_id, kind
+                """,
+                (post_id,),
+            ).fetchall()
+        return [(str(row["subject_id"]), str(row["kind"])) for row in rows]
+
+    def webhook_count(self, owner_id: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM webhooks WHERE owner_id = ?",
+                (owner_id,),
+            ).fetchone()
+        return int(row["n"] if row is not None else 0)
+
+    def create_webhook(
+        self,
+        *,
+        webhook_id: str,
+        owner_id: str,
+        url: str,
+        events: tuple[str, ...],
+        secret_nonce: bytes,
+        secret_ciphertext: bytes,
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO webhooks(
+                    id, owner_id, url, events, secret_nonce, secret_ciphertext,
+                    enabled, created, updated
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    webhook_id,
+                    owner_id,
+                    url,
+                    json.dumps(list(events), separators=(",", ":")),
+                    secret_nonce,
+                    secret_ciphertext,
+                    now,
+                    now,
+                ),
+            )
+        row = self.webhook(webhook_id)
+        assert row is not None
+        return row
+
+    def webhook(self, webhook_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, owner_id, url, events, secret_nonce, secret_ciphertext,
+                       enabled, created, updated, last_error
+                  FROM webhooks
+                 WHERE id = ?
+                """,
+                (webhook_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["events"] = tuple(json.loads(str(row["events"])))
+        item["enabled"] = bool(row["enabled"])
+        return item
+
+    def list_webhooks(self, owner_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT w.id, w.owner_id, w.url, w.events, w.enabled,
+                       w.created, w.updated, w.last_error,
+                       SUM(CASE WHEN d.id IS NOT NULL AND d.delivered IS NULL
+                                      AND d.attempts < 6 THEN 1 ELSE 0 END) AS pending,
+                       SUM(CASE WHEN d.id IS NOT NULL AND d.delivered IS NULL
+                                      AND d.attempts >= 6 THEN 1 ELSE 0 END)
+                           AS failed
+                  FROM webhooks w
+                  LEFT JOIN webhook_deliveries d ON d.webhook_id = w.id
+                 WHERE w.owner_id = ?
+                 GROUP BY w.id
+                 ORDER BY w.created
+                """,
+                (owner_id,),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["events"] = tuple(json.loads(str(row["events"])))
+            item["enabled"] = bool(row["enabled"])
+            item["pending"] = int(row["pending"] or 0)
+            item["failed"] = int(row["failed"] or 0)
+            result.append(item)
+        return result
+
+    def update_webhook(
+        self,
+        webhook_id: str,
+        owner_id: str,
+        *,
+        url: str,
+        events: tuple[str, ...],
+        enabled: bool,
+    ) -> dict[str, Any]:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                UPDATE webhooks
+                   SET url = ?, events = ?, enabled = ?, updated = ?, last_error = ''
+                 WHERE id = ? AND owner_id = ?
+                """,
+                (
+                    url,
+                    json.dumps(list(events), separators=(",", ":")),
+                    1 if enabled else 0,
+                    time.time(),
+                    webhook_id,
+                    owner_id,
+                ),
+            )
+            if cur.rowcount != 1:
+                raise StoreError("webhook not found", 404)
+        row = self.webhook(webhook_id)
+        assert row is not None
+        return row
+
+    def rotate_webhook_secret(
+        self,
+        webhook_id: str,
+        owner_id: str,
+        *,
+        secret_nonce: bytes,
+        secret_ciphertext: bytes,
+    ) -> None:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                UPDATE webhooks
+                   SET secret_nonce = ?, secret_ciphertext = ?, updated = ?
+                 WHERE id = ? AND owner_id = ?
+                """,
+                (secret_nonce, secret_ciphertext, time.time(), webhook_id, owner_id),
+            )
+            if cur.rowcount != 1:
+                raise StoreError("webhook not found", 404)
+
+    def delete_webhook(self, webhook_id: str, owner_id: str) -> None:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM webhooks WHERE id = ? AND owner_id = ?",
+                (webhook_id, owner_id),
+            )
+            if cur.rowcount != 1:
+                raise StoreError("webhook not found", 404)
+
+    def queue_webhook_event(
+        self,
+        subject_id: str,
+        event: str,
+        data: dict[str, Any],
+        *,
+        only_webhook_id: str | None = None,
+    ) -> list[str]:
+        with self._lock:
+            if only_webhook_id is None:
+                rows = self._conn.execute(
+                    """
+                    SELECT id, events
+                      FROM webhooks
+                     WHERE owner_id = ? AND enabled = 1
+                    """,
+                    (subject_id,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT id, events
+                      FROM webhooks
+                     WHERE id = ? AND owner_id = ? AND enabled = 1
+                    """,
+                    (only_webhook_id, subject_id),
+                ).fetchall()
+
+        now = time.time()
+        queued: list[str] = []
+        with self._lock, self._conn:
+            for row in rows:
+                subscribed = set(json.loads(str(row["events"])))
+                if event != "webhook.test" and event not in subscribed:
+                    continue
+                delivery_id = secrets.token_hex(16)
+                self._conn.execute(
+                    """
+                    INSERT INTO webhook_deliveries(
+                        id, webhook_id, subject_id, event, data, created, next_attempt
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        delivery_id,
+                        str(row["id"]),
+                        subject_id,
+                        event,
+                        json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+                        now,
+                        now,
+                    ),
+                )
+                queued.append(delivery_id)
+        return queued
+
+    def due_webhook_deliveries(self, limit: int = 20) -> list[dict[str, Any]]:
+        now = time.time()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT d.id, d.webhook_id, d.subject_id, d.event, d.data,
+                       d.created, d.attempts, d.next_attempt,
+                       w.url, w.secret_nonce, w.secret_ciphertext
+                  FROM webhook_deliveries d
+                  JOIN webhooks w ON w.id = d.webhook_id
+                 WHERE d.delivered IS NULL
+                   AND d.attempts < 6
+                   AND d.next_attempt <= ?
+                   AND w.enabled = 1
+                 ORDER BY d.next_attempt, d.created
+                 LIMIT ?
+                """,
+                (now, max(1, min(limit, 100))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def prune_webhook_deliveries(self) -> None:
+        now = time.time()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                DELETE FROM webhook_deliveries
+                 WHERE (delivered IS NOT NULL AND delivered < ?)
+                    OR (delivered IS NULL AND attempts >= 6 AND created < ?)
+                """,
+                (now - 7 * 86400, now - 30 * 86400),
+            )
+
+    def finish_webhook_delivery(
+        self,
+        delivery_id: str,
+        *,
+        success: bool,
+        error: str = "",
+        retry_after: float = 0,
+    ) -> None:
+        now = time.time()
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT webhook_id, attempts FROM webhook_deliveries WHERE id = ?",
+                (delivery_id,),
+            ).fetchone()
+            if row is None:
+                return
+            attempts = int(row["attempts"]) + 1
+            if success:
+                self._conn.execute(
+                    """
+                    UPDATE webhook_deliveries
+                       SET attempts = ?, delivered = ?, last_error = ''
+                     WHERE id = ?
+                    """,
+                    (attempts, now, delivery_id),
+                )
+                self._conn.execute(
+                    "UPDATE webhooks SET last_error = '' WHERE id = ?",
+                    (str(row["webhook_id"]),),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE webhook_deliveries
+                       SET attempts = ?, next_attempt = ?, last_error = ?
+                     WHERE id = ?
+                    """,
+                    (attempts, now + retry_after, error[:500], delivery_id),
+                )
+                self._conn.execute(
+                    "UPDATE webhooks SET last_error = ? WHERE id = ?",
+                    (error[:500], str(row["webhook_id"])),
+                )
 
     def key_info(self, author_id: str) -> dict[str, Any] | None:
         if not valid_author_id(author_id):

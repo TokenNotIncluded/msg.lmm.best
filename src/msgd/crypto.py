@@ -124,6 +124,10 @@ def request_payload(
     csr_grants: tuple[dict[str, object], ...] = (),
     message: str = "",
     reason: str = "",
+    webhook_id: str = "",
+    webhook_url: str = "",
+    webhook_events: tuple[str, ...] = (),
+    webhook_enabled: bool = True,
 ) -> bytes:
     if not IDENTITY_RE.fullmatch(signer_id):
         raise SignatureError("invalid signer id")
@@ -216,6 +220,26 @@ def request_payload(
             ("since", "" if since is None else str(since)),
             ("before", "" if before is None else str(before)),
             ("limit", "" if limit is None else str(limit)),
+        ]
+    elif action in {
+        "webhook.create",
+        "webhook.update",
+        "webhook.delete",
+        "webhook.list",
+        "webhook.test",
+        "webhook.rotate",
+    }:
+        if nonce is None or issued is None:
+            raise SignatureError(f"{action} requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("webhook_id", webhook_id),
+            ("webhook_url", webhook_url),
+            ("webhook_events", canonical_json(sorted(webhook_events))),
+            ("webhook_enabled", "1" if webhook_enabled else "0"),
         ]
     else:
         raise SignatureError(f"unsupported signed action: {action}")

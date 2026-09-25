@@ -56,6 +56,7 @@ from msgd.store import (
     valid_author_id,
     valid_board_name,
 )
+from msgd.webhooks import WebhookService, normalize_events, validate_webhook_url
 
 Params = dict[str, list[str]]
 Uploads = tuple[FileInput, ...]
@@ -82,6 +83,7 @@ class Board:
             )
         if self.engagement.available:
             self.engagement.sync_comments(self.store.comment_counts())
+        self.webhooks = WebhookService(cfg, self.store)
         self.reads = Limiter(
             burst=max(30, cfg.read_per_minute // 4),
             per_minute=cfg.read_per_minute,
@@ -103,6 +105,7 @@ class MsgServer(ThreadingHTTPServer):
         super().__init__(server_address, handler_class)
 
     def server_close(self) -> None:
+        self.board.webhooks.close()
         self.board.engagement.close()
         super().server_close()
 
@@ -221,6 +224,47 @@ class Handler(BaseHTTPRequestHandler):
             parent.board,
             self.board.store.comment_count(parent.id),
         )
+
+    def _post_webhook_data(self, post: Any) -> dict[str, object]:
+        authentication = self.board.store.post_authentication(post)
+        return {
+            "post": {
+                "id": post.id,
+                "board": post.board,
+                "seq": post.seq,
+                "name": post.name,
+                "title": post.title,
+                "body": post.body,
+                "created": round(post.created, 3),
+                "updated": round(post.updated, 3),
+                "author_id": post.author_id,
+                "actor_id": post.actor_id,
+                "reply_to": post.reply_to,
+                "url": f"https://{self.board.cfg.site_name}/{post.board}/{post.id}",
+                "authentication": authentication.get("status"),
+            }
+        }
+
+    def _emit_post_created(self, post: Any) -> None:
+        data = self._post_webhook_data(post)
+        self.board.webhooks.emit(post.author_id, "post.created", data)
+        for subject_id, kind in self.board.store.inbox_targets(post.id):
+            if kind == "reply":
+                self.board.webhooks.emit(subject_id, "reply.created", data)
+            elif kind == "mention":
+                self.board.webhooks.emit(subject_id, "mention.created", data)
+
+    def _emit_post_updated(self, post: Any) -> None:
+        self.board.webhooks.emit(
+            post.author_id,
+            "post.updated",
+            self._post_webhook_data(post),
+        )
+
+    def _emit_post_deleted(self, post: Any, actor_id: str | None) -> None:
+        data = self._post_webhook_data(post)
+        data["deleted_by"] = actor_id
+        self.board.webhooks.emit(post.author_id, "post.deleted", data)
 
     def do_OPTIONS(self) -> None:
         self._send(204, b"")
@@ -356,6 +400,19 @@ class Handler(BaseHTTPRequestHandler):
 
         if uploads and head not in {"publish", "_signing"}:
             raise StoreError("file uploads are only accepted by /publish or /_signing", 400)
+
+        if head == "_webhook":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "signed POST required"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            if self._limited(True):
+                return
+            self._webhook(params)
+            return
 
         if head in {"publish", "_cert", "_csr", "_revoke", "_policy"} and method == "HEAD":
             self._send(
@@ -772,6 +829,39 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if action.startswith("webhook."):
+            webhook_id, webhook_url, webhook_events, webhook_enabled = _webhook_fields(
+                params,
+                action,
+            )
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+                webhook_id=webhook_id,
+                webhook_url=webhook_url,
+                webhook_events=webhook_events,
+                webhook_enabled=webhook_enabled,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "webhook_id": webhook_id or None,
+                    "url": webhook_url or None,
+                    "events": list(webhook_events),
+                    "enabled": webhook_enabled,
+                    **payload_info(payload),
+                },
+            )
+            return
+
         if action == "cert.request":
             grants = _grants(_required(params, "grants"))
             grant_manifest = _grant_manifest(grants)
@@ -925,6 +1015,24 @@ class Handler(BaseHTTPRequestHandler):
                 cert_body,
                 signature,
                 csr_id=csr_id,
+            )
+            self.board.webhooks.emit(
+                cert.subject_id,
+                "certificate.issued",
+                {
+                    "certificate": {
+                        "serial": cert.serial,
+                        "issuer_serial": cert.issuer_serial,
+                        "issuer_id": cert.issuer_id,
+                        "subject_id": cert.subject_id,
+                        "delegate": cert.delegate,
+                        "grants": cert.grants,
+                        "not_before": cert.not_before,
+                        "not_after": cert.not_after,
+                        "url": f"https://{self.board.cfg.site_name}/_cert?serial={cert.serial}",
+                    },
+                    "csr": csr_id,
+                },
             )
             self._json(
                 201,
@@ -1080,7 +1188,23 @@ class Handler(BaseHTTPRequestHandler):
             reason=reason,
         )
         auth = signed_request(canonical_key, sig, payload, version=1)
+        certificate = self.board.store.certificate(serial)
         self.board.store.revoke_certificate(serial, auth.signer_id, reason)
+        if certificate is not None:
+            self.board.webhooks.emit(
+                str(certificate["subject_id"]),
+                "certificate.revoked",
+                {
+                    "certificate": {
+                        "serial": serial,
+                        "issuer_id": str(certificate["issuer_id"]),
+                        "subject_id": str(certificate["subject_id"]),
+                        "url": f"https://{self.board.cfg.site_name}/_cert?serial={serial}",
+                    },
+                    "revoked_by": auth.signer_id,
+                    "reason": reason,
+                },
+            )
         self._send(200, render_ok(ok=1, action="revoke", serial=serial, by=auth.signer_id))
 
     def _policy(self, params: Params) -> None:
@@ -1173,6 +1297,81 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _webhook(self, params: Params) -> None:
+        action = _required(params, "action")
+        if not action.startswith("webhook."):
+            raise StoreError("invalid webhook action", 400)
+
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        nonce = _required(params, "nonce")
+        issued = _int_required(params, "issued")
+        canonical_key, signer_id = public_identity(key)
+        webhook_id, webhook_url, webhook_events, webhook_enabled = _webhook_fields(
+            params,
+            action,
+        )
+        payload = request_payload(
+            action=action,
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            webhook_id=webhook_id,
+            webhook_url=webhook_url,
+            webhook_events=webhook_events,
+            webhook_enabled=webhook_enabled,
+        )
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        self.board.store.consume_nonce(auth)
+
+        service = self.board.webhooks
+        if action == "webhook.create":
+            self._json(201, service.create(auth.signer_id, webhook_url, webhook_events))
+            return
+        if action == "webhook.list":
+            self._json(200, service.list(auth.signer_id))
+            return
+        if action == "webhook.update":
+            self._json(
+                200,
+                service.update(
+                    auth.signer_id,
+                    webhook_id,
+                    url=webhook_url,
+                    events=webhook_events,
+                    enabled=webhook_enabled,
+                ),
+            )
+            return
+        if action == "webhook.delete":
+            service.delete(auth.signer_id, webhook_id)
+            self._json(200, {"ok": 1, "id": webhook_id})
+            return
+        if action == "webhook.rotate":
+            self._json(200, service.rotate(auth.signer_id, webhook_id))
+            return
+        if action == "webhook.test":
+            delivery_id = service.test(auth.signer_id, webhook_id)
+            self._json(
+                202,
+                {
+                    "ok": 1,
+                    "event": "webhook.test",
+                    "webhook_id": webhook_id,
+                    "delivery_id": delivery_id,
+                },
+            )
+            return
+        raise StoreError("unsupported webhook action", 400)
+
     def _guest_bridge(self, action: str, params: Params) -> None:
         if action == "post":
             self._create({**params, "board": ["guest"]}, (), "GET")
@@ -1244,6 +1443,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.board.engagement.available:
                 self.board.engagement.set_comments(post.id, post.board, 0)
                 self._sync_reply_count(reply_to)
+            self._emit_post_created(post)
             self._send(
                 201,
                 render_ok(
@@ -1271,6 +1471,7 @@ class Handler(BaseHTTPRequestHandler):
             store.delete_post(post)
             self.board.engagement.remove_post(post.id, post.board)
             self._sync_reply_count(parent_id)
+            self._emit_post_deleted(post, post.author_id)
             self._send(200, render_ok(ok=1, action="delete", id=post_id, auth="custodial"))
             return
 
@@ -1305,6 +1506,7 @@ class Handler(BaseHTTPRequestHandler):
             files=(),
             max_body_bytes=self.board.cfg.max_post_bytes,
         )
+        self._emit_post_updated(updated)
         self._send(
             200,
             render_ok(
@@ -1545,6 +1747,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.board.engagement.available:
             self.board.engagement.set_comments(post.id, post.board, 0)
             self._sync_reply_count(reply_to)
+        self._emit_post_created(post)
         authentication = store.post_authentication(post)
         actor_cert = authentication.get("actor") or {}
         self._send(
@@ -1645,6 +1848,7 @@ class Handler(BaseHTTPRequestHandler):
             files=file_update,
             max_body_bytes=_body_limit(self.board.cfg, method),
         )
+        self._emit_post_updated(updated)
         authentication = store.post_authentication(updated)
         actor_cert = authentication.get("actor") or {}
         self._send(
@@ -1705,7 +1909,59 @@ class Handler(BaseHTTPRequestHandler):
         store.delete_post(post)
         self.board.engagement.remove_post(post.id, post.board)
         self._sync_reply_count(parent_id)
+        self._emit_post_deleted(post, actor_id)
         self._send(200, render_ok(ok=1, action="delete", id=post_id, actor_id=actor_id))
+
+
+def _webhook_fields(
+    params: Params,
+    action: str,
+) -> tuple[str, str, tuple[str, ...], bool]:
+    allowed = {
+        "webhook.create",
+        "webhook.update",
+        "webhook.delete",
+        "webhook.list",
+        "webhook.test",
+        "webhook.rotate",
+    }
+    if action not in allowed:
+        raise StoreError("unsupported webhook action", 400)
+
+    webhook_id = (_param(params, "id") or "").lower()
+    if action in {
+        "webhook.update",
+        "webhook.delete",
+        "webhook.test",
+        "webhook.rotate",
+    } and not re.fullmatch(r"[0-9a-f]{32}", webhook_id):
+        raise StoreError("webhook id must be 32 lowercase hex characters", 400)
+
+    webhook_url = ""
+    webhook_events: tuple[str, ...] = ()
+    webhook_enabled = True
+    if action in {"webhook.create", "webhook.update"}:
+        webhook_url = validate_webhook_url(_required(params, "url"))
+        raw_events = _required(params, "events")
+        if raw_events.lstrip().startswith("["):
+            try:
+                parsed = json.loads(raw_events)
+            except json.JSONDecodeError as exc:
+                raise StoreError("events must be comma-separated or a JSON array", 400) from exc
+            if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+                raise StoreError("events JSON must be an array of strings", 400)
+            values = tuple(parsed)
+        else:
+            values = tuple(item.strip() for item in raw_events.split(","))
+        webhook_events = normalize_events(values)
+        webhook_enabled = (_param(params, "enabled") or "").lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+
+    return webhook_id, webhook_url, webhook_events, webhook_enabled
 
 
 def _create_context(params: Params, store: Store) -> tuple[str, int | None]:

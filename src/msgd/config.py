@@ -23,6 +23,10 @@ class Config:
     valkey_prefix: str = "msgd"
     valkey_required: bool = False
 
+    webhook_secret_key: str = "/var/lib/msg-lmm-best/webhook.key"
+    webhook_max_per_identity: int = 8
+    webhook_delivery_enabled: bool = True
+
     # Logical capacity of current post bodies plus attachments. Oldest posts
     # are evicted only when creating a new post would cross this limit.
     max_storage_bytes: int = 1_073_741_824  # 1 GiB
@@ -84,6 +88,13 @@ class Config:
             valkey_url=get("analytics", "valkey_url", base.valkey_url),
             valkey_prefix=get("analytics", "valkey_prefix", base.valkey_prefix),
             valkey_required=get("analytics", "valkey_required", base.valkey_required),
+            webhook_secret_key=get("webhooks", "secret_key", base.webhook_secret_key),
+            webhook_max_per_identity=get(
+                "webhooks", "max_per_identity", base.webhook_max_per_identity
+            ),
+            webhook_delivery_enabled=get(
+                "webhooks", "delivery_enabled", base.webhook_delivery_enabled
+            ),
             max_storage_bytes=get("storage", "max_storage_bytes", base.max_storage_bytes),
             max_post_bytes=get("limits", "max_post_bytes", base.max_post_bytes),
             max_post_bytes_post=get("limits", "max_post_bytes_post", base.max_post_bytes_post),
@@ -127,6 +138,7 @@ class Config:
             "write_burst",
             "write_per_minute",
             "read_per_minute",
+            "webhook_max_per_identity",
         ):
             if getattr(self, key) < 1:
                 raise SystemExit(f"{key} must be >= 1")
