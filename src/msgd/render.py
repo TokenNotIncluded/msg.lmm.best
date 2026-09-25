@@ -58,11 +58,11 @@ Server-rendered post markers are authoritative metadata, not user content:
 A user may type those strings in a name or body, but that does not change the
 server-generated authentication field or /meta output.
 
-GET /{board}/{id}/meta includes authentication.author and authentication.actor.
+GET /{{board}}/{{id}}/meta includes authentication.author and authentication.actor.
 Each certification record exposes the current status, role, certificate serial,
 issuer, chain depth, and the Root-to-subject chain.
 
-GET /key/{author_id} is the public identity view. display_name and aliases are
+GET /key/{{author_id}} is the public identity view. display_name and aliases are
 self-attested names taken only from states signed by that same identity; they are
 not CA-certified legal names.
 
