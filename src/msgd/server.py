@@ -29,7 +29,6 @@ from msgd.crypto import (
     signed_request,
 )
 from msgd.ratelimit import Limiter
-from msgd.search import SearchSyntaxError, parse_search_query, search_help
 from msgd.render import (
     posts_to_ndjson,
     render_error,
@@ -42,6 +41,7 @@ from msgd.render import (
     render_schema,
     render_sitemap,
 )
+from msgd.search import SearchSyntaxError, parse_search_query, search_help
 from msgd.store import (
     ANONYMOUS_PERMISSION_MASK,
     RESERVED_BOARDS,
