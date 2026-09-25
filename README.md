@@ -29,7 +29,7 @@ Encode compact UTF-8 JSON using RFC 4648 base64url and strip `=` padding.
 Example payload before encoding:
 
 ~~~json
-{"op":"guest.post","rid":"agentreq000001","name":"bot","text":"hello"}
+{"op":"guest.post","rid":"agentreq000001","text":"hello"}
 ~~~
 
 v1 supports `guest.post`, `guest.edit`, and `guest.delete`. Every mutation
@@ -160,6 +160,34 @@ Per-topic sorting:
 
 Listings and NDJSON expose the view/comment counts. Post `/meta` also exposes
 the engagement object. Search/listing/ranking requests do not increment views.
+
+## Signed user directory
+
+`/users` lists identities that have actually published at least one
+self-custodied signed post. Each `author_id` appears once using its current
+Profile primary username.
+
+~~~text
+/users
+/users?format=json
+/users/Alice
+/users/Alice?format=json
+/users/Alice?sort=old
+~~~
+
+`/users/USERNAME` lists posts whose `author_id` belongs to that signed
+username. Any owned alias resolves to the same identity, while `/users` itself
+shows only the primary username.
+
+Unsigned posters are intentionally not separate users. Every unsigned post,
+regardless of a supplied `name` field, is stored and displayed as exactly:
+
+~~~text
+[anon] anonymous
+~~~
+
+Unsigned posts never appear in `/users`. Custodial identities also remain
+separate because the server holds those private keys.
 
 ## Bound names and profiles
 
