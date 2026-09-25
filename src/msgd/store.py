@@ -68,6 +68,7 @@ RESERVED_BOARDS = {
     "_signing",
     "_ca",
     "_cert",
+    "_csr",
     "_revoke",
     "_policy",
     "_revocations",
@@ -152,6 +153,28 @@ CREATE TABLE IF NOT EXISTS certificates (
     created       REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS certificates_subject ON certificates(subject_id);
+
+CREATE TABLE IF NOT EXISTS certificate_requests (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id    TEXT NOT NULL,
+    subject_key   TEXT NOT NULL,
+    issuer_serial TEXT NOT NULL,
+    delegate      INTEGER NOT NULL,
+    grants        TEXT NOT NULL,
+    message       TEXT NOT NULL DEFAULT '',
+    signature     TEXT NOT NULL,
+    nonce         TEXT NOT NULL,
+    issued        INTEGER NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    certificate   TEXT,
+    decided_by    TEXT,
+    created       REAL NOT NULL,
+    updated       REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS csr_status_id
+    ON certificate_requests(status, id);
+CREATE INDEX IF NOT EXISTS csr_subject_id
+    ON certificate_requests(subject_id, id);
 
 CREATE TABLE IF NOT EXISTS revocations (
     serial     TEXT PRIMARY KEY REFERENCES certificates(serial) ON DELETE CASCADE,
@@ -363,6 +386,27 @@ class Store:
                 created REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS certificates_subject ON certificates(subject_id);
+            CREATE TABLE IF NOT EXISTS certificate_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id TEXT NOT NULL,
+                subject_key TEXT NOT NULL,
+                issuer_serial TEXT NOT NULL,
+                delegate INTEGER NOT NULL,
+                grants TEXT NOT NULL,
+                message TEXT NOT NULL DEFAULT '',
+                signature TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                issued INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                certificate TEXT,
+                decided_by TEXT,
+                created REAL NOT NULL,
+                updated REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS csr_status_id
+                ON certificate_requests(status, id);
+            CREATE INDEX IF NOT EXISTS csr_subject_id
+                ON certificate_requests(subject_id, id);
             CREATE TABLE IF NOT EXISTS revocations (
                 serial TEXT PRIMARY KEY REFERENCES certificates(serial) ON DELETE CASCADE,
                 revoked_at REAL NOT NULL,
