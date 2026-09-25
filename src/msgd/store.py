@@ -10,6 +10,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,8 @@ from msgd.search import SearchSpec
 BOARD_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 AUTHOR_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 MENTION_RE = re.compile(r"(?<![A-Za-z0-9._-])@([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?![A-Za-z0-9._-])")
+HASHTAG_RE = re.compile(r"(?<![\w/#])#([\w][\w-]{0,31})", re.UNICODE)
+MAX_TAGS_PER_POST = 16
 
 ANONYMOUS_PERMISSION_BITS = {
     "post.create": 1,
@@ -65,6 +68,8 @@ RESERVED_BOARDS = {
     "_health",
     "_search",
     "hot",
+    "tags",
+    "tag",
     "_signing",
     "_ca",
     "_cert",
@@ -226,6 +231,13 @@ CREATE TABLE IF NOT EXISTS inbox_events (
 );
 CREATE INDEX IF NOT EXISTS inbox_subject_post
     ON inbox_events(subject_id, post_id);
+
+CREATE TABLE IF NOT EXISTS post_tags (
+    post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    tag     TEXT NOT NULL,
+    PRIMARY KEY(post_id, tag)
+);
+CREATE INDEX IF NOT EXISTS post_tags_tag_post ON post_tags(tag, post_id DESC);
 
 CREATE TABLE IF NOT EXISTS webhooks (
     id                TEXT PRIMARY KEY,
@@ -403,6 +415,12 @@ class Store:
                 ).fetchone()
                 is not None
             )
+            had_tags = (
+                self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='post_tags'"
+                ).fetchone()
+                is not None
+            )
             self._conn.executescript(TABLES)
             self._ensure_schema()
             for name, description in DEFAULT_BOARDS.items():
@@ -414,6 +432,8 @@ class Store:
                 )
             if not had_inbox:
                 self._rebuild_inbox()
+            if not had_tags:
+                self._rebuild_tags()
 
     def close(self) -> None:
         with self._lock:
@@ -530,6 +550,14 @@ class Store:
             CREATE INDEX IF NOT EXISTS inbox_subject_post
                 ON inbox_events(subject_id, post_id);
 
+            CREATE TABLE IF NOT EXISTS post_tags (
+                post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+                tag TEXT NOT NULL,
+                PRIMARY KEY(post_id, tag)
+            );
+            CREATE INDEX IF NOT EXISTS post_tags_tag_post
+                ON post_tags(tag, post_id DESC);
+
             CREATE TABLE IF NOT EXISTS webhooks (
                 id TEXT PRIMARY KEY,
                 owner_id TEXT NOT NULL,
@@ -572,6 +600,144 @@ class Store:
                 last_seen = MAX(identity_names.last_seen, excluded.last_seen)
             """
         )
+
+    @staticmethod
+    def normalize_tag(value: str) -> str:
+        tag = unicodedata.normalize("NFC", value.strip()).casefold()
+        if not tag or len(tag) > 32 or len(tag.encode("utf-8")) > 96:
+            raise StoreError("tag must be 1..32 characters and at most 96 UTF-8 bytes", 400)
+        if not all(char.isalnum() or char in {"_", "-"} for char in tag):
+            raise StoreError("tag may contain letters, numbers, underscore, or hyphen", 400)
+        if not tag[0].isalnum() and tag[0] != "_":
+            raise StoreError("tag must start with a letter, number, or underscore", 400)
+        return tag
+
+    @classmethod
+    def extract_tags(cls, title: str, body: str) -> tuple[str, ...]:
+        found: list[str] = []
+        seen: set[str] = set()
+        for match in HASHTAG_RE.finditer(title + "\n" + body):
+            try:
+                tag = cls.normalize_tag(match.group(1))
+            except StoreError:
+                continue
+            if tag in seen:
+                continue
+            seen.add(tag)
+            found.append(tag)
+            if len(found) >= MAX_TAGS_PER_POST:
+                break
+        return tuple(found)
+
+    def _reindex_tags(self, post_id: int) -> None:
+        self._conn.execute("DELETE FROM post_tags WHERE post_id = ?", (post_id,))
+        row = self._conn.execute(
+            "SELECT title, body FROM posts WHERE id = ?",
+            (post_id,),
+        ).fetchone()
+        if row is None:
+            return
+        tags = self.extract_tags(str(row["title"]), str(row["body"]))
+        if tags:
+            self._conn.executemany(
+                "INSERT INTO post_tags(post_id, tag) VALUES (?, ?)",
+                [(post_id, tag) for tag in tags],
+            )
+
+    def _rebuild_tags(self) -> None:
+        self._conn.execute("DELETE FROM post_tags")
+        rows = self._conn.execute("SELECT id FROM posts ORDER BY id").fetchall()
+        for row in rows:
+            self._reindex_tags(int(row["id"]))
+
+    def post_tags(self, post_id: int) -> tuple[str, ...]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT tag FROM post_tags WHERE post_id = ? ORDER BY tag",
+                (post_id,),
+            ).fetchall()
+        return tuple(str(row["tag"]) for row in rows)
+
+    def tags_for_posts(
+        self,
+        post_ids: list[int] | tuple[int, ...],
+    ) -> dict[int, tuple[str, ...]]:
+        ids = list(dict.fromkeys(int(post_id) for post_id in post_ids if post_id > 0))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT post_id, tag
+                  FROM post_tags
+                 WHERE post_id IN ({placeholders})
+                 ORDER BY post_id, tag
+                """,
+                ids,
+            ).fetchall()
+        result: dict[int, list[str]] = {post_id: [] for post_id in ids}
+        for row in rows:
+            result.setdefault(int(row["post_id"]), []).append(str(row["tag"]))
+        return {post_id: tuple(tags) for post_id, tags in result.items()}
+
+    def list_tags(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT t.tag, COUNT(*) AS posts,
+                       COUNT(DISTINCT p.board) AS boards,
+                       MAX(p.updated) AS last_ts,
+                       MAX(p.id) AS latest_id
+                  FROM post_tags t
+                  JOIN posts p ON p.id = t.post_id
+                 GROUP BY t.tag
+                 ORDER BY posts DESC, last_ts DESC, t.tag
+                 LIMIT ?
+                """,
+                (max(1, min(limit, self.cfg.max_limit)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def tag_info(self, tag: str) -> dict[str, Any] | None:
+        normalized = self.normalize_tag(tag)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT t.tag, COUNT(*) AS posts,
+                       COUNT(DISTINCT p.board) AS boards,
+                       MAX(p.updated) AS last_ts,
+                       MAX(p.id) AS latest_id
+                  FROM post_tags t
+                  JOIN posts p ON p.id = t.post_id
+                 WHERE t.tag = ?
+                 GROUP BY t.tag
+                """,
+                (normalized,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def posts_by_tag(
+        self,
+        tag: str,
+        *,
+        limit: int = 20,
+        order: str = "desc",
+    ) -> list[Post]:
+        normalized = self.normalize_tag(tag)
+        sql = (
+            self._select_posts().replace(" FROM posts", " FROM posts p")
+            + " JOIN post_tags t ON t.post_id = p.id"
+            + " WHERE t.tag = ? ORDER BY p.id "
+            + ("ASC" if order == "asc" else "DESC")
+            + " LIMIT ?"
+        )
+        with self._lock:
+            rows = self._conn.execute(
+                sql,
+                (normalized, max(1, min(limit, self.cfg.max_limit + 1))),
+            ).fetchall()
+        return [post for row in rows if (post := self._row(row)) is not None]
 
     def _rebuild_inbox(self) -> None:
         self._conn.execute("DELETE FROM inbox_events")
@@ -1954,6 +2120,7 @@ class Store:
                 self._remember_identity_name(auth.signer_id, name, now)
             self._insert_attachments(post_id, files)
             self._reindex_inbox(post_id)
+            self._reindex_tags(post_id)
 
         post = self.get_post(post_id)
         assert post is not None
@@ -2053,6 +2220,7 @@ class Store:
             if auth is not None and auth.signer_id == post.author_id:
                 self._remember_identity_name(auth.signer_id, new_name, now)
             self._reindex_inbox(post.id)
+            self._reindex_tags(post.id)
 
         updated = self.get_post(post.id)
         assert updated is not None
@@ -2172,6 +2340,11 @@ class Store:
         if spec.author_name:
             where.append("p.name = ?")
             params.append(spec.author_name)
+        if spec.tag:
+            where.append(
+                "EXISTS (SELECT 1 FROM post_tags t WHERE t.post_id = p.id AND t.tag = ?)"
+            )
+            params.append(self.normalize_tag(spec.tag))
         if spec.author_id:
             if not valid_author_id(spec.author_id):
                 raise StoreError("author: must be a 64-character author id", 400)
