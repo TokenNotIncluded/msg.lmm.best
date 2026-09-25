@@ -327,7 +327,13 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if head in {"rss.xml", "feed.xml"}:
-            limit = _int(params, "limit", 50, 1, min(200, self.board.cfg.max_limit))
+            limit = _int(
+                params,
+                "limit",
+                min(50, self.board.cfg.max_limit),
+                1,
+                min(200, self.board.cfg.max_limit),
+            )
             assert limit is not None
             posts = [
                 post for post in self.board.store.list_posts(limit=limit + 10)
@@ -567,7 +573,13 @@ class Handler(BaseHTTPRequestHandler):
             if info is None:
                 self._error(404, f"no such board: {head}")
                 return
-            limit = _int(params, "limit", 50, 1, min(200, self.board.cfg.max_limit))
+            limit = _int(
+                params,
+                "limit",
+                min(50, self.board.cfg.max_limit),
+                1,
+                min(200, self.board.cfg.max_limit),
+            )
             assert limit is not None
             posts = self.board.store.list_posts(board=head, limit=limit, order="desc")
             feed_name = segments[1]
