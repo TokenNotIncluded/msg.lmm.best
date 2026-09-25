@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -71,6 +72,19 @@ def scopes_from_preset(value: str) -> tuple[str, ...]:
         return SSH_PRESETS[preset]
     except KeyError as exc:
         raise StoreError(f"unknown SSH preset: {value}", 400) from exc
+
+
+def normalize_ssh_key_name(value: str, *, fallback: str = "") -> str:
+    label = " ".join(value.split())
+    if not label:
+        label = fallback
+    if not label:
+        raise StoreError("SSH key name is required", 400)
+    if len(label) > 80:
+        raise StoreError("SSH key name exceeds 80 characters", 400)
+    if any(unicodedata.category(char).startswith("C") for char in label):
+        raise StoreError("SSH key name may not contain control/format characters", 400)
+    return label
 
 
 def normalize_ssh_public_key(value: str) -> tuple[str, str, str]:
@@ -216,7 +230,7 @@ class SSHKeyStore:
         if not AUTHOR_ID_RE.fullmatch(owner_id):
             raise StoreError("invalid SSH key owner id", 400)
         canonical, key_type, fingerprint = normalize_ssh_public_key(public_key)
-        label = " ".join(name.split())[:80] or fingerprint
+        label = normalize_ssh_key_name(name, fallback=fingerprint)
         normalized_scopes = normalize_scopes(scopes)
         now = time.time()
         if expires is not None and expires <= now:
@@ -334,9 +348,7 @@ class SSHKeyStore:
         return item
 
     def rename(self, owner_id: str, key_id: str, name: str) -> dict[str, object]:
-        label = " ".join(name.split())[:80]
-        if not label:
-            raise StoreError("SSH key name is required", 400)
+        label = normalize_ssh_key_name(name)
         with self._lock, self._conn:
             cur = self._conn.execute(
                 """
