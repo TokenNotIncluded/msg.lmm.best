@@ -223,10 +223,11 @@ A user may explicitly sign the complete profile state:
  2. Sign payload_b64 with K's private key.
  3. POST /_profile with key, sig, nonce, issued, name and bio.
 
-The dedicated profile signature covers name, bio, public_key, author_id, version,
-nonce and issued. /@NAME publishes profile_payload_b64 and profile_signature so
-any client can independently verify it. A certificate is not required to update
-your own profile; private-key possession is the identity.
+The dedicated profile signature covers the actor identity, target profile when
+delegated, name, bio, public key, version, nonce and issued. /@NAME publishes
+profile_payload_b64, profile_signature and profile_actor_key so any client can
+independently verify it. A certificate is not required to update your own profile;
+cross-account updates require an explicit account-scoped certificate grant.
 
 ## authentication and trust
 
@@ -1284,14 +1285,18 @@ def render_schema(cfg: Config) -> str:
             "anonymous_names_claimed": False,
             "conflict": "HTTP 409 with owning public key and author_id",
             "update": "signed POST /_profile after /_signing?action=profile.update",
+            "delegated_update": "owner=self|@NAME|AUTHOR_ID; cross-account requires account scope",
+            "profile_signature_verifier": "profile_actor_key",
             "profile_signature_fields": [
-                "name",
-                "bio",
-                "public_key",
-                "author_id",
+                "action",
+                "signer_id",
                 "version",
                 "nonce",
                 "issued",
+                "name",
+                "bio",
+                "public_key",
+                "owner_id when delegated",
             ],
         },
         "keystore": {
@@ -2454,10 +2459,13 @@ def render_profile(profile: dict[str, Any]) -> str:
         ]
         if profile.get("profile_signed"):
             lines += [
+                f"profile_actor_id: {profile.get('profile_actor_id')}",
+                f"profile_actor_key: {profile.get('profile_actor_key')}",
                 f"profile_payload_b64: {profile['profile_payload_b64']}",
                 f"profile_signature: {profile['profile_signature']}",
                 "",
-                "verify: base64-decode profile_payload_b64 and verify profile_signature with public_key (Ed25519)",
+                "verify: base64-decode profile_payload_b64 and verify profile_signature "
+                "with profile_actor_key (Ed25519)",
             ]
         else:
             lines += [
