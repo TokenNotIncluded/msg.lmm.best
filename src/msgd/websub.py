@@ -195,9 +195,7 @@ class WebSubService:
         self.cfg = cfg
         self.store = store
         self.secrets = SecretBox(cfg.webhook_secret_key)
-        self.external_hubs = tuple(
-            validate_webhook_url(hub) for hub in cfg.websub_hubs[1:]
-        )
+        self.external_hubs = tuple(validate_webhook_url(hub) for hub in cfg.websub_hubs[1:])
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
