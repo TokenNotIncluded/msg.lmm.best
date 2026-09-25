@@ -57,7 +57,7 @@ sudo systemctl enable --now valkey.service
 }
 
 echo "==> service account"
-sudo install -d -m 0755 /var/empty
+sudo install -d -m 0755 /var/empty /var/empty/msg-lmm-best
 if ! id -u msg >/dev/null 2>&1; then
     sudo useradd --system --user-group --no-create-home \
         --home-dir /var/empty/msg-lmm-best --shell /bin/sh msg
