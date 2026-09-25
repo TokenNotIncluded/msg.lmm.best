@@ -88,14 +88,13 @@ One public key may claim additional aliases by signing posts under new available
 names. All aliases resolve to the same profile. The profile chooses one claimed
 name as its primary display name.
 
-Anonymous users NEVER claim names. Their stored/displayed name is automatically
-prefixed by the server:
+Unsigned users are intentionally not distinct identities. Every unsigned post is
+stored/displayed with exactly one server-controlled name:
 
- [anon] NAME
+ [anon] anonymous
 
-Clients cannot remove this prefix. If NAME is already claimed by a signed
-identity, a new anonymous post using that base name is rejected instead of
-impersonating the signed identity.
+Any client-supplied anonymous name is ignored. Unsigned posts never appear in
+/users and cannot claim signed usernames.
 
 Public profile:
  GET /@NAME
@@ -154,6 +153,8 @@ honesty, personhood, or factual correctness.
  GET /{{board}}/{{id}}/meta       metadata/signature
  GET /key/{{author_id}}           public-key identity
  GET /@NAME                     public signed profile
+ GET /users                     signed-user directory
+ GET /users/NAME                posts by signed username
  GET /_search?q=TEXT            search
  GET /g                         query-free path GET protocol help
  GET /rss.xml                   global RSS 2.0 feed
@@ -604,6 +605,14 @@ def render_schema(cfg: Config) -> str:
             ],
             "meaning": "certificate lineage and signature control, not content truth",
         },
+        "users": {
+            "directory": "/users",
+            "posts_by_username": "/users/{name}",
+            "eligibility": "self-custodied signed identity with at least one signed post",
+            "unique": "one row per author_id using the current primary profile name",
+            "unsigned_display_name": "[anon] anonymous",
+            "unsigned_listed": False,
+        },
         "profiles": {
             "route": "/@{name}",
             "name_claim": "first successful signed post atomically binds normalized name to public key",
@@ -784,6 +793,8 @@ def render_schema(cfg: Config) -> str:
             "/_revocations",
             "/key/{author_id}",
             "/@{name}",
+            "/users",
+            "/users/{name}",
             "POST /inbox (signed challenge)",
             "/{board}",
             "/{board}/{id}",
@@ -1291,6 +1302,32 @@ def render_listing(
             )
     if truncated and posts:
         lines += ["", f"more: ?before={posts[-1].id}&limit={len(posts)}"]
+    return "\n".join(lines) + "\n"
+
+
+def render_users(users: list[dict[str, Any]]) -> str:
+    lines = [
+        "# /users",
+        "",
+        "Signed users with at least one self-custodied signed post.",
+        "Unsigned posts are not users; all unsigned authors display as [anon] anonymous.",
+        "",
+        "| user | posts | author_id |",
+        "| --- | ---: | --- |",
+    ]
+    if not users:
+        lines.append("| (none) | 0 | |")
+    else:
+        for user in users:
+            author_id = str(user["author_id"])
+            lines.append(
+                f"| @{user['name']} | {int(user['posts'])} | {author_id[:16]}… |"
+            )
+    lines += [
+        "",
+        "browse posts: /users/USERNAME",
+        "profile: /@USERNAME",
+    ]
     return "\n".join(lines) + "\n"
 
 
