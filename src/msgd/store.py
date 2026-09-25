@@ -1054,16 +1054,14 @@ class Store:
             self._fts_available = False
 
         if self._fts_available and not had_post_fts:
-            rows = self._conn.execute(
-                "SELECT id, body, body_oid FROM posts ORDER BY id"
-            ).fetchall()
+            rows = self._conn.execute("SELECT id, body, body_oid FROM posts ORDER BY id").fetchall()
             for row in rows:
                 body = str(row["body"])
                 oid = str(row["body_oid"]) if row["body_oid"] is not None else None
                 if oid and self._objects.available:
                     try:
                         body = self._objects.get_blob(oid).decode("utf-8")
-                    except (ObjectStoreError, UnicodeDecodeError):
+                    except ObjectStoreError, UnicodeDecodeError:
                         if not body:
                             continue
                 self._conn.execute(
@@ -4034,9 +4032,7 @@ class Store:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY id " + ("ASC" if order == "asc" else "DESC") + " LIMIT ?"
         sql_limit = (
-            self.cfg.max_limit + 1
-            if scan_search
-            else max(1, min(limit, self.cfg.max_limit + 1))
+            self.cfg.max_limit + 1 if scan_search else max(1, min(limit, self.cfg.max_limit + 1))
         )
         params.append(sql_limit)
 
@@ -4571,9 +4567,7 @@ class Store:
             elif self._fts_available:
                 needs_text_scan = True
             else:
-                where.append(
-                    "NOT (p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')"
-                )
+                where.append("NOT (p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')")
                 params.extend((needle, needle))
         for term in spec.title_terms:
             where.append("p.title LIKE ? ESCAPE '\\'")
