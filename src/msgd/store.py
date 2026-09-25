@@ -3356,15 +3356,15 @@ class Store:
                     (request_id, payload_sha256, operation, time.time()),
                 )
                 return True, None
-            except sqlite3.IntegrityError:
+            except sqlite3.IntegrityError as exc:
                 existing = self.path_get_receipt(request_id)
                 if existing is None:
-                    raise StoreError("path GET receipt conflict", 409)
+                    raise StoreError("path GET receipt conflict", 409) from exc
                 if existing["payload_sha256"] != payload_sha256:
                     raise StoreError(
                         "path GET request id was reused with different payload",
                         409,
-                    )
+                    ) from exc
                 return False, existing
 
     def complete_path_get(
