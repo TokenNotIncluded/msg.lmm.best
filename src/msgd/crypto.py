@@ -118,6 +118,12 @@ def request_payload(
     since: int | None = None,
     before: int | None = None,
     limit: int | None = None,
+    csr_id: int | None = None,
+    requested_issuer: str = "",
+    delegate: bool = False,
+    csr_grants: tuple[dict[str, object], ...] = (),
+    message: str = "",
+    reason: str = "",
 ) -> bytes:
     if not IDENTITY_RE.fullmatch(signer_id):
         raise SignatureError("invalid signer id")
@@ -173,7 +179,32 @@ def request_payload(
     elif action == "cert.revoke":
         if not SERIAL_RE.fullmatch(serial):
             raise SignatureError("invalid certificate serial")
-        fields.append(("serial", serial))
+        fields += [
+            ("serial", serial),
+            ("reason", reason),
+        ]
+    elif action == "cert.request":
+        if nonce is None or issued is None:
+            raise SignatureError("cert.request requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        if requested_issuer and not IDENTITY_RE.fullmatch(requested_issuer):
+            raise SignatureError("requested_issuer must be an author id")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("requested_issuer", requested_issuer),
+            ("delegate", "1" if delegate else "0"),
+            ("grants", canonical_json(list(csr_grants))),
+            ("message", message),
+        ]
+    elif action in {"cert.request.cancel", "cert.request.reject"}:
+        if csr_id is None or csr_id < 1:
+            raise SignatureError(f"{action} requires csr_id")
+        fields += [
+            ("csr_id", str(csr_id)),
+            ("reason", reason),
+        ]
     elif action == "inbox.read":
         if nonce is None or issued is None:
             raise SignatureError("inbox.read requires nonce and issued")

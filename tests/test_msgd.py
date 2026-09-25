@@ -32,6 +32,15 @@ def public_b64(key: Ed25519PrivateKey) -> str:
     return base64.b64encode(raw).decode()
 
 
+def public_identity_for_test(key: Ed25519PrivateKey) -> str:
+    raw = key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    import hashlib
+    return hashlib.sha256(raw).hexdigest()
+
+
 def sign_b64(key: Ed25519PrivateKey, payload_b64: str) -> str:
     payload = base64.b64decode(payload_b64)
     return base64.b64encode(key.sign(payload)).decode()
@@ -290,6 +299,86 @@ class ServerCase(unittest.TestCase):
             sig=sign_b64(key, info["payload_b64"]),
         )
 
+    def create_csr(
+        self,
+        key: Ed25519PrivateKey,
+        grants: list[dict],
+        *,
+        delegate: bool = False,
+        requested_issuer: str = "",
+        message: str = "",
+    ) -> dict:
+        grants_json = json.dumps(grants, separators=(",", ":"))
+        fields = {
+            "action": "cert.request",
+            "key": public_b64(key),
+            "grants": grants_json,
+            "delegate": "true" if delegate else "false",
+            "message": message,
+        }
+        if requested_issuer:
+            fields["requested_issuer"] = requested_issuer
+        info = self.signing(**fields)
+        submit = {
+            "key": public_b64(key),
+            "sig": sign_b64(key, info["payload_b64"]),
+            "nonce": info["nonce"],
+            "issued": str(info["issued"]),
+            "grants": grants_json,
+            "delegate": "true" if delegate else "false",
+            "message": message,
+        }
+        if requested_issuer:
+            submit["requested_issuer"] = requested_issuer
+        status, body = self.c.post("/_csr", **submit)
+        self.assertEqual(status, 201, body)
+        return json.loads(body)
+
+    def issue_csr(
+        self,
+        issuer_key: Ed25519PrivateKey,
+        csr_id: int,
+        *,
+        grants: list[dict] | None = None,
+        delegate: bool | None = None,
+    ) -> tuple[int, str]:
+        fields = {
+            "action": "cert.issue",
+            "key": public_b64(issuer_key),
+            "csr": str(csr_id),
+        }
+        if grants is not None:
+            fields["grants"] = json.dumps(grants, separators=(",", ":"))
+        if delegate is not None:
+            fields["delegate"] = "true" if delegate else "false"
+        info = self.signing(**fields)
+        submit = {
+            "cert": info["certificate"],
+            "sig": sign_b64(issuer_key, info["payload_b64"]),
+            "csr": str(csr_id),
+        }
+        return self.c.post("/_cert", **submit)
+
+    def cancel_csr(
+        self,
+        key: Ed25519PrivateKey,
+        csr_id: int,
+        reason: str = "",
+    ) -> tuple[int, str]:
+        info = self.signing(
+            action="cert.request.cancel",
+            key=public_b64(key),
+            id=str(csr_id),
+            reason=reason,
+        )
+        return self.c.post(
+            "/_csr",
+            cancel=str(csr_id),
+            key=public_b64(key),
+            sig=sign_b64(key, info["payload_b64"]),
+            reason=reason,
+        )
+
     def test_create_read_search(self) -> None:
         pid = self.publish("hello needle")
         status, body = self.c.get(f"/main/{pid}/raw")
@@ -452,6 +541,152 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status, 200)
         status, _ = self.signed_edit(member, pid, "after")
         self.assertEqual(status, 403)
+
+    def test_ca_workflow_create_issue_revoke_and_audit(self) -> None:
+        applicant = Ed25519PrivateKey.generate()
+        grants = [
+            {
+                "topic": "main",
+                "actions": ["post.create", "post.edit.self"],
+            }
+        ]
+        csr = self.create_csr(
+            applicant,
+            grants,
+            message="requesting a basic main certificate",
+        )
+        self.assertEqual(csr["status"], "pending")
+        self.assertEqual(csr["subject_id"], public_identity_for_test(applicant))
+
+        status, body = self.c.get("/_csr", id=str(csr["id"]))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["status"], "pending")
+
+        status, body = self.c.get("/_csr", status="pending")
+        self.assertEqual(status, 200, body)
+        self.assertTrue(any(item["id"] == csr["id"] for item in json.loads(body)))
+
+        policy = json.loads(self.c.get("/_policy", board="ca")[1])
+        self.assertEqual(policy["permissions"], 0)
+        self.assertTrue(policy["locked"])
+        self.assertEqual(
+            self.c.post("/publish", board="ca", text="tamper")[0],
+            403,
+        )
+
+        status, body = self.issue_csr(self.root_key, csr["id"])
+        self.assertEqual(status, 201, body)
+        issued = json.loads(body)
+        serial = issued["serial"]
+
+        updated = json.loads(self.c.get("/_csr", id=str(csr["id"]))[1])
+        self.assertEqual(updated["status"], "issued")
+        self.assertEqual(updated["certificate_serial"], serial)
+
+        status, body = self.c.get("/_cert", subject=csr["subject_id"])
+        self.assertEqual(status, 200, body)
+        self.assertTrue(any(item["serial"] == serial for item in json.loads(body)))
+
+        status, body = self.c.get("/_cert")
+        self.assertEqual(status, 200, body)
+        self.assertTrue(any(item["serial"] == serial for item in json.loads(body)))
+
+        ca_posts = self.server.board.store.list_posts(
+            board="ca",
+            limit=50,
+            order="desc",
+        )
+        self.assertTrue(any(post.system for post in ca_posts))
+        self.assertTrue(any("[REQUEST]" in post.title for post in ca_posts))
+        self.assertTrue(any("[ISSUED]" in post.title for post in ca_posts))
+        audit = next(post for post in ca_posts if post.system)
+        self.assertEqual(
+            self.c.post("/publish", edit=str(audit.id), text="tamper")[0],
+            403,
+        )
+        self.assertEqual(
+            self.c.post("/publish", delete=str(audit.id))[0],
+            403,
+        )
+
+        reason = "smoke-test revocation"
+        info = self.signing(
+            action="cert.revoke",
+            key=public_b64(self.root_key),
+            serial=serial,
+            reason=reason,
+        )
+        status, body = self.c.post(
+            "/_revoke",
+            serial=serial,
+            key=public_b64(self.root_key),
+            sig=sign_b64(self.root_key, info["payload_b64"]),
+            reason=reason,
+        )
+        self.assertEqual(status, 200, body)
+        revocations = json.loads(self.c.get("/_revocations")[1])
+        row = next(item for item in revocations if item["serial"] == serial)
+        self.assertEqual(row["reason"], reason)
+        ca_posts = self.server.board.store.list_posts(board="ca", limit=50)
+        self.assertTrue(any("[REVOKED]" in post.title for post in ca_posts))
+
+    def test_csr_cannot_be_expanded_and_can_be_cancelled(self) -> None:
+        applicant = Ed25519PrivateKey.generate()
+        csr = self.create_csr(
+            applicant,
+            [{"topic": "main", "actions": ["post.create"]}],
+            delegate=False,
+        )
+
+        expanded = [
+            {
+                "topic": "main",
+                "actions": ["post.create", "post.delete.any"],
+            }
+        ]
+        status, _ = self.issue_csr(
+            self.root_key,
+            csr["id"],
+            grants=expanded,
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(
+            json.loads(self.c.get("/_csr", id=str(csr["id"]))[1])["status"],
+            "pending",
+        )
+
+        status, body = self.cancel_csr(
+            applicant,
+            csr["id"],
+            "changed my mind",
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["status"], "cancelled")
+
+    def test_root_can_reject_csr(self) -> None:
+        applicant = Ed25519PrivateKey.generate()
+        csr = self.create_csr(
+            applicant,
+            [{"topic": "skills", "actions": ["post.create"]}],
+        )
+        reason = "insufficient evidence"
+        info = self.signing(
+            action="cert.request.reject",
+            key=public_b64(self.root_key),
+            id=str(csr["id"]),
+            reason=reason,
+        )
+        status, body = self.c.post(
+            "/_csr",
+            reject=str(csr["id"]),
+            key=public_b64(self.root_key),
+            sig=sign_b64(self.root_key, info["payload_b64"]),
+            reason=reason,
+        )
+        self.assertEqual(status, 200, body)
+        result = json.loads(body)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["reason"], reason)
 
     def test_topic_permission_bits_drive_policy_and_homepage(self) -> None:
         status, body = self.set_policy_bits(self.root_key, "main", 1)
@@ -1161,10 +1396,12 @@ class LegacyMigrationCase(unittest.TestCase):
                 self.assertIn("author_id", columns)
                 self.assertIn("actor_id", columns)
                 self.assertIn("reply_to", columns)
+                self.assertIn("system", columns)
                 self.assertIn("certificates", tables)
                 self.assertIn("revocations", tables)
                 self.assertIn("topic_policies", tables)
                 self.assertIn("inbox_events", tables)
+                self.assertIn("certificate_requests", tables)
             finally:
                 store.close()
 

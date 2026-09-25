@@ -19,6 +19,7 @@ from msgd.crypto import (
     Certificate,
     SignatureError,
     SignedRequest,
+    canonical_json,
     certificate_payload,
     parse_certificate,
     public_identity,
@@ -68,6 +69,7 @@ RESERVED_BOARDS = {
     "_signing",
     "_ca",
     "_cert",
+    "_csr",
     "_revoke",
     "_policy",
     "_revocations",
@@ -83,6 +85,7 @@ RESERVED_BOARDS = {
 DEFAULT_BOARDS = {
     "main": "General discussion.",
     "meta": "Talk about this board.",
+    "ca": "Public CA audit log. Authority: /_csr, /_cert, /_revocations.",
 }
 
 TABLES = """
@@ -114,7 +117,8 @@ CREATE TABLE IF NOT EXISTS posts (
     sig_version INTEGER NOT NULL DEFAULT 0,
     sig_nonce   TEXT,
     sig_issued  INTEGER,
-    reply_to    INTEGER
+    reply_to    INTEGER,
+    system      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS posts_board_seq ON posts(board, seq);
@@ -156,8 +160,29 @@ CREATE INDEX IF NOT EXISTS certificates_subject ON certificates(subject_id);
 CREATE TABLE IF NOT EXISTS revocations (
     serial     TEXT PRIMARY KEY REFERENCES certificates(serial) ON DELETE CASCADE,
     revoked_at REAL NOT NULL,
-    revoked_by TEXT NOT NULL
+    revoked_by TEXT NOT NULL,
+    reason     TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS certificate_requests (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_key      TEXT NOT NULL,
+    subject_id       TEXT NOT NULL,
+    requested_issuer TEXT NOT NULL DEFAULT '',
+    grants           TEXT NOT NULL,
+    delegate         INTEGER NOT NULL DEFAULT 0,
+    message          TEXT NOT NULL DEFAULT '',
+    created          REAL NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    decided          REAL,
+    decision_by      TEXT NOT NULL DEFAULT '',
+    reason           TEXT NOT NULL DEFAULT '',
+    certificate_serial TEXT
+);
+CREATE INDEX IF NOT EXISTS csr_status_id
+    ON certificate_requests(status, id);
+CREATE INDEX IF NOT EXISTS csr_subject_id
+    ON certificate_requests(subject_id, id);
 
 CREATE TABLE IF NOT EXISTS topic_policies (
     board     TEXT PRIMARY KEY,
@@ -253,6 +278,7 @@ class Post:
     sig_nonce: str | None = None
     sig_issued: int | None = None
     reply_to: int | None = None
+    system: bool = False
 
     @property
     def signed(self) -> bool:
@@ -283,6 +309,7 @@ class Post:
             "sig_nonce": self.sig_nonce if self.signed and self.sig_version == 1 else None,
             "sig_issued": self.sig_issued if self.signed and self.sig_version == 1 else None,
             "reply_to": self.reply_to,
+            "system": self.system,
         }
 
 
@@ -316,6 +343,10 @@ class Store:
             self._ensure_schema()
             for name, description in DEFAULT_BOARDS.items():
                 self._ensure_board(name, description)
+            self._conn.execute(
+                "UPDATE boards SET description = ? WHERE name = 'ca' AND description = ''",
+                (DEFAULT_BOARDS["ca"],),
+            )
             if not had_inbox:
                 self._rebuild_inbox()
 
@@ -338,10 +369,21 @@ class Store:
             "sig_nonce": "TEXT",
             "sig_issued": "INTEGER",
             "reply_to": "INTEGER",
+            "system": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, definition in additions.items():
             if name not in columns:
                 self._conn.execute(f"ALTER TABLE posts ADD COLUMN {name} {definition}")
+
+        revocation_columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(revocations)").fetchall()
+        }
+        if revocation_columns and "reason" not in revocation_columns:
+            self._conn.execute(
+                "ALTER TABLE revocations ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
+            )
+
         self._conn.executescript(
             """
             CREATE INDEX IF NOT EXISTS posts_author_id ON posts(author_id);
@@ -366,8 +408,28 @@ class Store:
             CREATE TABLE IF NOT EXISTS revocations (
                 serial TEXT PRIMARY KEY REFERENCES certificates(serial) ON DELETE CASCADE,
                 revoked_at REAL NOT NULL,
-                revoked_by TEXT NOT NULL
+                revoked_by TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS certificate_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_key TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                requested_issuer TEXT NOT NULL DEFAULT '',
+                grants TEXT NOT NULL,
+                delegate INTEGER NOT NULL DEFAULT 0,
+                message TEXT NOT NULL DEFAULT '',
+                created REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                decided REAL,
+                decision_by TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL DEFAULT '',
+                certificate_serial TEXT
+            );
+            CREATE INDEX IF NOT EXISTS csr_status_id
+                ON certificate_requests(status, id);
+            CREATE INDEX IF NOT EXISTS csr_subject_id
+                ON certificate_requests(subject_id, id);
             CREATE TABLE IF NOT EXISTS topic_policies (
                 board TEXT PRIMARY KEY,
                 anonymous TEXT NOT NULL,
@@ -484,7 +546,7 @@ class Store:
         row = self._conn.execute(
             """
             SELECT
-                COALESCE((SELECT SUM(nbytes) FROM posts), 0)
+                COALESCE((SELECT SUM(nbytes) FROM posts WHERE system = 0), 0)
               + COALESCE((SELECT SUM(nbytes) FROM attachments), 0) AS n
             """
         ).fetchone()
@@ -566,19 +628,29 @@ class Store:
         return dict(row) if row else None
 
     def policy(self, board: str) -> dict[str, Any]:
+        if board == "ca":
+            return {
+                "board": "ca",
+                "permissions": 0,
+                "anonymous": [],
+                "version": 0,
+                "updated": None,
+                "locked": True,
+            }
         with self._lock:
             row = self._conn.execute(
                 "SELECT anonymous, version, updated FROM topic_policies WHERE board = ?",
                 (board,),
             ).fetchone()
         if row is None:
-            actions = sorted(DEFAULT_ANONYMOUS)
+            actions = [] if board == "ca" else sorted(DEFAULT_ANONYMOUS)
             return {
                 "board": board,
                 "permissions": anonymous_permission_mask(actions),
                 "anonymous": actions,
                 "version": 0,
                 "updated": None,
+                "locked": False,
             }
         actions = json.loads(str(row["anonymous"]))
         return {
@@ -587,9 +659,12 @@ class Store:
             "anonymous": actions,
             "version": int(row["version"]),
             "updated": float(row["updated"]),
+            "locked": False,
         }
 
     def set_policy(self, board: str, anonymous: tuple[str, ...], version: int) -> dict[str, Any]:
+        if board == "ca":
+            raise StoreError("/ca policy is system-managed", 403)
         if not valid_board_name(board):
             raise StoreError(f"invalid board name: {board!r}", 400)
         invalid = set(anonymous) - DEFAULT_ANONYMOUS
@@ -620,7 +695,302 @@ class Store:
             return False
         return action in set(self.policy(board)["anonymous"])
 
-    def register_certificate(self, body: str, signature: str) -> Certificate:
+    @staticmethod
+    def _grant_list(
+        grants: dict[str, tuple[str, ...] | list[str] | set[str]],
+    ) -> list[dict[str, object]]:
+        if not grants:
+            raise StoreError("certificate grants are required", 400)
+        result: list[dict[str, object]] = []
+        for topic, actions in sorted(grants.items()):
+            if topic != "*" and not BOARD_RE.fullmatch(topic):
+                raise StoreError(f"invalid grant topic: {topic!r}", 400)
+            normalized = sorted(set(actions))
+            if not normalized:
+                raise StoreError("grant actions are required", 400)
+            invalid = set(normalized) - ACTIONS
+            if invalid:
+                raise StoreError(f"invalid grant actions: {sorted(invalid)}", 400)
+            result.append({"topic": topic, "actions": normalized})
+        return result
+
+    @staticmethod
+    def _grant_map(value: object) -> dict[str, set[str]]:
+        if not isinstance(value, list):
+            raise StoreError("invalid stored grants", 500)
+        result: dict[str, set[str]] = {}
+        for item in value:
+            if not isinstance(item, dict):
+                raise StoreError("invalid stored grant", 500)
+            topic = item.get("topic")
+            actions = item.get("actions")
+            if not isinstance(topic, str) or not isinstance(actions, list):
+                raise StoreError("invalid stored grant", 500)
+            result[topic] = {str(action) for action in actions}
+        return result
+
+    def _create_system_post(self, title: str, body: str) -> Post:
+        board = "ca"
+        body = _normalise(body)
+        title = " ".join(title.split())
+        name = "ca-audit"
+        if not body.strip():
+            raise StoreError("system audit body is empty", 500)
+        nbytes = len(body.encode("utf-8"))
+        if nbytes > self.cfg.max_post_bytes_post:
+            raise StoreError("system audit body is too large", 500)
+        if len(title.encode("utf-8")) > self.cfg.max_title_bytes:
+            raise StoreError("system audit title is too large", 500)
+        self.ensure_board(board)
+        now = time.time()
+        with self._lock, self._conn:
+            seq = int(
+                self._conn.execute(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM posts WHERE board = ?",
+                    (board,),
+                ).fetchone()["n"]
+            )
+            cur = self._conn.execute(
+                """
+                INSERT INTO posts(
+                    board, seq, name, title, body, created, updated, nbytes,
+                    system
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (board, seq, name, title, body, now, now, nbytes),
+            )
+            post_id = int(cur.lastrowid or 0)
+        post = self.get_post(post_id)
+        if post is None:
+            raise StoreError("failed to create CA audit post", 500)
+        return post
+
+    def _audit_ca(self, kind: str, title: str, lines: list[str]) -> None:
+        body = "\n".join([f"type={kind}", *lines, "authority=/_csr /_cert /_revocations"])
+        self._create_system_post(title, body)
+
+    def create_csr(
+        self,
+        *,
+        auth: SignedRequest,
+        grants: dict[str, tuple[str, ...]],
+        delegate: bool,
+        requested_issuer: str,
+        message: str,
+    ) -> dict[str, Any]:
+        if requested_issuer and not valid_author_id(requested_issuer):
+            raise StoreError("requested_issuer must be an author id", 400)
+        if len(message.encode("utf-8")) > 4096:
+            raise StoreError("CSR message exceeds 4096 bytes", 413)
+        grant_list = self._grant_list(grants)
+        self.consume_nonce(auth)
+        now = time.time()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                INSERT INTO certificate_requests(
+                    subject_key, subject_id, requested_issuer, grants,
+                    delegate, message, created, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+                """,
+                (
+                    auth.public_key,
+                    auth.signer_id,
+                    requested_issuer,
+                    canonical_json(grant_list),
+                    1 if delegate else 0,
+                    message,
+                    now,
+                ),
+            )
+            csr_id = int(cur.lastrowid or 0)
+        csr = self.csr(csr_id)
+        if csr is None:
+            raise StoreError("failed to create CSR", 500)
+        self._audit_ca(
+            "request",
+            f"[REQUEST] CSR #{csr_id}",
+            [
+                f"csr=/_csr?id={csr_id}",
+                f"subject={auth.signer_id}",
+                f"requested_issuer={requested_issuer or 'any'}",
+                f"delegate={str(delegate).lower()}",
+                f"grants={canonical_json(grant_list)}",
+                *( [f"message={message[:300]}"] if message else [] ),
+            ],
+        )
+        return csr
+
+    def csr(self, csr_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, subject_key, subject_id, requested_issuer, grants,
+                       delegate, message, created, status, decided, decision_by,
+                       reason, certificate_serial
+                  FROM certificate_requests
+                 WHERE id = ?
+                """,
+                (csr_id,),
+            ).fetchone()
+        return self._csr_row(row)
+
+    def list_csrs(
+        self,
+        *,
+        status: str | None = None,
+        subject_id: str | None = None,
+        requested_issuer: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if status:
+            if status not in {"pending", "issued", "rejected", "cancelled"}:
+                raise StoreError("invalid CSR status", 400)
+            where.append("status = ?")
+            params.append(status)
+        if subject_id:
+            if not valid_author_id(subject_id):
+                raise StoreError("invalid subject id", 400)
+            where.append("subject_id = ?")
+            params.append(subject_id)
+        if requested_issuer:
+            if not valid_author_id(requested_issuer):
+                raise StoreError("invalid requested issuer", 400)
+            where.append("requested_issuer = ?")
+            params.append(requested_issuer)
+        sql = (
+            "SELECT id, subject_key, subject_id, requested_issuer, grants, delegate,"
+            " message, created, status, decided, decision_by, reason,"
+            " certificate_serial FROM certificate_requests"
+        )
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(max(1, min(limit, self.cfg.max_limit)))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._csr_row(row) for row in rows if row is not None]
+
+    def can_issue_csr(self, signer_id: str, csr: dict[str, Any]) -> bool:
+        root = self.root_info()
+        if root is not None and signer_id == root["root_id"]:
+            return True
+        if csr["requested_issuer"] and csr["requested_issuer"] != signer_id:
+            return False
+        grants = self._grant_map(csr["grants"])
+        return all(
+            "cert.issue" in self.permissions_for(signer_id, topic)
+            for topic in grants
+        )
+
+    def cancel_csr(self, csr_id: int, signer_id: str, reason: str = "") -> dict[str, Any]:
+        csr = self.csr(csr_id)
+        if csr is None:
+            raise StoreError("CSR not found", 404)
+        if csr["status"] != "pending":
+            raise StoreError("CSR is not pending", 409)
+        if csr["subject_id"] != signer_id:
+            raise StoreError("only the CSR subject may cancel it", 403)
+        now = time.time()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE certificate_requests
+                   SET status='cancelled', decided=?, decision_by=?, reason=?
+                 WHERE id=? AND status='pending'
+                """,
+                (now, signer_id, reason[:500], csr_id),
+            )
+        result = self.csr(csr_id)
+        assert result is not None
+        self._audit_ca(
+            "cancelled",
+            f"[CANCELLED] CSR #{csr_id}",
+            [f"csr=/_csr?id={csr_id}", f"subject={csr['subject_id']}", f"reason={reason[:300]}"],
+        )
+        return result
+
+    def reject_csr(self, csr_id: int, signer_id: str, reason: str = "") -> dict[str, Any]:
+        csr = self.csr(csr_id)
+        if csr is None:
+            raise StoreError("CSR not found", 404)
+        if csr["status"] != "pending":
+            raise StoreError("CSR is not pending", 409)
+        if not self.can_issue_csr(signer_id, csr):
+            raise StoreError("not allowed to decide this CSR", 403)
+        now = time.time()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE certificate_requests
+                   SET status='rejected', decided=?, decision_by=?, reason=?
+                 WHERE id=? AND status='pending'
+                """,
+                (now, signer_id, reason[:500], csr_id),
+            )
+        result = self.csr(csr_id)
+        assert result is not None
+        self._audit_ca(
+            "rejected",
+            f"[REJECTED] CSR #{csr_id}",
+            [
+                f"csr=/_csr?id={csr_id}",
+                f"subject={csr['subject_id']}",
+                f"by={signer_id}",
+                f"reason={reason[:300]}",
+            ],
+        )
+        return result
+
+    def _validate_csr_certificate(self, csr: dict[str, Any], cert: Certificate) -> None:
+        if csr["status"] != "pending":
+            raise StoreError("CSR is not pending", 409)
+        if cert.subject_id != csr["subject_id"] or cert.subject_key != csr["subject_key"]:
+            raise StoreError("certificate subject does not match CSR", 403)
+        if csr["requested_issuer"] and cert.issuer_id != csr["requested_issuer"]:
+            raise StoreError("certificate issuer does not match requested issuer", 403)
+        if cert.delegate and not csr["delegate"]:
+            raise StoreError("certificate delegation exceeds CSR", 403)
+        requested = self._grant_map(csr["grants"])
+        for topic, actions in cert.grants.items():
+            allowed = set(requested.get("*", set()))
+            if topic != "*":
+                allowed.update(requested.get(topic, set()))
+            if not set(actions).issubset(allowed):
+                raise StoreError(f"certificate grants exceed CSR for topic {topic}", 403)
+
+    @staticmethod
+    def _csr_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "subject_key": str(row["subject_key"]),
+            "subject_id": str(row["subject_id"]),
+            "requested_issuer": str(row["requested_issuer"] or ""),
+            "grants": json.loads(str(row["grants"])),
+            "delegate": bool(row["delegate"]),
+            "message": str(row["message"]),
+            "created": round(float(row["created"]), 3),
+            "status": str(row["status"]),
+            "decided": round(float(row["decided"]), 3) if row["decided"] is not None else None,
+            "decision_by": str(row["decision_by"] or ""),
+            "reason": str(row["reason"] or ""),
+            "certificate_serial": (
+                str(row["certificate_serial"])
+                if row["certificate_serial"] is not None else None
+            ),
+        }
+
+    def register_certificate(
+        self,
+        body: str,
+        signature: str,
+        *,
+        csr_id: int | None = None,
+    ) -> Certificate:
         try:
             cert = parse_certificate(body)
         except SignatureError as exc:
@@ -631,6 +1001,13 @@ class Store:
             if existing["body"] == cert.body and existing["signature"] == signature:
                 return cert
             raise StoreError("certificate serial already exists", 409)
+
+        csr = None
+        if csr_id is not None:
+            csr = self.csr(csr_id)
+            if csr is None:
+                raise StoreError("CSR not found", 404)
+            self._validate_csr_certificate(csr, cert)
 
         root = self.root_info()
         if root is None:
@@ -663,6 +1040,7 @@ class Store:
         except SignatureError as exc:
             raise StoreError(str(exc), 403) from exc
 
+        now = time.time()
         with self._lock, self._conn:
             self._conn.execute(
                 """
@@ -679,9 +1057,34 @@ class Store:
                     cert.subject_key,
                     cert.body,
                     canonical_sig,
-                    time.time(),
+                    now,
                 ),
             )
+            if csr is not None:
+                cur = self._conn.execute(
+                    """
+                    UPDATE certificate_requests
+                       SET status='issued', decided=?, decision_by=?,
+                           certificate_serial=?
+                     WHERE id=? AND status='pending'
+                    """,
+                    (now, cert.issuer_id, cert.serial, csr_id),
+                )
+                if cur.rowcount != 1:
+                    raise StoreError("CSR changed while issuing", 409)
+
+        self._audit_ca(
+            "issued",
+            f"[ISSUED] {cert.serial[:12]}",
+            [
+                *( [f"csr=/_csr?id={csr_id}"] if csr_id is not None else [] ),
+                f"certificate=/_cert?serial={cert.serial}",
+                f"subject={cert.subject_id}",
+                f"issuer={cert.issuer_id}",
+                f"delegate={str(cert.delegate).lower()}",
+                f"grants={canonical_json(self._grant_list(cert.grants))}",
+            ],
+        )
         return cert
 
     def certificate(self, serial: str) -> dict[str, Any] | None:
@@ -709,6 +1112,38 @@ class Store:
                 (subject_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_certificates(
+        self,
+        *,
+        issuer_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        where = ""
+        params: list[Any] = []
+        if issuer_id:
+            if not valid_author_id(issuer_id):
+                raise StoreError("invalid issuer id", 400)
+            where = " WHERE issuer_id = ?"
+            params.append(issuer_id)
+        params.append(max(1, min(limit, self.cfg.max_limit)))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT serial, issuer_serial, issuer_id, subject_id, subject_key,
+                       body, signature, created
+                  FROM certificates
+                """
+                + where
+                + " ORDER BY created DESC LIMIT ?",
+                params,
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["active"] = self.certificate_active(str(row["serial"]))
+            result.append(item)
+        return result
 
     def certificate_active(self, serial: str, *, now: int | None = None) -> bool:
         now = int(time.time()) if now is None else now
@@ -751,7 +1186,12 @@ class Store:
             )
         return action in permissions
 
-    def revoke_certificate(self, serial: str, signer_id: str) -> None:
+    def revoke_certificate(
+        self,
+        serial: str,
+        signer_id: str,
+        reason: str = "",
+    ) -> None:
         row = self.certificate(serial)
         if row is None:
             raise StoreError("certificate not found", 404)
@@ -772,11 +1212,25 @@ class Store:
         if not allowed:
             raise StoreError("not allowed to revoke this certificate", 403)
 
+        now = time.time()
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO revocations(serial, revoked_at, revoked_by) VALUES (?, ?, ?)",
-                (serial, time.time(), signer_id),
+                """
+                INSERT INTO revocations(serial, revoked_at, revoked_by, reason)
+                VALUES (?, ?, ?, ?)
+                """,
+                (serial, now, signer_id, reason[:500]),
             )
+        self._audit_ca(
+            "revoked",
+            f"[REVOKED] {serial[:12]}",
+            [
+                f"certificate=/_cert?serial={serial}",
+                f"subject={cert.subject_id}",
+                f"by={signer_id}",
+                f"reason={reason[:300]}",
+            ],
+        )
 
     def is_revoked(self, serial: str) -> bool:
         with self._lock:
@@ -789,7 +1243,7 @@ class Store:
     def revocations(self) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT serial, revoked_at, revoked_by FROM revocations ORDER BY revoked_at"
+                "SELECT serial, revoked_at, revoked_by, reason FROM revocations ORDER BY revoked_at"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -798,7 +1252,7 @@ class Store:
             raise StoreError("signed request requires nonce and issued", 400)
         now = int(time.time())
         if abs(now - auth.issued) > 300:
-            raise StoreError("signed create timestamp is outside the 5 minute window", 400)
+            raise StoreError("signed request timestamp is outside the 5 minute window", 400)
         with self._lock, self._conn:
             self._conn.execute(
                 "DELETE FROM signature_nonces WHERE issued < ?",
@@ -810,7 +1264,7 @@ class Store:
                     (auth.signer_id, auth.nonce, auth.issued),
                 )
             except sqlite3.IntegrityError as exc:
-                raise StoreError("signed create nonce already used", 409) from exc
+                raise StoreError("signed request nonce already used", 409) from exc
 
     def create_post(
         self,
@@ -860,6 +1314,7 @@ class Store:
                     SELECT p.id, p.nbytes + COALESCE(SUM(a.nbytes), 0) AS nbytes
                       FROM posts p
                       LEFT JOIN attachments a ON a.post_id = p.id
+                     WHERE p.system = 0
                      GROUP BY p.id
                      ORDER BY p.id ASC
                     """
@@ -955,6 +1410,8 @@ class Store:
         )
         if files is not None:
             files = self.prepare_files(files)
+        if post.system:
+            raise StoreError("system post is immutable", 403)
         if post.signed:
             if auth is None:
                 raise StoreError("signed post requires a signed request", 403)
@@ -1016,6 +1473,8 @@ class Store:
         return updated
 
     def delete_post(self, post: Post) -> bool:
+        if post.system:
+            raise StoreError("system post is immutable", 403)
         with self._lock, self._conn:
             cur = self._conn.execute("DELETE FROM posts WHERE id = ?", (post.id,))
             if cur.rowcount:
@@ -1197,8 +1656,13 @@ class Store:
     def stats(self) -> dict[str, int]:
         with self._lock:
             row = self._conn.execute(
-                "SELECT COUNT(*) AS posts, COALESCE(SUM(nbytes),0) AS post_bytes,"
-                " COALESCE(MAX(id),0) AS latest_id FROM posts"
+                """
+                SELECT COUNT(*) AS posts,
+                       SUM(CASE WHEN system = 1 THEN 1 ELSE 0 END) AS system_posts,
+                       COALESCE(SUM(CASE WHEN system = 0 THEN nbytes ELSE 0 END), 0) AS post_bytes,
+                       COALESCE(MAX(id),0) AS latest_id
+                  FROM posts
+                """
             ).fetchone()
             files = self._conn.execute(
                 "SELECT COUNT(*) AS files, COALESCE(SUM(nbytes),0) AS file_bytes FROM attachments"
@@ -1209,6 +1673,7 @@ class Store:
         return {
             "boards": int(boards),
             "posts": int(row["posts"]),
+            "system_posts": int(row["system_posts"] or 0),
             "files": int(files["files"]),
             "post_bytes": post_bytes,
             "file_bytes": file_bytes,
@@ -1279,7 +1744,7 @@ class Store:
         return (
             "SELECT id, board, seq, name, title, body, created, updated, nbytes,"
             " author_key, author_id, actor_key, actor_id, signature,"
-            " sig_version, sig_nonce, sig_issued, reply_to FROM posts"
+            " sig_version, sig_nonce, sig_issued, reply_to, system FROM posts"
         )
 
     @staticmethod
@@ -1318,4 +1783,5 @@ class Store:
             sig_nonce=str(row["sig_nonce"]) if row["sig_nonce"] is not None else None,
             sig_issued=int(row["sig_issued"]) if row["sig_issued"] is not None else None,
             reply_to=int(row["reply_to"]) if row["reply_to"] is not None else None,
+            system=bool(row["system"]),
         )
