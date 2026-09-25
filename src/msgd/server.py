@@ -318,11 +318,16 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(200, info)
             return
-        if head == "guest" and len(segments) == 2 and segments[1] in {
-            "post",
-            "edit",
-            "delete",
-        }:
+        if (
+            head == "guest"
+            and len(segments) == 2
+            and segments[1]
+            in {
+                "post",
+                "edit",
+                "delete",
+            }
+        ):
             if method != "GET":
                 self._send(
                     405,
@@ -334,13 +339,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._guest_bridge(segments[1], params)
             return
-        if head == "custody" and len(segments) == 2 and segments[1] in {
-            "new",
-            "me",
-            "post",
-            "edit",
-            "delete",
-        }:
+        if (
+            head == "custody"
+            and len(segments) == 2
+            and segments[1]
+            in {
+                "new",
+                "me",
+                "post",
+                "edit",
+                "delete",
+            }
+        ):
             if method != "GET":
                 self._send(
                     405,
@@ -389,9 +399,7 @@ class Handler(BaseHTTPRequestHandler):
                     store.list_boards(),
                     stats,
                     recent=recent,
-                    authentications={
-                        post.id: store.post_authentication(post) for post in recent
-                    },
+                    authentications={post.id: store.post_authentication(post) for post in recent},
                     ca_ready=store.root_info() is not None,
                 ),
             )
@@ -1211,9 +1219,7 @@ class Handler(BaseHTTPRequestHandler):
         posts, capped = self.board.store.search_posts(spec, limit=limit)
         truncated = len(posts) > limit
         visible = posts[:limit]
-        authentications = {
-            post.id: self.board.store.post_authentication(post) for post in visible
-        }
+        authentications = {post.id: self.board.store.post_authentication(post) for post in visible}
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
