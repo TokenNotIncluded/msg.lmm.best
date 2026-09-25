@@ -1433,7 +1433,11 @@ class Handler(BaseHTTPRequestHandler):
                 _required(params, "ssh_key")
             )
             raw_scopes = (_param(params, "scopes") or "read").strip().lower()
-            scopes = SSH_PRESETS[raw_scopes] if raw_scopes in SSH_PRESETS else normalize_scopes(raw_scopes)
+            scopes = (
+                SSH_PRESETS[raw_scopes]
+                if raw_scopes in SSH_PRESETS
+                else normalize_scopes(raw_scopes)
+            )
             expires_raw = (_param(params, "expires") or "").strip()
             if expires_raw:
                 try:
@@ -1444,7 +1448,11 @@ class Handler(BaseHTTPRequestHandler):
             if not re.fullmatch(r"[0-9a-f]{32}", key_id):
                 raise StoreError("invalid SSH key id", 400)
             raw_scopes = _required(params, "scopes").strip().lower()
-            scopes = SSH_PRESETS[raw_scopes] if raw_scopes in SSH_PRESETS else normalize_scopes(raw_scopes)
+            scopes = (
+                SSH_PRESETS[raw_scopes]
+                if raw_scopes in SSH_PRESETS
+                else normalize_scopes(raw_scopes)
+            )
         elif action == "ssh.rename":
             if not re.fullmatch(r"[0-9a-f]{32}", key_id):
                 raise StoreError("invalid SSH key id", 400)
