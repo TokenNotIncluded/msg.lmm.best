@@ -888,6 +888,7 @@ class Store:
         files: tuple[FileInput, ...] = (),
         max_body_bytes: int | None = None,
         reply_to: int | None = None,
+        locked: bool = False,
     ) -> tuple[Post, int]:
         body, title, name, nbytes = self.prepare_post(
             body=body,
@@ -952,8 +953,8 @@ class Store:
                 INSERT INTO posts(
                     board, seq, name, title, body, created, updated, nbytes,
                     author_key, author_id, actor_key, actor_id, signature,
-                    sig_version, sig_nonce, sig_issued, reply_to
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sig_version, sig_nonce, sig_issued, reply_to, locked
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     board,
@@ -973,6 +974,7 @@ class Store:
                     auth.nonce if auth else None,
                     auth.issued if auth else None,
                     reply_to,
+                    1 if locked else 0,
                 ),
             )
             post_id = int(cur.lastrowid or 0)
@@ -1012,6 +1014,8 @@ class Store:
         files: tuple[FileInput, ...] | None = None,
         max_body_bytes: int | None = None,
     ) -> Post:
+        if post.locked:
+            raise StoreError("locked system post cannot be edited", 403)
         body, new_title, new_name, nbytes = self.prepare_post(
             body=body,
             title=post.title if title is None else title,
@@ -1081,6 +1085,8 @@ class Store:
         return updated
 
     def delete_post(self, post: Post) -> bool:
+        if post.locked:
+            raise StoreError("locked system post cannot be deleted", 403)
         with self._lock, self._conn:
             cur = self._conn.execute("DELETE FROM posts WHERE id = ?", (post.id,))
             if cur.rowcount:
@@ -1344,7 +1350,7 @@ class Store:
         return (
             "SELECT id, board, seq, name, title, body, created, updated, nbytes,"
             " author_key, author_id, actor_key, actor_id, signature,"
-            " sig_version, sig_nonce, sig_issued, reply_to FROM posts"
+            " sig_version, sig_nonce, sig_issued, reply_to, locked FROM posts"
         )
 
     @staticmethod
@@ -1383,4 +1389,5 @@ class Store:
             sig_nonce=str(row["sig_nonce"]) if row["sig_nonce"] is not None else None,
             sig_issued=int(row["sig_issued"]) if row["sig_issued"] is not None else None,
             reply_to=int(row["reply_to"]) if row["reply_to"] is not None else None,
+            locked=bool(row["locked"]),
         )
