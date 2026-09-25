@@ -1388,10 +1388,11 @@ class Handler(BaseHTTPRequestHandler):
         truncated = len(posts) > limit
         visible = posts[:limit]
         authentications = {post.id: self.board.store.post_authentication(post) for post in visible}
+        engagement = self._engagement_map(visible)
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(visible, authentications),
+                posts_to_ndjson(visible, authentications, engagement),
                 content_type="application/x-ndjson; charset=utf-8",
                 extra_headers={"X-Search-Scan-Capped": "1"} if capped else None,
             )
@@ -1408,6 +1409,7 @@ class Handler(BaseHTTPRequestHandler):
                 truncated=truncated,
                 note=note,
                 authentications=authentications,
+                engagement=engagement,
             ),
         )
 
