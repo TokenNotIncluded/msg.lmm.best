@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import difflib
 import hashlib
 import json
 import re
@@ -874,6 +875,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if head == "ref":
             self._stable_ref(segments)
+            return
+        if head == "diff":
+            self._diff(method, segments, params)
             return
         if head == "hot":
             self._hot(params)
@@ -3852,6 +3856,130 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         raise StoreError("since format must be ndjson, json, or text", 400)
+
+    def _diff_post_ref(self, value: str) -> Any:
+        ref = value.strip()
+        if not ref:
+            raise StoreError("diff post reference is empty", 400)
+        if "://" in ref:
+            raise StoreError("diff only accepts local post references", 400)
+
+        if ref.startswith("/ref/"):
+            ref = ref[len("/ref/") :]
+        if ref.startswith(("post:", "msg:")):
+            _kind, raw_id = ref.split(":", 1)
+            post = self.board.store.get_post(_post_id(raw_id))
+            if post is None:
+                raise StoreError(f"diff post not found: {value}", 404)
+            return post
+
+        if ref.startswith("/"):
+            parts = [part for part in ref.split("/") if part]
+            if len(parts) not in {2, 3} or (len(parts) == 3 and parts[2] != "raw"):
+                raise StoreError(
+                    "local diff path must look like /BOARD/ID or /BOARD/ID/raw",
+                    400,
+                )
+            post = self.board.store.find_in_board(parts[0], parts[1])
+            if post is None:
+                raise StoreError(f"diff post not found: {value}", 404)
+            return post
+
+        post = self.board.store.get_post(_post_id(ref))
+        if post is None:
+            raise StoreError(f"diff post not found: {value}", 404)
+        return post
+
+    def _diff(self, method: str, segments: list[str], params: Params) -> None:
+        if method not in {"GET", "HEAD"}:
+            self._send(
+                405,
+                render_error(405, "/diff is read-only"),
+                extra_headers={"Allow": "GET, HEAD"},
+            )
+            return
+
+        left_ref: str | None = None
+        right_ref: str | None = None
+        if len(segments) == 3:
+            left_ref, right_ref = segments[1], segments[2]
+        elif len(segments) == 1:
+            left_ref = _param(params, "from") or _param(params, "base")
+            right_ref = _param(params, "to") or _param(params, "head")
+        else:
+            raise StoreError(
+                "invalid diff path",
+                404,
+                "try /diff/POST_A/POST_B or /diff?from=post:ID&to=post:ID",
+            )
+
+        if left_ref is None and right_ref is None:
+            self._send(
+                200,
+                "# /diff/\n\n"
+                "Compare two current public post bodies. No history is created.\n\n"
+                "short: /diff/POST_A/POST_B\n"
+                "refs: /diff?from=post:123&to=post:456\n"
+                "paths: /diff?from=/main/123&to=/meta/456\n"
+                "json: add ?format=json (or &format=json)\n"
+                "context: ?context=0..20, default 3\n\n"
+                "Accepted inputs are local post ids, post:ID/msg:ID stable refs, or "
+                "/BOARD/ID[/raw]. External URLs are rejected.\n",
+            )
+            return
+        if left_ref is None or right_ref is None:
+            raise StoreError("diff requires both from and to", 400)
+
+        left = self._diff_post_ref(left_ref)
+        right = self._diff_post_ref(right_ref)
+        context = _int(params, "context", 3, 0, 20)
+        assert context is not None
+
+        left_path = f"/{left.board}/{left.id}/raw"
+        right_path = f"/{right.board}/{right.id}/raw"
+        equal = left.body == right.body
+        patch_lines = list(
+            difflib.unified_diff(
+                left.body.splitlines(),
+                right.body.splitlines(),
+                fromfile=left_path,
+                tofile=right_path,
+                n=context,
+                lineterm="",
+            )
+        )
+        patch = "\n".join(patch_lines)
+        if patch:
+            patch += "\n"
+        else:
+            patch = f"--- {left_path}\n+++ {right_path}\n# identical\n"
+
+        def summary(post: Any, post_path: str) -> dict[str, object]:
+            return {
+                "ref": f"post:{post.id}",
+                "path": post_path,
+                "board": post.board,
+                "id": post.id,
+                "title": post.title,
+                "updated": round(post.updated, 3),
+                "bytes": post.nbytes,
+            }
+
+        if (_param(params, "format") or "").lower() == "json":
+            self._json(
+                200,
+                {
+                    "type": "post-diff",
+                    "from": summary(left, left_path),
+                    "to": summary(right, right_path),
+                    "equal": equal,
+                    "context": context,
+                    "diff": patch,
+                },
+            )
+            return
+
+        self._send(200, patch, content_type="text/x-diff; charset=utf-8")
 
     def _stable_ref(self, segments: list[str]) -> None:
         if len(segments) != 2 or ":" not in segments[1]:
