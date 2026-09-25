@@ -1415,6 +1415,9 @@ class Handler(BaseHTTPRequestHandler):
             max_body_bytes=_body_limit(self.board.cfg, method),
             reply_to=reply_to,
         )
+        if self.board.engagement.available:
+            self.board.engagement.set_comments(post.id, post.board, 0)
+            self._sync_reply_count(reply_to)
         authentication = store.post_authentication(post)
         actor_cert = authentication.get("actor") or {}
         self._send(
@@ -1571,7 +1574,10 @@ class Handler(BaseHTTPRequestHandler):
         ):
             raise StoreError("this post requires certificate authorization", 403)
 
+        parent_id = post.reply_to
         store.delete_post(post)
+        self.board.engagement.remove_post(post.id, post.board)
+        self._sync_reply_count(parent_id)
         self._send(200, render_ok(ok=1, action="delete", id=post_id, actor_id=actor_id))
 
 
