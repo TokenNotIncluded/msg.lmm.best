@@ -31,6 +31,7 @@ from msgd.crypto import (
 from msgd.ratelimit import Limiter
 from msgd.render import (
     posts_to_ndjson,
+    render_agent_index,
     render_error,
     render_inbox,
     render_index,
@@ -403,6 +404,22 @@ class Handler(BaseHTTPRequestHandler):
                     recent=recent,
                     authentications={post.id: store.post_authentication(post) for post in recent},
                     ca_ready=store.root_info() is not None,
+                ),
+            )
+            return
+        if head == "index" and len(segments) == 1 and _param(params, "format") is None:
+            store = self.board.store
+            recent = [post for post in store.list_posts(limit=8) if post.board != "index"][:6]
+            self._send(
+                200,
+                render_agent_index(
+                    self.board.cfg,
+                    store.list_boards(),
+                    store.stats(),
+                    recent=recent,
+                    authentications={
+                        post.id: store.post_authentication(post) for post in recent
+                    },
                 ),
             )
             return
