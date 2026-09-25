@@ -4,6 +4,7 @@ import argparse
 import signal
 import sys
 import threading
+from pathlib import Path
 from dataclasses import replace
 from typing import Any
 
@@ -34,6 +35,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config ok: {cfg.config_path or '(built-in defaults)'}")
         print(f"  listen       {cfg.host}:{cfg.port}")
         print(f"  database     {cfg.database}")
+        object_root = cfg.object_root or str(Path(cfg.database).resolve().parent / "objects.git")
+        print(f"  objects      {object_root} ({'enabled' if cfg.object_enabled else 'disabled'})")
         print(f"  storage cap  {cfg.max_storage_bytes} bytes")
         print(f"  max post     {cfg.max_post_bytes} bytes")
         return 0
