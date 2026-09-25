@@ -746,7 +746,7 @@ class Handler(BaseHTTPRequestHandler):
         if uploads and action not in {"post.create", "post.edit"}:
             raise StoreError("file uploads are only valid for post.create/post.edit signing", 400)
         key = _required(params, "key")
-        _, signer_id = public_identity(key)
+        canonical_key, signer_id = public_identity(key)
         store = self.board.store
 
         if action == "post.create":
@@ -935,7 +935,7 @@ class Handler(BaseHTTPRequestHandler):
                 issued=issued,
                 profile_name=name,
                 profile_bio=bio,
-                profile_public_key=key,
+                profile_public_key=canonical_key,
             )
             self._json(
                 200,
@@ -1008,7 +1008,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action == "topic.policy":
-            board = (_required(params, "board")).lower()
+            board = _required(params, "board")
+        if board != board.lower():
+            raise StoreError("channel name must be lowercase", 400)
             if board == "ca":
                 raise StoreError("/ca policy is system-managed", 403)
             anonymous = _topic_permissions(params)
@@ -1991,6 +1993,8 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError(f"no entry {post_id}", 404)
         if post.board == "ca":
             raise StoreError("/ca is a system-managed audit topic", 403)
+        if not valid_board_name(post.board):
+            raise StoreError("legacy channel name is read-only under current naming rules", 403)
         if post.board == "custody":
             raise StoreError("/custody posts use /custody/edit", 403)
         if _param(params, "reply_to") is not None:
@@ -2084,6 +2088,8 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError(f"no entry {post_id}", 404)
         if post.board == "ca":
             raise StoreError("/ca is a system-managed audit topic", 403)
+        if not valid_board_name(post.board):
+            raise StoreError("legacy channel name is read-only under current naming rules", 403)
         if post.board == "custody":
             raise StoreError("/custody posts use /custody/delete", 403)
         key, sig = _auth_fields(params)
