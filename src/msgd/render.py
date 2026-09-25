@@ -325,14 +325,45 @@ def render_index(cfg: Config, boards: list[dict[str, Any]], stats: dict[str, int
     return "\n".join(lines) + "\n"
 
 
+def _auth_badge(authentication: dict[str, Any] | None) -> str:
+    if not authentication or not authentication.get("signed"):
+        return ""
+    actor = authentication.get("actor")
+    if not isinstance(actor, dict):
+        return "[signed]"
+    if actor.get("status") == "root":
+        return "[root]"
+    if actor.get("certified"):
+        return "[certified-ca]" if actor.get("role") == "ca" else "[certified]"
+    return "[signed-inactive]"
+
+
+def _auth_summary(authentication: dict[str, Any] | None) -> str:
+    if not authentication or not authentication.get("signed"):
+        return "unsigned"
+    actor = authentication.get("actor")
+    if not isinstance(actor, dict):
+        return "signed"
+    primary = actor.get("primary")
+    if actor.get("status") == "root":
+        return "root-signed"
+    if not actor.get("certified") or not isinstance(primary, dict):
+        return "signed certificate=inactive"
+    return (
+        f"certified role={actor.get('role')} cert={primary.get('serial')} "
+        f"issuer={primary.get('issuer_id')} depth={primary.get('depth')}"
+    )
+
+
 def render_post(
     post: Post,
     attachments: list[Attachment] | tuple[Attachment, ...] = (),
+    authentication: dict[str, Any] | None = None,
 ) -> str:
     title = f" {post.title}" if post.title else ""
-    auth = "unsigned"
+    auth = _auth_summary(authentication)
     if post.signed:
-        auth = f"signed author={post.author_id} actor={post.actor_id} v={post.sig_version}"
+        auth += f" author={post.author_id} actor={post.actor_id} v={post.sig_version}"
     head = (
         f"## #{post.id}{title}\n"
         f"board: {post.board} seq: {post.seq}"
@@ -361,6 +392,7 @@ def render_listing(
     full: bool,
     truncated: bool,
     note: str = "",
+    authentications: dict[int, dict[str, Any]] | None = None,
 ) -> str:
     head = f"# /{board}" if board else "# search"
     lines = [head, ""]
@@ -369,7 +401,15 @@ def render_listing(
     if not posts:
         lines.append("(empty)")
     elif full:
-        lines.append("\n\n".join(render_post(post).rstrip() for post in posts))
+        lines.append(
+            "\n\n".join(
+                render_post(
+                    post,
+                    authentication=(authentications or {}).get(post.id),
+                ).rstrip()
+                for post in posts
+            )
+        )
     else:
         for post in posts:
             excerpt = " ".join(post.body.split())
@@ -377,8 +417,12 @@ def render_listing(
                 excerpt = excerpt[:157] + "..."
             title = f' "{post.title}"' if post.title else ""
             identity = f" @{post.author_id[:12]}" if post.author_id else ""
+            badge = _auth_badge((authentications or {}).get(post.id))
+            badge_text = f" {badge}" if badge else ""
             reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
-            lines.append(f"#{post.id} /{post.board}{reply} {post.name}{identity}{title} {excerpt}")
+            lines.append(
+                f"#{post.id} /{post.board}{reply} {post.name}{identity}{badge_text}{title} {excerpt}"
+            )
     if truncated and posts:
         lines += ["", f"more: ?before={posts[-1].id}&limit={len(posts)}"]
     return "\n".join(lines) + "\n"
@@ -415,5 +459,13 @@ def render_inbox(
     return "\n".join(lines) + "\n"
 
 
-def posts_to_ndjson(posts: list[Post]) -> str:
-    return "".join(json.dumps(post.to_dict(), ensure_ascii=False) + "\n" for post in posts)
+def posts_to_ndjson(
+    posts: list[Post],
+    authentications: dict[int, dict[str, Any]] | None = None,
+) -> str:
+    lines = []
+    for post in posts:
+        item = post.to_dict()
+        item["authentication"] = (authentications or {}).get(post.id)
+        lines.append(json.dumps(item, ensure_ascii=False) + "\n")
+    return "".join(lines)
