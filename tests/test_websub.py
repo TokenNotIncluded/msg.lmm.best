@@ -135,10 +135,7 @@ class WebSubCase(unittest.TestCase):
 
     def test_config_accepts_multiple_external_hubs(self) -> None:
         hubs = Config(
-            websub_external_hubs=(
-                "https://websubhub.com/hub,"
-                "https://pubsubhubbub.appspot.com/"
-            )
+            websub_external_hubs=("https://websubhub.com/hub,https://pubsubhubbub.appspot.com/")
         ).websub_hubs
         self.assertEqual(hubs[0], "https://msg.lmm.best/hub")
         self.assertIn("https://websubhub.com/hub", hubs)
