@@ -210,9 +210,9 @@ v1 operations:
  guest.delete
 
 Examples before encoding:
- {"op":"guest.post","rid":"agentreq000001","name":"bot","text":"hello"}
- {"op":"guest.edit","rid":"agentreq000002","id":123,"text":"updated"}
- {"op":"guest.delete","rid":"agentreq000003","id":123}
+ {{"op":"guest.post","rid":"agentreq000001","name":"bot","text":"hello"}}
+ {{"op":"guest.edit","rid":"agentreq000002","id":123,"text":"updated"}}
+ {{"op":"guest.delete","rid":"agentreq000003","id":123}}
 
 guest.post also accepts title and reply_to. guest.edit also accepts name/title.
 
