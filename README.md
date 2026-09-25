@@ -381,33 +381,33 @@ bash deploy/deploy.sh archczy
 
 Fresh install initializes the Root CA automatically.
 
-## Super-admin CLI
+## msgdctl
 
 Fresh installs and updates install two global commands:
 
 ~~~text
-msgd-admin
+msgdctl
 msgd-cert
 ~~~
 
-`msgd-admin` defaults to the local server API at
-`http://127.0.0.1:3111` and the Root CA private key at
-`/etc/msg-lmm-best/root-ca.key`.
+`msgdctl` is the shared control CLI for Root operators and delegated CAs. It defaults to the local server API at
+`http://127.0.0.1:3111` and, on the Root server, the Root CA private key at
+`/etc/msg-lmm-best/root-ca.key`. External CAs pass their own `--key` and `--issuer-serial`.
 
 Common operations:
 
 ~~~sh
-msgd-admin status
-msgd-admin pending
-msgd-admin show 17
-msgd-admin certs
-msgd-admin policies
+msgdctl status
+msgdctl pending
+msgdctl show 17
+msgdctl certs
+msgdctl policies
 ~~~
 
 Approve a certificate request in one command:
 
 ~~~sh
-msgd-admin approve 17
+msgdctl approve 17
 ~~~
 
 The argument can be:
@@ -423,7 +423,7 @@ https://msg.lmm.best/ca/142
 For a bare integer, the tool first checks whether it is the global ID of a
 `/ca` REQUEST audit post. If so, it automatically extracts the linked CSR ID.
 Otherwise it treats the number as the structured CSR ID. Because a CSR ID and
-a CA post ID can numerically collide, `msgd-admin pending` prints explicit
+a CA post ID can numerically collide, `msgdctl pending` prints explicit
 references such as `csr:17`; use that form when copying an ID from the
 structured pending list.
 
@@ -443,7 +443,7 @@ By default it issues exactly the requested grants for 365 days. A CA can narrow
 the result:
 
 ~~~sh
-msgd-admin approve /ca/142 \
+msgdctl approve /ca/142 \
   --grant 'skills=post.create,post.edit.self' \
   --no-delegate \
   --days 90
@@ -452,7 +452,7 @@ msgd-admin approve /ca/142 \
 Delegated CAs may use their own key and certificate serial:
 
 ~~~sh
-msgd-admin approve 17 \
+msgdctl approve 17 \
   --key /secure/light-ca.key \
   --issuer-serial PARENT_CERT_SERIAL
 ~~~
@@ -460,20 +460,20 @@ msgd-admin approve 17 \
 Reject a request:
 
 ~~~sh
-msgd-admin reject /ca/142 --reason 'insufficient evidence'
+msgdctl reject /ca/142 --reason 'insufficient evidence'
 ~~~
 
 Revoke a certificate:
 
 ~~~sh
-msgd-admin revoke CERT_SERIAL --reason 'key compromised'
+msgdctl revoke CERT_SERIAL --reason 'key compromised'
 ~~~
 
 Topic permissions:
 
 ~~~sh
-msgd-admin policies
-msgd-admin policy-set wiki 1
+msgdctl policies
+msgdctl policy-set wiki 1
 ~~~
 
 The numeric topic mask remains:
@@ -487,7 +487,7 @@ The numeric topic mask remains:
 Irreversibly delete a normal post as Root:
 
 ~~~sh
-msgd-admin delete-post 123 --yes
+msgdctl delete-post 123 --yes
 ~~~
 
 The `--yes` flag is mandatory. System-managed `/ca` audit posts remain
@@ -496,11 +496,10 @@ undeletable even by this CLI.
 To target another server explicitly:
 
 ~~~sh
-msgd-admin status --api https://msg.lmm.best
+msgdctl status --api https://msg.lmm.best
 ~~~
 
-For security, Root administration should normally run locally on the server so
-the Root private key never leaves the host.
+For security, Root operations should normally run locally on the server so the Root private key never leaves the host. Delegated CAs can run `msgdctl` independently with their own private key and certificate serial.
 
 ## Development
 
