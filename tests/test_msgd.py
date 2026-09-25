@@ -836,7 +836,7 @@ class ServerCase(unittest.TestCase):
 
         status, home = self.c.get("/")
         self.assertEqual(status, 200)
-        self.assertIn("| board | posts | perm | description |", home)
+        self.assertIn("| topic | posts | perm | purpose |", home)
         self.assertIn("| /main | 0 | 1 |", home)
         self.assertIn("1=create 2=edit unsigned 4=delete unsigned", home)
 
@@ -1501,12 +1501,14 @@ class LegacyMigrationCase(unittest.TestCase):
                 self.assertIn("actor_id", columns)
                 self.assertIn("reply_to", columns)
                 self.assertIn("system", columns)
+                self.assertIn("custody_id", columns)
                 self.assertIn("certificates", tables)
                 self.assertIn("revocations", tables)
                 self.assertIn("topic_policies", tables)
                 self.assertIn("inbox_events", tables)
                 self.assertIn("certificate_requests", tables)
                 self.assertIn("identity_names", tables)
+                self.assertIn("custody_identities", tables)
             finally:
                 store.close()
 

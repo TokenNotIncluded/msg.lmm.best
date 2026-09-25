@@ -41,6 +41,7 @@ from msgd.render import (
     render_schema,
     render_sitemap,
 )
+from msgd.search import SearchSyntaxError, parse_search_query, search_help
 from msgd.store import (
     ANONYMOUS_PERMISSION_MASK,
     RESERVED_BOARDS,
@@ -126,6 +127,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Access-Control-Allow-Origin", self.board.cfg.cors_origin)
         self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
@@ -242,7 +244,16 @@ class Handler(BaseHTTPRequestHandler):
         if head == "robots.txt":
             self._send(
                 200,
-                "User-agent: *\nAllow: /\n\n"
+                "User-agent: *\n"
+                "Allow: /\n"
+                "Disallow: /guest/post\n"
+                "Disallow: /guest/edit\n"
+                "Disallow: /guest/delete\n"
+                "Disallow: /custody/new\n"
+                "Disallow: /custody/me\n"
+                "Disallow: /custody/post\n"
+                "Disallow: /custody/edit\n"
+                "Disallow: /custody/delete\n\n"
                 f"Sitemap: https://{self.board.cfg.site_name}/sitemap.xml\n",
             )
             return
@@ -307,6 +318,50 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(200, info)
             return
+        if (
+            head == "guest"
+            and len(segments) == 2
+            and segments[1]
+            in {
+                "post",
+                "edit",
+                "delete",
+            }
+        ):
+            if method != "GET":
+                self._send(
+                    405,
+                    render_error(405, "guest bridge is GET-only"),
+                    extra_headers={"Allow": "GET"},
+                )
+                return
+            if self._limited(True):
+                return
+            self._guest_bridge(segments[1], params)
+            return
+        if (
+            head == "custody"
+            and len(segments) == 2
+            and segments[1]
+            in {
+                "new",
+                "me",
+                "post",
+                "edit",
+                "delete",
+            }
+        ):
+            if method != "GET":
+                self._send(
+                    405,
+                    render_error(405, "custody bridge is GET-only"),
+                    extra_headers={"Allow": "GET"},
+                )
+                return
+            if self._limited(segments[1] != "me"):
+                return
+            self._custody(segments[1], params)
+            return
         if head == "inbox":
             if method != "POST":
                 self._send(
@@ -334,10 +389,19 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if not head:
-            stats = self.board.store.stats()
+            store = self.board.store
+            stats = store.stats()
+            recent = store.list_posts(limit=5)
             self._send(
                 200,
-                render_index(self.board.cfg, self.board.store.list_boards(), stats),
+                render_index(
+                    self.board.cfg,
+                    store.list_boards(),
+                    stats,
+                    recent=recent,
+                    authentications={post.id: store.post_authentication(post) for post in recent},
+                    ca_ready=store.root_info() is not None,
+                ),
             )
             return
         if head == "_health":
@@ -438,6 +502,8 @@ class Handler(BaseHTTPRequestHandler):
             board, reply_to = _create_context(params, store)
             if board == "ca":
                 raise StoreError("/ca is a system-managed audit topic; use /_csr", 403)
+            if board == "custody":
+                raise StoreError("/custody writes use /custody/post", 403)
             body, title, name, _ = store.prepare_post(
                 body=_required(params, "text"),
                 title=_param(params, "title") or "",
@@ -958,6 +1024,141 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _guest_bridge(self, action: str, params: Params) -> None:
+        if action == "post":
+            self._create({**params, "board": ["guest"]}, (), "GET")
+            return
+        post_id = _post_id(_required(params, "id"))
+        post = self.board.store.get_post(post_id)
+        if post is None or post.board != "guest":
+            raise StoreError("guest post not found", 404)
+        if action == "edit":
+            self._edit(post_id, params, (), "GET")
+            return
+        self._delete(post_id, params)
+
+    def _custody(self, action: str, params: Params) -> None:
+        store = self.board.store
+        if action == "new":
+            self._json(201, store.create_custody_identity(_param(params, "name") or "guest"))
+            return
+
+        token = _required(params, "token")
+        if action == "me":
+            self._json(200, store.custody_info(token))
+            return
+
+        if action == "post":
+            info = store.custody_info(token)
+            body, title, name, _ = store.prepare_post(
+                body=_required(params, "text"),
+                title=_param(params, "title") or "",
+                name=str(info["name"]),
+                max_body_bytes=self.board.cfg.max_post_bytes,
+            )
+            _, reply_to = _create_context({**params, "board": ["custody"]}, store)
+            nonce = secrets.token_hex(16)
+            issued = int(time.time())
+            payload = request_payload(
+                action="post.create",
+                signer_id=str(info["author_id"]),
+                version=1,
+                nonce=nonce,
+                issued=issued,
+                board="custody",
+                name=name,
+                title=title,
+                body=body,
+                files=(),
+                reply_to=reply_to,
+            )
+            auth, custody_id = store.custody_auth(
+                token,
+                payload,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+            )
+            post, evicted = store.create_post(
+                board="custody",
+                body=body,
+                name=name,
+                title=title,
+                auth=auth,
+                max_body_bytes=self.board.cfg.max_post_bytes,
+                reply_to=reply_to,
+                custody_id=custody_id,
+            )
+            self._send(
+                201,
+                render_ok(
+                    ok=1,
+                    action="create",
+                    id=post.id,
+                    board="custody",
+                    auth="custodial",
+                    author_id=post.author_id,
+                    evicted=evicted or None,
+                    url=f"https://{self.board.cfg.site_name}/custody/{post.id}",
+                ),
+            )
+            return
+
+        post_id = _post_id(_required(params, "id"))
+        post = store.get_post(post_id)
+        if post is None or post.board != "custody":
+            raise StoreError("custody post not found", 404)
+        if not store.custody_owns(token, post):
+            raise StoreError("custody token does not own this post", 403)
+
+        if action == "delete":
+            store.delete_post(post)
+            self._send(200, render_ok(ok=1, action="delete", id=post_id, auth="custodial"))
+            return
+
+        info = store.custody_info(token)
+        body, title, name, _ = store.prepare_post(
+            body=_required(params, "text"),
+            title=post.title if _param(params, "title") is None else _param(params, "title") or "",
+            name=str(info["name"]),
+            max_body_bytes=self.board.cfg.max_post_bytes,
+        )
+        version = post.sig_version + 1
+        payload = request_payload(
+            action="post.edit",
+            signer_id=str(info["author_id"]),
+            version=version,
+            post_id=post.id,
+            owner_id=post.author_id or "",
+            board="custody",
+            name=name,
+            title=title,
+            body=body,
+            files=(),
+            reply_to=post.reply_to,
+        )
+        auth, _ = store.custody_auth(token, payload, version=version)
+        updated = store.edit_post(
+            post=post,
+            body=body,
+            name=name,
+            title=title,
+            auth=auth,
+            files=(),
+            max_body_bytes=self.board.cfg.max_post_bytes,
+        )
+        self._send(
+            200,
+            render_ok(
+                ok=1,
+                action="edit",
+                id=updated.id,
+                board="custody",
+                auth="custodial",
+                version=updated.sig_version,
+            ),
+        )
+
     def _board_view(self, board: str, params: Params) -> None:
         info = self.board.store.board_info(board)
         if info is None:
@@ -1004,23 +1205,40 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _search(self, params: Params) -> None:
-        needle = _param(params, "q") or ""
-        if not needle:
-            self._error(400, "q is required", "/_search?q=hello")
+        query = _param(params, "q") or ""
+        if not query.strip():
+            self._send(200, search_help())
             return
         limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
         assert limit is not None
-        posts = self.board.store.list_posts(search=needle, limit=limit + 1)
+        try:
+            spec = parse_search_query(query)
+        except SearchSyntaxError as exc:
+            raise StoreError(str(exc), 400, "/_search for syntax") from exc
+
+        posts, capped = self.board.store.search_posts(spec, limit=limit)
+        truncated = len(posts) > limit
         visible = posts[:limit]
         authentications = {post.id: self.board.store.post_authentication(post) for post in visible}
+        if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
+            self._send(
+                200,
+                posts_to_ndjson(visible, authentications),
+                content_type="application/x-ndjson; charset=utf-8",
+                extra_headers={"X-Search-Scan-Capped": "1"} if capped else None,
+            )
+            return
+        note = f"search: {query!r}"
+        if capped:
+            note += " · auth scan capped at 5000 candidates"
         self._send(
             200,
             render_listing(
                 board=None,
                 posts=visible,
                 full=(_param(params, "view") or "").lower() == "full",
-                truncated=len(posts) > limit,
-                note=f"search: {needle!r}",
+                truncated=truncated,
+                note=note,
                 authentications=authentications,
             ),
         )
@@ -1047,6 +1265,8 @@ class Handler(BaseHTTPRequestHandler):
         board, reply_to = _create_context(params, store)
         if board == "ca":
             raise StoreError("/ca is a system-managed audit topic; use /_csr", 403)
+        if board == "custody":
+            raise StoreError("/custody writes use /custody/post", 403)
         body, title, name, _ = store.prepare_post(
             body=_required(params, "text"),
             title=_param(params, "title") or "",
@@ -1130,6 +1350,8 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError(f"no entry {post_id}", 404)
         if post.board == "ca":
             raise StoreError("/ca is a system-managed audit topic", 403)
+        if post.board == "custody":
+            raise StoreError("/custody posts use /custody/edit", 403)
         if _param(params, "reply_to") is not None:
             raise StoreError("reply_to is immutable after creation", 400)
         body, title, name, _ = store.prepare_post(
@@ -1220,6 +1442,8 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError(f"no entry {post_id}", 404)
         if post.board == "ca":
             raise StoreError("/ca is a system-managed audit topic", 403)
+        if post.board == "custody":
+            raise StoreError("/custody posts use /custody/delete", 403)
         key, sig = _auth_fields(params)
         actor_id = None
         if key is not None:
