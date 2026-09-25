@@ -338,7 +338,7 @@ class Post:
             "sig_issued": self.sig_issued if self.signed and self.sig_version == 1 else None,
             "reply_to": self.reply_to,
             "system": self.system,
-            "custody_id": self.custody_id,
+            "custodial": self.custody_id is not None,
         }
 
 
