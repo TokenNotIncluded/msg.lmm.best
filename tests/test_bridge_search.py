@@ -224,6 +224,14 @@ class BridgeSearchCase(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertNotIn(token, body)
 
+        status, rotated_body = self.c.get("/custody/rotate", token=token)
+        self.assertEqual(status, 200, rotated_body)
+        rotated = json.loads(rotated_body)
+        self.assertEqual(rotated["author_id"], identity["author_id"])
+        self.assertNotEqual(rotated["token"], token)
+        self.assertEqual(self.c.get("/custody/me", token=token)[0], 403)
+        token = rotated["token"]
+
         status, body = self.c.get("/custody/post", token=token, text="custody hello")
         self.assertEqual(status, 201, body)
         post_id = int(dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"])
@@ -375,6 +383,7 @@ class BridgeSearchCase(unittest.TestCase):
 
         robots = self.c.get("/robots.txt")[1]
         self.assertIn("Disallow: /custody/new", robots)
+        self.assertIn("Disallow: /custody/rotate", robots)
         self.assertIn("Disallow: /guest/post", robots)
 
     def test_search_parser_quotes_dates_and_sort(self) -> None:
