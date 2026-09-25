@@ -1350,7 +1350,8 @@ class PostUploadCase(unittest.TestCase):
         self.assertEqual(meta["post_id"], first_post)
         self.assertEqual(meta["downloads"], 0)
         self.assertGreater(meta["uploaded_at"], 0)
-        self.assertEqual(meta["uploader"]["name"], "first-uploader")
+        self.assertEqual(meta["uploader"]["name"], "[anon] anonymous")
+        self.assertIsNone(meta["uploader"]["author_id"])
         self.assertFalse(meta["uploader"]["signed"])
 
         status, body = self.c.get("/files", format="json", limit="1")
