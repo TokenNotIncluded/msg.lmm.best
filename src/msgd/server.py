@@ -662,6 +662,138 @@ class Handler(BaseHTTPRequestHandler):
 
         raise StoreError("unknown signing action", 400)
 
+    def _csr(self, params: Params) -> None:
+        store = self.board.store
+        csr_id_raw = _param(params, "csr_id")
+        decision = _param(params, "decision")
+
+        if csr_id_raw is not None or decision is not None:
+            if self._limited(True):
+                return
+            csr_id = _int_required(params, "csr_id")
+            decision = (_required(params, "decision")).lower()
+            row = store.certificate_request(csr_id)
+            if row is None:
+                raise StoreError("certificate request not found", 404)
+            if row["status"] != "pending":
+                raise StoreError("certificate request is already decided", 409)
+
+            key = _required(params, "key")
+            sig = _required(params, "sig")
+            canonical_key, signer_id = public_identity(key)
+            payload = request_payload(
+                action="cert.request.decision",
+                signer_id=signer_id,
+                version=1,
+                csr_id=csr_id,
+                decision=decision,
+            )
+            signed_request(canonical_key, sig, payload, version=1)
+
+            issuer_serial = str(row["issuer_serial"])
+            root = store.root_info()
+            if issuer_serial == "root":
+                if root is None or signer_id != root["root_id"]:
+                    raise StoreError("only the root key may decide this request", 403)
+            else:
+                issuer = store.certificate(issuer_serial)
+                if issuer is None or not store.certificate_active(issuer_serial):
+                    raise StoreError("requested issuer certificate is not active", 403)
+                issuer_cert = parse_certificate(str(issuer["body"]))
+                if signer_id != issuer_cert.subject_id:
+                    raise StoreError("only the requested issuer may decide this request", 403)
+
+            if decision == "reject":
+                decided = store.decide_certificate_request(
+                    csr_id,
+                    signer_id=signer_id,
+                    decision="reject",
+                )
+                self._json(200, decided)
+                return
+            if decision != "approve":
+                raise StoreError("decision must be approve or reject", 400)
+
+            cert_body = _required(params, "cert")
+            cert_sig = _required(params, "cert_sig")
+            cert = parse_certificate(cert_body)
+            if cert.subject_id != row["subject_id"]:
+                raise StoreError("certificate subject does not match request", 400)
+            if cert.subject_key != row["subject_key"]:
+                raise StoreError("certificate key does not match request", 400)
+            if cert.issuer_serial != issuer_serial:
+                raise StoreError("certificate issuer does not match request", 400)
+            if cert.delegate != bool(row["delegate"]):
+                raise StoreError("certificate delegation does not match request", 400)
+            if cert.grants != {
+                item["topic"]: tuple(item["actions"])
+                for item in row["grants"]
+            }:
+                raise StoreError("certificate grants do not match request", 400)
+
+            registered = store.register_certificate(cert.body, cert_sig)
+            decided = store.decide_certificate_request(
+                csr_id,
+                signer_id=signer_id,
+                decision="approve",
+                certificate_serial=registered.serial,
+            )
+            self._json(200, decided)
+            return
+
+        if _param(params, "sig") is not None:
+            if self._limited(True):
+                return
+            key = _required(params, "key")
+            sig = _required(params, "sig")
+            canonical_key, signer_id = public_identity(key)
+            issuer_serial = _param(params, "issuer_serial") or "root"
+            delegate = _truthy(_param(params, "delegate"))
+            grants_value = _canonical_grants(_required(params, "grants"))
+            message = _param(params, "message") or ""
+            nonce = _required(params, "nonce")
+            issued = _int_required(params, "issued")
+            payload = request_payload(
+                action="cert.request",
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+                issuer_serial=issuer_serial,
+                subject_key=canonical_key,
+                delegate=delegate,
+                grants=grants_value,
+                message=message,
+            )
+            auth = signed_request(
+                canonical_key,
+                sig,
+                payload,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+            )
+            row = store.create_certificate_request(
+                subject_key=canonical_key,
+                issuer_serial=issuer_serial,
+                delegate=delegate,
+                grants=grants_value,
+                message=message,
+                signature=auth.signature,
+                nonce=nonce,
+                issued=issued,
+            )
+            self._json(201, row)
+            return
+
+        status = _param(params, "status")
+        limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
+        assert limit is not None
+        self._json(
+            200,
+            store.certificate_requests(status=status, limit=limit),
+        )
+
     def _cert(self, params: Params) -> None:
         cert_body = _param(params, "cert")
         signature = _param(params, "sig")
