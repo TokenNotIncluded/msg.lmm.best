@@ -682,6 +682,17 @@ class Store:
             raise StoreError("certificate request timestamp is outside the 5 minute window", 400)
         if len(message.encode("utf-8")) > 4096:
             raise StoreError("certificate request message is too long", 413)
+        root = self.root_info()
+        if issuer_serial == "root":
+            if root is None:
+                raise StoreError("root CA is not initialized", 503)
+        else:
+            issuer = self.certificate(issuer_serial)
+            if issuer is None or not self.certificate_active(issuer_serial):
+                raise StoreError("requested issuer certificate is not active", 404)
+            issuer_cert = parse_certificate(str(issuer["body"]))
+            if not issuer_cert.delegate:
+                raise StoreError("requested issuer cannot delegate", 403)
 
         auth = SignedRequest(
             public_key=canonical_key,
