@@ -24,6 +24,7 @@ from msgd.crypto import (
     SignatureError,
     canonical_json,
     certificate_payload,
+    curve25519_public_key,
     make_certificate,
     normalize_file_manifest,
     payload_info,
@@ -60,6 +61,9 @@ from msgd.render import (
 from msgd.search import SearchSyntaxError, parse_search_query, search_help
 from msgd.store import (
     ANONYMOUS_BASE_ACTIONS,
+    KEYSTORE_FORMAT,
+    KEYSTORE_MAX_ENTRY_BYTES,
+    KEYSTORE_MAX_TOTAL_BYTES,
     RESERVED_BOARDS,
     SIGNED_BASE_ACTIONS,
     FileInput,
@@ -631,7 +635,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if (
-            head in {"publish", "_cert", "_csr", "_revoke", "_policy", "_profile"}
+            head in {"publish", "_cert", "_csr", "_revoke", "_policy", "_profile", "_keystore"}
             and method == "HEAD"
         ):
             self._send(
@@ -669,6 +673,18 @@ class Handler(BaseHTTPRequestHandler):
             if self._limited(True):
                 return
             self._profile_update(params)
+            return
+        if head == "_keystore":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "signed POST required"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            if self._limited(True):
+                return
+            self._keystore(params)
             return
         if head == "_ca":
             info = self.board.store.root_info()
@@ -898,11 +914,11 @@ class Handler(BaseHTTPRequestHandler):
             self._search(params)
             return
         if head.startswith("@"):
-            if len(head) < 2 or len(segments) > 2:
+            if len(head) < 2 or len(segments) > 3:
                 self._error(
                     404,
                     "invalid profile path",
-                    "try /@NAME or /@NAME/pubkey",
+                    "try /@NAME, /@NAME/pubkey, or /@NAME/keystore/ENTRY",
                 )
                 return
             profile = self.board.store.profile_by_name(head[1:])
@@ -917,6 +933,48 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             resource = segments[1].casefold()
+            if len(segments) == 3 and resource != "keystore":
+                self._error(404, f"profile resource has no child path: {resource}")
+                return
+            if resource == "keystore":
+                owner_id = str(profile["author_id"])
+                recipient = curve25519_public_key(str(profile["public_key"]))
+                base = f"/@{quote(str(profile['name']), safe='')}/keystore"
+                if len(segments) == 2:
+                    entries = self.board.store.keystore_list(owner_id)
+                    for item in entries:
+                        item["url"] = f"{base}/{quote(str(item['name']), safe='')}"
+                    self._json(
+                        200,
+                        {
+                            "owner": str(profile["name"]),
+                            "author_id": owner_id,
+                            "algorithm": "curve25519",
+                            "source_identity_algorithm": "ed25519",
+                            "public_key": recipient,
+                            "format": KEYSTORE_FORMAT,
+                            "max_entry_bytes": KEYSTORE_MAX_ENTRY_BYTES,
+                            "max_total_bytes": KEYSTORE_MAX_TOTAL_BYTES,
+                            "entries": entries,
+                        },
+                    )
+                    return
+                entry_name = segments[2]
+                if entry_name.casefold() == "pubkey":
+                    self._send(200, recipient + "\n")
+                    return
+                entry = self.board.store.keystore_entry(owner_id, entry_name)
+                if entry is None:
+                    self._error(404, f"keystore entry not found: {entry_name}")
+                    return
+                entry["owner"] = str(profile["name"])
+                entry["author_id"] = owner_id
+                entry["algorithm"] = "curve25519"
+                entry["public_key"] = recipient
+                entry["url"] = f"{base}/{quote(str(entry['name']), safe='')}"
+                self._json(200, entry)
+                return
+
             scalar_fields = {
                 "name": "name",
                 "id": "author_id",
@@ -997,7 +1055,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(
                 404,
                 f"unknown profile resource: {resource}",
-                "available: name, id, pubkey, bio, aliases, cert, certs, chain, "
+                "available: name, id, pubkey, bio, aliases, cert, certs, chain, keystore, "
                 "claim-signature, profile-signature",
             )
             return
@@ -1473,6 +1531,49 @@ class Handler(BaseHTTPRequestHandler):
                     "url": webhook_url or None,
                     "events": list(webhook_events),
                     "enabled": webhook_enabled,
+                    **payload_info(payload),
+                },
+            )
+            return
+
+        if action in {"keystore.put", "keystore.delete"}:
+            if store.profile_by_author(signer_id) is None:
+                raise StoreError("keystore requires an established signed profile", 403)
+            name = store.normalize_keystore_name(_required(params, "name"))
+            if action == "keystore.delete" and store.keystore_entry(signer_id, name) is None:
+                raise StoreError("keystore entry not found", 404)
+            version = store.keystore_version(signer_id, name) + 1
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            ciphertext = ""
+            digest = ""
+            if action == "keystore.put":
+                _raw, ciphertext, digest = store.prepare_keystore_ciphertext(
+                    _required(params, "ciphertext"),
+                    _param(params, "sha256") or "",
+                )
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=version,
+                nonce=nonce,
+                issued=issued,
+                keystore_name=name,
+                keystore_ciphertext=ciphertext,
+                keystore_sha256=digest,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "version": version,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "name": name,
+                    "algorithm": "curve25519",
+                    "public_key": curve25519_public_key(canonical_key),
+                    "format": KEYSTORE_FORMAT,
+                    "sha256": digest or None,
                     **payload_info(payload),
                 },
             )
@@ -2301,6 +2402,58 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         raise StoreError("unsupported webhook action", 400)
+
+    def _keystore(self, params: Params) -> None:
+        action = _required(params, "action")
+        if action not in {"keystore.put", "keystore.delete"}:
+            raise StoreError("invalid keystore action", 400)
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        nonce = _required(params, "nonce")
+        issued = _int_required(params, "issued")
+        version = _int_required(params, "version")
+        canonical_key, signer_id = public_identity(key)
+        store = self.board.store
+        if store.profile_by_author(signer_id) is None:
+            raise StoreError("keystore requires an established signed profile", 403)
+        name = store.normalize_keystore_name(_required(params, "name"))
+        ciphertext = ""
+        digest = ""
+        if action == "keystore.put":
+            _raw, ciphertext, digest = store.prepare_keystore_ciphertext(
+                _required(params, "ciphertext"),
+                _param(params, "sha256") or "",
+            )
+        payload = request_payload(
+            action=action,
+            signer_id=signer_id,
+            version=version,
+            nonce=nonce,
+            issued=issued,
+            keystore_name=name,
+            keystore_ciphertext=ciphertext,
+            keystore_sha256=digest,
+        )
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=version,
+            nonce=nonce,
+            issued=issued,
+        )
+        if action == "keystore.put":
+            result = store.keystore_put(
+                auth=auth,
+                name=name,
+                ciphertext_b64=ciphertext,
+                expected_sha256=digest,
+            )
+            result["algorithm"] = "curve25519"
+            result["public_key"] = curve25519_public_key(canonical_key)
+            self._json(200, result)
+            return
+        self._json(200, store.keystore_delete(auth=auth, name=name))
 
     def _profile_update(self, params: Params) -> None:
         key = _required(params, "key")
