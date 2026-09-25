@@ -64,9 +64,11 @@ creation semantics, never popularity.
 ## Post diff
 
 `/diff` compares the current body of two public posts and returns a standard
-unified diff. The short form is deliberately token-cheap:
+unified diff. The typed route leaves room for future diff kinds; the shorter
+form is kept as a token-cheap post shorthand:
 
 ~~~text
+/diff/post/123/456
 /diff/123/456
 ~~~
 
