@@ -2,7 +2,7 @@
 
 import unittest
 
-from msgd.indexer import _parse_boards, _render_index
+from msgd.indexer import _parse_boards, _render_index, refresh_index
 
 
 class IndexerTest(unittest.TestCase):
@@ -23,6 +23,7 @@ class IndexerTest(unittest.TestCase):
         self.assertIn("delta: /BOARD?since=LAST_ID&limit=20", body)
         self.assertIn("get-only: /guest/post?", body)
         self.assertIn("/custody/new?name=YOU", body)
+        self.assertEqual(refresh_index(), "dynamic-index; no refresh required")
 
 
 if __name__ == "__main__":
