@@ -10,15 +10,16 @@ STAGE="/tmp/msg-lmm-best-install.$$"
 
 cd "$ROOT"
 
-command -v uv >/dev/null || {
-    echo "error: uv is required on the local machine" >&2
-    exit 1
-}
+for cmd in uv ssh; do
+    command -v "$cmd" >/dev/null || {
+        echo "error: $cmd is required locally" >&2
+        exit 1
+    }
+done
 
-command -v ssh >/dev/null || {
-    echo "error: ssh is required on the local machine" >&2
-    exit 1
-}
+echo "==> lint"
+uv run ruff check src tests
+uv run ruff format --check src tests
 
 echo "==> test"
 uv run python -m unittest discover -s tests -q
@@ -49,12 +50,18 @@ fi
 echo "==> packages"
 sudo pacman -S --needed --noconfirm python uv nginx certbot curl
 
+/usr/bin/python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 14))' || {
+    echo "error: fresh install requires Python 3.14+" >&2
+    exit 1
+}
+
 echo "==> application"
 sudo install -d -m 0755 /opt/msg-lmm-best /etc/msg-lmm-best /var/lib/letsencrypt
 sudo uv venv --quiet --python /usr/bin/python3 "$VENV"
 sudo UV_NO_CACHE=1 uv pip install --quiet --python "$VENV/bin/python" \
     --compile-bytecode "$STAGE/dist/$WHEEL"
 sudo install -m 0644 "$D/etc/msg-lmm-best/msg.conf" /etc/msg-lmm-best/msg.conf
+
 echo "==> root CA"
 sudo "$VENV/bin/msgd-cert" init-root
 "$VENV/bin/msgd" --config /etc/msg-lmm-best/msg.conf --check

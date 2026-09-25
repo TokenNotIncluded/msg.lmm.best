@@ -55,7 +55,10 @@ class Api:
             with urlopen(request, timeout=self.timeout) as response:
                 return response.read().decode("utf-8")
         except HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace")
+            try:
+                body = exc.read().decode("utf-8", "replace")
+            finally:
+                exc.close()
             raise AdminError(f"HTTP {exc.code}: {body.strip()}") from exc
         except URLError as exc:
             raise AdminError(f"cannot reach {url}: {exc.reason}") from exc
@@ -107,8 +110,7 @@ def _parse_grants(values: list[str] | None) -> list[dict[str, object]] | None:
             raise AdminError("--grant must include a topic and at least one action")
         grants.setdefault(topic, set()).update(actions)
     return [
-        {"topic": topic, "actions": sorted(actions)}
-        for topic, actions in sorted(grants.items())
+        {"topic": topic, "actions": sorted(actions)} for topic, actions in sorted(grants.items())
     ]
 
 
@@ -196,9 +198,7 @@ def approve(
     public, author_id = _identity(key)
     requested = str(csr.get("requested_issuer") or "")
     if requested and requested != author_id:
-        raise AdminError(
-            f"CSR #{csr_id} requested issuer {requested}; this key is {author_id}"
-        )
+        raise AdminError(f"CSR #{csr_id} requested issuer {requested}; this key is {author_id}")
 
     now = int(time.time())
     fields = {
@@ -455,10 +455,7 @@ def command_policy_set(args: argparse.Namespace) -> int:
     api = Api(args.api)
     key = _load_private(args.key)
     result = set_policy(api, key, args.board, args.permissions)
-    print(
-        f"/{result['board']} permissions={result['permissions']} "
-        f"version={result['version']}"
-    )
+    print(f"/{result['board']} permissions={result['permissions']} version={result['version']}")
     return 0
 
 

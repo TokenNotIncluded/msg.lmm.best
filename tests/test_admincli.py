@@ -39,9 +39,7 @@ def public_b64(key: Ed25519PrivateKey) -> str:
 
 
 def sign_payload(key: Ed25519PrivateKey, payload_b64: str) -> str:
-    return base64.b64encode(
-        key.sign(base64.b64decode(payload_b64))
-    ).decode("ascii")
+    return base64.b64encode(key.sign(base64.b64decode(payload_b64))).decode("ascii")
 
 
 class AdminCliCase(unittest.TestCase):
@@ -219,11 +217,7 @@ class AdminCliCase(unittest.TestCase):
             },
         )
         post_id = int(
-            dict(
-                line.split("=", 1)
-                for line in created.splitlines()
-                if "=" in line
-            )["id"]
+            dict(line.split("=", 1) for line in created.splitlines() if "=" in line)["id"]
         )
         deleted = delete_post(self.api, self.root_key, post_id)
         self.assertIn("action=delete", deleted)

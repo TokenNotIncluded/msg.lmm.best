@@ -303,8 +303,7 @@ def parse_certificate(body: str) -> Certificate:
             current.add(action)
 
     normalized_grants = [
-        {"topic": topic, "actions": sorted(actions)}
-        for topic, actions in sorted(grants.items())
+        {"topic": topic, "actions": sorted(actions)} for topic, actions in sorted(grants.items())
     ]
     normalized = {
         "delegate": delegate,
@@ -388,10 +387,7 @@ def normalize_file_manifest(value: Any) -> tuple[dict[str, object], ...]:
             raise SignatureError("file type is required")
         if not isinstance(nbytes, int) or isinstance(nbytes, bool) or nbytes < 0:
             raise SignatureError("file bytes must be a non-negative integer")
-        if (
-            not isinstance(sha256, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", sha256)
-        ):
+        if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
             raise SignatureError("file sha256 must be 64 lowercase hex characters")
         result.append(
             {

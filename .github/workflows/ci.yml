@@ -9,12 +9,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
-      - run: uv sync
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - run: uv sync --all-groups
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
       - run: uv run python -m unittest discover -s tests -q
       - run: uv run msgd-cert init-root --private-key /tmp/msgd-root.key --public-key /tmp/msgd-root.pub
       - run: uv run msgd-admin --help >/dev/null

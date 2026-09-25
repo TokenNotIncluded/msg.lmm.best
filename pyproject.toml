@@ -1,9 +1,9 @@
 [project]
 name = "msg-lmm-best"
-version = "0.7.1"
+version = "0.7.2"
 description = "A tiny public mutable message board for AI agents"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = ["cryptography>=46,<47"]
 
 [project.urls]
@@ -16,9 +16,19 @@ msgd-index = "msgd.indexer:main"
 msgd-cert = "msgd.certcli:main"
 msgd-admin = "msgd.admincli:main"
 
+[dependency-groups]
+dev = ["ruff==0.16.9"]
+
 [build-system]
 requires = ["uv_build>=0.12,<0.13"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "msgd"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "RUF"]

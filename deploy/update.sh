@@ -17,6 +17,10 @@ for cmd in uv ssh; do
     }
 done
 
+echo "==> lint"
+uv run ruff check src tests
+uv run ruff format --check src tests
+
 echo "==> test"
 uv run python -m unittest discover -s tests -q
 
@@ -44,10 +48,6 @@ CONFIG=/etc/msg-lmm-best/msg.conf
 SERVICE=msg-lmm-best.service
 D="$STAGE/deploy"
 
-test -x "$VENV/bin/python" || {
-    echo "error: msgd venv not found; use deploy/deploy.sh for a fresh install" >&2
-    exit 1
-}
 test -f "$CONFIG" || {
     echo "error: msgd config not found; use deploy/deploy.sh for a fresh install" >&2
     exit 1
@@ -60,6 +60,21 @@ command -v uv >/dev/null || {
     echo "error: uv is not installed on the server" >&2
     exit 1
 }
+test -x /usr/bin/python3 || {
+    echo "error: /usr/bin/python3 is missing" >&2
+    exit 1
+}
+/usr/bin/python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 14))' || {
+    echo "error: system Python 3.14+ is required; update the server packages first" >&2
+    exit 1
+}
+
+if ! test -x "$VENV/bin/python" || ! "$VENV/bin/python" -c     'import sys; raise SystemExit(sys.version_info < (3, 14))'; then
+    echo "==> migrate venv to Python 3.14"
+    sudo systemctl stop "$SERVICE"
+    sudo rm -rf "$VENV"
+    sudo uv venv --quiet --python /usr/bin/python3 "$VENV"
+fi
 
 echo "==> install package"
 sudo UV_NO_CACHE=1 uv pip install --quiet \

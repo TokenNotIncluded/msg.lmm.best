@@ -38,6 +38,7 @@ def public_identity_for_test(key: Ed25519PrivateKey) -> str:
         serialization.PublicFormat.Raw,
     )
     import hashlib
+
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -66,7 +67,10 @@ class Client:
             with urllib.request.urlopen(req, timeout=5) as response:
                 return response.status, response.read(), dict(response.headers)
         except urllib.error.HTTPError as exc:
-            return exc.code, exc.read(), dict(exc.headers)
+            try:
+                return exc.code, exc.read(), dict(exc.headers)
+            finally:
+                exc.close()
 
     def request(
         self,
@@ -118,8 +122,7 @@ class Client:
             chunks += [
                 f"--{boundary}\r\n".encode(),
                 (
-                    f'Content-Disposition: form-data; name="{field}"; '
-                    f'filename="{filename}"\r\n'
+                    f'Content-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'
                 ).encode(),
                 f"Content-Type: {content_type}\r\n\r\n".encode(),
                 data,
@@ -821,11 +824,7 @@ class PostUploadCase(unittest.TestCase):
             headers={"Content-Type": "text/plain"},
         )
         self.assertEqual(status, 201, body.decode())
-        fields = dict(
-            line.split("=", 1)
-            for line in body.decode().splitlines()
-            if "=" in line
-        )
+        fields = dict(line.split("=", 1) for line in body.decode().splitlines() if "=" in line)
         post_id = int(fields["id"])
         self.assertEqual(self.c.get(f"/main/{post_id}/raw")[1], text)
 
@@ -1013,11 +1012,7 @@ class InboxCase(unittest.TestCase):
             fields["reply_to"] = str(reply_to)
         status, body = self.c.post("/publish", **fields)
         self.assertEqual(status, 201, body)
-        response = dict(
-            line.split("=", 1)
-            for line in body.splitlines()
-            if "=" in line
-        )
+        response = dict(line.split("=", 1) for line in body.splitlines() if "=" in line)
         return int(response["id"])
 
     def read_inbox(
@@ -1067,11 +1062,7 @@ class InboxCase(unittest.TestCase):
         )
         self.assertEqual(status, 201, body)
         comment_id = int(
-            dict(
-                line.split("=", 1)
-                for line in body.splitlines()
-                if "=" in line
-            )["id"]
+            dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"]
         )
         comment_meta = json.loads(self.c.get(f"/main/{comment_id}/meta")[1])
         self.assertEqual(comment_meta["reply_to"], parent)
@@ -1084,11 +1075,7 @@ class InboxCase(unittest.TestCase):
         )
         self.assertEqual(status, 201, alias_body)
         alias_id = int(
-            dict(
-                line.split("=", 1)
-                for line in alias_body.splitlines()
-                if "=" in line
-            )["id"]
+            dict(line.split("=", 1) for line in alias_body.splitlines() if "=" in line)["id"]
         )
 
         status, direct_body = self.c.post(
@@ -1098,11 +1085,7 @@ class InboxCase(unittest.TestCase):
         )
         self.assertEqual(status, 201, direct_body)
         direct_id = int(
-            dict(
-                line.split("=", 1)
-                for line in direct_body.splitlines()
-                if "=" in line
-            )["id"]
+            dict(line.split("=", 1) for line in direct_body.splitlines() if "=" in line)["id"]
         )
 
         self.assertEqual(self.c.get("/inbox")[0], 401)
@@ -1127,11 +1110,7 @@ class InboxCase(unittest.TestCase):
         )
         self.assertEqual(first[0], 201)
         first_id = int(
-            dict(
-                line.split("=", 1)
-                for line in first[1].splitlines()
-                if "=" in line
-            )["id"]
+            dict(line.split("=", 1) for line in first[1].splitlines() if "=" in line)["id"]
         )
 
         status, _, _ = self.read_inbox(alice, sign_with=mallory)
@@ -1162,11 +1141,7 @@ class InboxCase(unittest.TestCase):
         )
         self.assertEqual(second[0], 201)
         second_id = int(
-            dict(
-                line.split("=", 1)
-                for line in second[1].splitlines()
-                if "=" in line
-            )["id"]
+            dict(line.split("=", 1) for line in second[1].splitlines() if "=" in line)["id"]
         )
 
         status, body, _ = self.read_inbox(alice, since=first_id)
@@ -1187,11 +1162,7 @@ class InboxCase(unittest.TestCase):
         )
         self.assertEqual(status, 201, body)
         mention_id = int(
-            dict(
-                line.split("=", 1)
-                for line in body.splitlines()
-                if "=" in line
-            )["id"]
+            dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"]
         )
 
         status, inbox, _ = self.read_inbox(alice)
@@ -1254,7 +1225,6 @@ class InboxCase(unittest.TestCase):
             issued=str(info["issued"]),
         )
         self.assertEqual(status, 400)
-
 
 
 class LegacyMigrationCase(unittest.TestCase):
@@ -1388,9 +1358,7 @@ class LegacyMigrationCase(unittest.TestCase):
                 columns = {row[1] for row in check.execute("PRAGMA table_info(posts)")}
                 tables = {
                     row[0]
-                    for row in check.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table'"
-                    )
+                    for row in check.execute("SELECT name FROM sqlite_master WHERE type='table'")
                 }
                 check.close()
                 self.assertIn("author_id", columns)
