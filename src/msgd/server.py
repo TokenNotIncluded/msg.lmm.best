@@ -2059,7 +2059,16 @@ class Handler(BaseHTTPRequestHandler):
         if post_id < 1:
             raise StoreError("ack post id must be positive", 400)
 
-        limit = int(_int(params, "limit", min(100, self.board.cfg.max_limit), 1, self.board.cfg.max_limit) or 1)
+        limit = int(
+            _int(
+                params,
+                "limit",
+                min(100, self.board.cfg.max_limit),
+                1,
+                self.board.cfg.max_limit,
+            )
+            or 1
+        )
         offset = int(_int(params, "offset", 0, 0, 1_000_000_000) or 0)
         result = self.board.exchange.receipt_summary(post_id, limit=limit, offset=offset)
         if self.board.engagement.available:
