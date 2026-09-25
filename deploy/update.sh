@@ -192,9 +192,6 @@ sudo systemctl reload sshd.service
 echo "==> systemd"
 sudo install -m 0644 "$D/msg-lmm-best.service" \
     /etc/systemd/system/msg-lmm-best.service
-sudo systemctl disable --now msg-lmm-best-index.timer >/dev/null 2>&1 || true
-sudo rm -f /etc/systemd/system/msg-lmm-best-index.timer \
-    /etc/systemd/system/msg-lmm-best-index.service
 sudo systemctl daemon-reload
 
 echo "==> restart"
