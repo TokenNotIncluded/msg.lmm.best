@@ -1324,6 +1324,8 @@ class Store:
                 "signed": False,
                 "certified": False,
                 "status": "unsigned",
+                "server_accepted_signature": False,
+                "basis": "anonymous-policy",
                 "author": None,
                 "actor": None,
             }
@@ -1336,6 +1338,12 @@ class Store:
             "signed": True,
             "certified": certified,
             "status": "certified" if certified else "signed-inactive",
+            "server_accepted_signature": True,
+            "basis": (
+                "current-active-certificate-chain"
+                if certified
+                else "stored-signature-current-chain-inactive"
+            ),
             "author": author,
             "actor": actor,
             "actor_is_author": post.actor_id == post.author_id,
