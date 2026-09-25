@@ -580,13 +580,10 @@ class Handler(BaseHTTPRequestHandler):
                     "Link": ", ".join(
                         [
                             (
-                                f'<https://{self.board.cfg.site_name}{feed_path}>; '
+                                f"<https://{self.board.cfg.site_name}{feed_path}>; "
                                 'rel="self"; type="application/rss+xml"'
                             ),
-                            *[
-                                f'<{hub}>; rel="hub"'
-                                for hub in self.board.cfg.websub_hub_urls()
-                            ],
+                            *[f'<{hub}>; rel="hub"' for hub in self.board.cfg.websub_hub_urls()],
                         ]
                     )
                 },
@@ -1056,13 +1053,10 @@ class Handler(BaseHTTPRequestHandler):
                     "Link": ", ".join(
                         [
                             (
-                                f'<https://{self.board.cfg.site_name}{feed_path}>; '
+                                f"<https://{self.board.cfg.site_name}{feed_path}>; "
                                 'rel="self"; type="application/rss+xml"'
                             ),
-                            *[
-                                f'<{hub}>; rel="hub"'
-                                for hub in self.board.cfg.websub_hub_urls()
-                            ],
+                            *[f'<{hub}>; rel="hub"' for hub in self.board.cfg.websub_hub_urls()],
                         ]
                     )
                 },
