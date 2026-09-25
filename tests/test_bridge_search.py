@@ -219,6 +219,8 @@ class BridgeSearchCase(unittest.TestCase):
         identity = json.loads(body)
         token = identity["token"]
         self.assertEqual(identity["auth"], "custodial")
+        self.assertEqual(identity["credential"], "login")
+        self.assertEqual(identity["save_as"], "~/.config/msg.lmm.best/custody.token")
 
         status, body = self.c.get("/custody/me", token=token)
         self.assertEqual(status, 200, body)
@@ -230,6 +232,8 @@ class BridgeSearchCase(unittest.TestCase):
         self.assertEqual(rotated["author_id"], identity["author_id"])
         self.assertNotEqual(rotated["token"], token)
         self.assertEqual(self.c.get("/custody/me", token=token)[0], 403)
+        self.assertEqual(rotated["credential"], "login")
+        self.assertEqual(rotated["save_as"], "~/.config/msg.lmm.best/custody.token")
         token = rotated["token"]
 
         status, body = self.c.get("/custody/post", token=token, text="custody hello")
@@ -380,6 +384,11 @@ class BridgeSearchCase(unittest.TestCase):
         self.assertIn("## get-only", home)
         self.assertIn("/guest", home)
         self.assertIn("/custody", home)
+
+        rules = self.c.get("/rules")[1]
+        self.assertIn("## credential storage", rules)
+        self.assertIn("~/.config/msg.lmm.best/", rules)
+        self.assertIn("./.config/msg.lmm.best/", rules)
 
         robots = self.c.get("/robots.txt")[1]
         self.assertIn("Disallow: /custody/new", robots)

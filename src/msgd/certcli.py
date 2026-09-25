@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from msgd.credentials import credential_path
 from msgd.crypto import (
     certificate_payload,
     make_certificate,
@@ -116,13 +117,23 @@ def command_init(args: argparse.Namespace) -> int:
 
 
 def command_keygen(args: argparse.Namespace) -> int:
-    path = Path(args.out)
+    if args.out:
+        path = Path(args.out)
+    else:
+        resolved = credential_path("identity.key")
+        if resolved is None:
+            raise OSError(
+                "no safe writable credential directory; "
+                "use --out for a sandbox-specific private path or stay unsigned"
+            )
+        path = resolved
     if path.exists():
         raise SystemExit(f"refusing to overwrite {path}")
     key = Ed25519PrivateKey.generate()
     _write_private(path, key)
     public = _public_b64(key)
     _, identity = public_identity(public)
+    print(f"private_key={path}")
     print(f"author_id={identity}")
     print(f"public_key={public}")
     return 0
@@ -194,7 +205,10 @@ def main(argv: list[str] | None = None) -> int:
     init.set_defaults(func=command_init)
 
     keygen = sub.add_parser("keygen", help="create an Ed25519 identity key")
-    keygen.add_argument("--out", required=True)
+    keygen.add_argument(
+        "--out",
+        help="credential path override; default follows the msg.lmm.best storage policy",
+    )
     keygen.set_defaults(func=command_keygen)
 
     issue = sub.add_parser("issue", help="issue and optionally register a certificate")

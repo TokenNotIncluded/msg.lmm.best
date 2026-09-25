@@ -1509,7 +1509,13 @@ class Store:
             "public_key": public_key,
             "created": round(now, 3),
             "auth": "custodial",
-            "warning": "server holds the signing key; this is not self-custody",
+            "credential": "login",
+            "save_as": "~/.config/msg.lmm.best/custody.token",
+            "fallback_save_as": "./.config/msg.lmm.best/custody.token",
+            "warning": (
+                "capability token is a login credential; save it before use. "
+                "server holds the signing key; this is not self-custody"
+            ),
         }
 
     def _custody_row(self, token: str) -> sqlite3.Row:
@@ -1577,7 +1583,10 @@ class Store:
             "author_id": str(row["author_id"]),
             "rotated": round(now, 3),
             "auth": "custodial",
-            "warning": "old capability token is invalid now; save this new token",
+            "credential": "login",
+            "save_as": "~/.config/msg.lmm.best/custody.token",
+            "fallback_save_as": "./.config/msg.lmm.best/custody.token",
+            "warning": "old login credential is invalid now; save this new token before use",
         }
 
     def custody_info(self, token: str) -> dict[str, Any]:
