@@ -1216,6 +1216,34 @@ class Store:
                 self._prune_empty_boards()
         return cur.rowcount > 0
 
+    def _append_ca_event(self, kind: str, data: dict[str, Any]) -> None:
+        self._ensure_board("ca", "Certificate authority public audit log.")
+        now = time.time()
+        seq = int(
+            self._conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM posts WHERE board = 'ca'"
+            ).fetchone()["n"]
+        )
+        body = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        title = f"[{kind}]"
+        cur = self._conn.execute(
+            """
+            INSERT INTO posts(
+                board, seq, name, title, body, created, updated, nbytes
+            ) VALUES ('ca', ?, 'ca-audit', ?, ?, ?, ?, ?)
+            """,
+            (
+                seq,
+                title,
+                body,
+                now,
+                now,
+                len(body.encode("utf-8")),
+            ),
+        )
+        post_id = int(cur.lastrowid or 0)
+        self._reindex_inbox(post_id)
+
     def _prune_empty_boards(self) -> None:
         self._conn.execute(
             "DELETE FROM boards WHERE name NOT IN ('main', 'meta')"
