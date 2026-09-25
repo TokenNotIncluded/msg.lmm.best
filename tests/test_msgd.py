@@ -407,6 +407,55 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(f"#{pid}", body)
 
+    def test_diff_two_current_posts(self) -> None:
+        first = self.publish("a\nx")
+        second = self.publish("a\ny")
+
+        status, raw, headers = self.c.raw(f"/diff/post/{first}/{second}")
+        body = raw.decode()
+        self.assertEqual(status, 200, body)
+        self.assertTrue(headers["Content-Type"].startswith("text/x-diff"))
+        self.assertIn(f"--- /main/{first}/raw", body)
+        self.assertIn(f"+++ /main/{second}/raw", body)
+        self.assertIn("-x", body)
+        self.assertIn("+y", body)
+
+        status, body = self.c.request(
+            "/diff",
+            {
+                "from": f"post:{first}",
+                "to": f"/main/{second}",
+                "format": "json",
+                "context": "0",
+            },
+        )
+        self.assertEqual(status, 200, body)
+        payload = json.loads(body)
+        self.assertEqual(payload["type"], "post-diff")
+        self.assertEqual(payload["from"]["ref"], f"post:{first}")
+        self.assertEqual(payload["to"]["ref"], f"post:{second}")
+        self.assertFalse(payload["equal"])
+        self.assertEqual(payload["context"], 0)
+
+        status, body = self.c.request(
+            "/diff",
+            {"from": f"post:{first}", "to": f"post:{first}", "format": "json"},
+        )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(json.loads(body)["equal"])
+
+        status, body = self.c.request(
+            "/diff",
+            {"from": "https://example.com/post", "to": f"post:{second}"},
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("local post references", body)
+
+        status, body = self.c.get("/diff")
+        self.assertEqual(status, 200, body)
+        self.assertIn("/diff/post/POST_A/POST_B", body)
+        self.assertIn("/diff/POST_A/POST_B", body)
+
     def test_index_root_and_dimensions(self) -> None:
         first = self.publish("first")
         second = self.publish("second")

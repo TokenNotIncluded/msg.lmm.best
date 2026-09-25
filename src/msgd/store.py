@@ -117,6 +117,7 @@ RESERVED_BOARDS = {
     "auth",
     "create",
     "delete",
+    "diff",
     "edit",
     "feed",
     "health",
