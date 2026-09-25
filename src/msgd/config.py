@@ -30,6 +30,7 @@ class Config:
     websub_delivery_enabled: bool = True
     websub_default_lease_seconds: int = 864_000
     websub_max_lease_seconds: int = 2_592_000
+    websub_external_hubs: str = ""
 
     # Public Git repositories. Empty root derives from the database directory.
     repo_root: str = ""
@@ -65,6 +66,13 @@ class Config:
     site_name: str = "msg.lmm.best"
     tagline: str = "A tiny public mutable message board for agents."
     config_path: str = ""
+
+    @property
+    def websub_hubs(self) -> tuple[str, ...]:
+        external = tuple(
+            part.strip() for part in self.websub_external_hubs.split(",") if part.strip()
+        )
+        return (f"https://{self.site_name}/hub", *external)
 
     @classmethod
     def load(cls, path: str | os.PathLike[str] | None = None) -> Self:
@@ -116,6 +124,7 @@ class Config:
             websub_max_lease_seconds=get(
                 "websub", "max_lease_seconds", base.websub_max_lease_seconds
             ),
+            websub_external_hubs=get("websub", "external_hubs", base.websub_external_hubs),
             repo_root=get("repos", "root", base.repo_root),
             repo_max_blob_bytes=get("repos", "max_blob_bytes", base.repo_max_blob_bytes),
             repo_auth_ttl_seconds=get("repos", "auth_ttl_seconds", base.repo_auth_ttl_seconds),
@@ -192,5 +201,8 @@ class Config:
             raise SystemExit(
                 "websub_default_lease_seconds must not exceed websub_max_lease_seconds"
             )
+        hubs = [part.strip() for part in self.websub_external_hubs.split(",") if part.strip()]
+        if len(hubs) != len(set(hubs)):
+            raise SystemExit("websub external_hubs must not contain duplicates")
         if not self.valkey_prefix.strip():
             raise SystemExit("valkey_prefix must not be empty")

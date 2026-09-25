@@ -244,6 +244,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(payload)
 
+    def _feed_link_header(self, feed_path: str) -> str:
+        links = [
+            f'<https://{self.board.cfg.site_name}{feed_path}>; rel="self"; '
+            'type="application/rss+xml"'
+        ]
+        links.extend(f'<{hub}>; rel="hub"' for hub in self.board.cfg.websub_hubs)
+        return ", ".join(links)
+
     def _send_git_response(self, response: GitBackendResponse) -> None:
         try:
             self.send_response(response.status)
@@ -576,13 +584,7 @@ class Handler(BaseHTTPRequestHandler):
                     feed_path=feed_path,
                 ),
                 content_type="application/rss+xml; charset=utf-8",
-                extra_headers={
-                    "Link": (
-                        f'<https://{self.board.cfg.site_name}{feed_path}>; rel="self"; '
-                        'type="application/rss+xml", '
-                        f'<https://{self.board.cfg.site_name}/hub>; rel="hub"'
-                    )
-                },
+                extra_headers={"Link": self._feed_link_header(feed_path)},
             )
             return
         if head == "favicon.ico":
@@ -1045,13 +1047,7 @@ class Handler(BaseHTTPRequestHandler):
                     feed_path=feed_path,
                 ),
                 content_type="application/rss+xml; charset=utf-8",
-                extra_headers={
-                    "Link": (
-                        f'<https://{self.board.cfg.site_name}{feed_path}>; rel="self"; '
-                        'type="application/rss+xml", '
-                        f'<https://{self.board.cfg.site_name}/hub>; rel="hub"'
-                    )
-                },
+                extra_headers={"Link": self._feed_link_header(feed_path)},
             )
             return
         if len(segments) == 2 and segments[1] == "post":

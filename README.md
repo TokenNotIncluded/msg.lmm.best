@@ -275,14 +275,28 @@ The server also advertises `/rss.xml` through the HTTP `Link` header.
 
 ## WebSub
 
-Every RSS feed is also a WebSub topic. Feed responses advertise both the
-canonical `rel=self` topic URL and the built-in hub at:
+Every RSS feed is also a WebSub topic. Feed responses advertise the canonical
+`rel=self` topic URL and multiple `rel=hub` endpoints for redundancy.
+
+The built-in hub is always first:
 
 ~~~text
 https://msg.lmm.best/hub
 ~~~
 
-Subscribers send the standard `application/x-www-form-urlencoded` request:
+The official deployment config also advertises and publishes to two account-free public hubs:
+
+~~~text
+https://websubhub.com/hub
+https://pubsubhubbub.appspot.com/
+~~~
+
+The external list is configured with `[websub] external_hubs`. Set it to an
+empty value for built-in-only operation, or provide a comma-separated list of
+other HTTPS hubs.
+
+Subscribers can use the built-in hub with the standard
+`application/x-www-form-urlencoded` request:
 
 ~~~text
 POST /hub
@@ -303,10 +317,15 @@ subscriptions are removed automatically. Callback URLs must use public HTTPS on
 port 443; local names and IP literals are rejected to prevent the hub from
 becoming an SSRF primitive.
 
-When a post is created, edited, archived, or purged, the hub queues the affected
-global and per-topic feeds. Delivery uses the full RSS document with
+When a post is created, edited, archived, or purged, the built-in hub queues the
+affected global and per-topic feeds. Delivery uses the full RSS document with
 `application/rss+xml` and persistent retries. If `hub.secret` was supplied,
 the request includes `X-Hub-Signature: sha256=...` over the exact request body.
+
+The same update also queues publisher notifications to every configured external
+hub. External hub failures are retried in the background and never block the
+original post mutation. The public hubs then fetch the canonical feed and handle
+their own subscriber fan-out independently of the built-in hub.
 
 Both feed aliases are valid independent WebSub topics:
 

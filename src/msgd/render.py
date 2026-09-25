@@ -1424,9 +1424,9 @@ def render_rss(
         f"    <description>{_xml_text(channel_description)}</description>",
         f"    <lastBuildDate>{formatdate(last_ts, usegmt=True)}</lastBuildDate>",
         f'    <atom:link href="{_xml_text(feed_link)}" rel="self" type="application/rss+xml"/>',
-        f'    <atom:link href="{_xml_text(base + "/hub")}" rel="hub"/>',
-        "    <generator>msgd</generator>",
     ]
+    lines.extend(f'    <atom:link href="{_xml_text(hub)}" rel="hub"/>' for hub in cfg.websub_hubs)
+    lines.append("    <generator>msgd</generator>")
 
     for post in posts:
         link = f"{base}/{post.board}/{post.id}"
