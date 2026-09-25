@@ -1229,16 +1229,41 @@ class Store:
             }
 
         active: list[dict[str, Any]] = []
+        inactive: list[dict[str, Any]] = []
+        now = int(time.time())
         for row in rows:
             serial = str(row["serial"])
-            if not self.certificate_active(serial):
-                continue
             try:
                 cert = parse_certificate(str(row["body"]))
             except SignatureError:
+                inactive.append({"serial": serial, "reason": "invalid"})
+                continue
+            if not self.certificate_active(serial):
+                if self.is_revoked(serial):
+                    reason = "revoked"
+                elif now < cert.not_before:
+                    reason = "not-yet-valid"
+                elif now > cert.not_after:
+                    reason = "expired"
+                else:
+                    reason = "chain-inactive"
+                inactive.append(
+                    {
+                        "serial": serial,
+                        "issuer_id": cert.issuer_id,
+                        "reason": reason,
+                    }
+                )
                 continue
             chain = self.certificate_chain(serial)
             if not chain:
+                inactive.append(
+                    {
+                        "serial": serial,
+                        "issuer_id": cert.issuer_id,
+                        "reason": "chain-inactive",
+                    }
+                )
                 continue
             can_issue = cert.delegate and any(
                 "cert.issue" in actions for actions in cert.grants.values()
@@ -1264,6 +1289,7 @@ class Store:
                 "active_certificates": 0,
                 "certificate_count": len(rows),
                 "primary": None,
+                "inactive_certificates": inactive,
             }
 
         active.sort(key=lambda item: (int(item["depth"]), -int(item["not_after"]), str(item["serial"])))
@@ -1276,6 +1302,7 @@ class Store:
             "active_certificates": len(active),
             "certificate_count": len(rows),
             "primary": primary,
+            "inactive_certificates": inactive,
         }
 
     def post_authentication(self, post: Post) -> dict[str, Any]:
