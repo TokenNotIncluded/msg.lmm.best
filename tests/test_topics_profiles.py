@@ -299,6 +299,92 @@ class TopicsProfilesCase(unittest.TestCase):
         self.assertEqual(status, 409, denied)
         self.assertIn(public_b64(self.alice), denied)
 
+    def test_profile_stable_resources_and_root_profile(self) -> None:
+        status, body = self.c.get("/@root", format="json")
+        self.assertEqual(status, 200, body)
+        root_profile = json.loads(body)
+        self.assertEqual(root_profile["name"], "root")
+        self.assertTrue(root_profile["system"])
+        self.assertEqual(root_profile["public_key"], public_b64(self.root))
+        self.assertEqual(root_profile["author_id"], author_id(self.root))
+        self.assertEqual(root_profile["certification"]["status"], "root")
+
+        self.assertEqual(self.c.get("/@root/pubkey"), (200, public_b64(self.root) + "\n"))
+        self.assertEqual(self.c.get("/@root/id"), (200, author_id(self.root) + "\n"))
+
+        status, body = self.c.get("/@root/cert")
+        self.assertEqual(status, 200, body)
+        root_cert = json.loads(body)
+        self.assertEqual(root_cert["kind"], "trust-anchor")
+        self.assertEqual(root_cert["serial"], "root")
+        self.assertEqual(root_cert["subject_key"], public_b64(self.root))
+        self.assertIsNone(root_cert["body"])
+        self.assertIsNone(root_cert["signature"])
+
+        status, body = self.c.get("/@root/chain")
+        self.assertEqual(status, 200, body)
+        root_chain = json.loads(body)
+        self.assertEqual(len(root_chain), 1)
+        self.assertEqual(root_chain[0]["serial"], "root")
+        self.assertEqual(root_chain[0]["subject_id"], author_id(self.root))
+
+        status, body, _ = self.signed_create(
+            self.bob,
+            name="Root",
+            text="reserved name attempt",
+        )
+        self.assertEqual(status, 409, body)
+        self.assertIn("reserved for the Root CA", body)
+
+        status, body, _ = self.signed_create(
+            self.alice,
+            name="AliceStable",
+            text="stable profile resources",
+        )
+        self.assertEqual(status, 201, body)
+
+        self.assertEqual(
+            self.c.get("/@AliceStable/pubkey"),
+            (200, public_b64(self.alice) + "\n"),
+        )
+        self.assertEqual(
+            self.c.get("/@AliceStable/id"),
+            (200, author_id(self.alice) + "\n"),
+        )
+        status, bio_body = self.c.get("/@AliceStable/bio")
+        self.assertEqual(status, 404, bio_body)
+
+        status, aliases_body = self.c.get("/@AliceStable/aliases")
+        self.assertEqual(status, 200, aliases_body)
+        self.assertIn("AliceStable\n", aliases_body)
+
+        status, cert_body = self.c.get("/@AliceStable/cert")
+        self.assertEqual(status, 200, cert_body)
+        cert = json.loads(cert_body)
+        self.assertEqual(cert["serial"], "1" * 32)
+        self.assertTrue(cert["active"])
+        self.assertTrue(cert["body"])
+        self.assertTrue(cert["signature"])
+        self.assertEqual(cert["chain"][0]["serial"], "root")
+        self.assertEqual(cert["chain"][-1]["subject_id"], author_id(self.alice))
+
+        status, certs_body = self.c.get("/@AliceStable/certs")
+        self.assertEqual(status, 200, certs_body)
+        certs = json.loads(certs_body)
+        self.assertEqual(certs[0]["serial"], "1" * 32)
+        self.assertTrue(certs[0]["active"])
+
+        status, chain_body = self.c.get("/@AliceStable/chain")
+        self.assertEqual(status, 200, chain_body)
+        chain = json.loads(chain_body)
+        self.assertEqual(chain[0]["serial"], "root")
+        self.assertEqual(chain[-1]["subject_id"], author_id(self.alice))
+
+        schema = json.loads(self.c.get("/_schema")[1])
+        self.assertEqual(schema["profiles"]["root_profile"], "/@root")
+        self.assertEqual(schema["profiles"]["resources"]["pubkey"], "/@{name}/pubkey")
+        self.assertIn("root", schema["profiles"]["reserved_names"])
+
     def test_hashtag_topics_reindex_search_and_delete(self) -> None:
         status, body = self.c.get(
             "/publish",
