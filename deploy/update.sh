@@ -169,6 +169,13 @@ sudo install -d -m 0755 /etc/ssh/sshd_config.d
 sudo install -m 0644 "$D/sshd/msg-lmm-best.conf" \
     /etc/ssh/sshd_config.d/msg-lmm-best.conf
 sudo /usr/bin/sshd -t
+SSH_EFFECTIVE="$(sudo /usr/bin/sshd -T -C user=msg,host=localhost,addr=127.0.0.1)"
+grep -Fx 'authenticationmethods publickey' <<<"$SSH_EFFECTIVE" >/dev/null
+grep -Fx 'passwordauthentication no' <<<"$SSH_EFFECTIVE" >/dev/null
+grep -Fx 'authorizedkeysfile none' <<<"$SSH_EFFECTIVE" >/dev/null
+grep -Fx 'disableforwarding yes' <<<"$SSH_EFFECTIVE" >/dev/null
+grep -Fx 'authorizedkeyscommand /usr/local/bin/msg-ssh-auth %t %k' \
+    <<<"$SSH_EFFECTIVE" >/dev/null
 sudo systemctl reload sshd.service
 
 echo "==> systemd"
