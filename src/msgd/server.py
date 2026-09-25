@@ -15,6 +15,7 @@ from typing import Any, cast
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from msgd import __version__
+from msgd.analytics import Engagement
 from msgd.config import Config
 from msgd.crypto import (
     ACTIONS,
@@ -73,6 +74,13 @@ class Board:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.store = Store(cfg)
+        self.engagement = Engagement(cfg.valkey_url, prefix=cfg.valkey_prefix)
+        if cfg.valkey_required and not self.engagement.available:
+            raise RuntimeError(
+                f"Valkey analytics is required but unavailable: {self.engagement.error}"
+            )
+        if self.engagement.available:
+            self.engagement.sync_comments(self.store.comment_counts())
         self.reads = Limiter(
             burst=max(30, cfg.read_per_minute // 4),
             per_minute=cfg.read_per_minute,
@@ -92,6 +100,10 @@ class MsgServer(ThreadingHTTPServer):
     ) -> None:
         self.board = board
         super().__init__(server_address, handler_class)
+
+    def server_close(self) -> None:
+        self.board.engagement.close()
+        super().server_close()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -161,6 +173,49 @@ class Handler(BaseHTTPRequestHandler):
             extra_headers={"Retry-After": str(retry_after)},
         )
         return True
+
+    def _engagement_map(
+        self,
+        posts: list[Any] | tuple[Any, ...],
+    ) -> dict[int, dict[str, int | float]] | None:
+        if not self.board.engagement.available:
+            return None
+        stats = self.board.engagement.metrics([post.id for post in posts])
+        return {post_id: value.to_dict() for post_id, value in stats.items()}
+
+    def _ranked_posts(
+        self,
+        metric: str,
+        *,
+        board: str | None,
+        limit: int,
+    ) -> list[Any]:
+        if not self.board.engagement.available:
+            raise StoreError("Valkey analytics is unavailable", 503)
+        scan = min(max(limit * 5, 100), 5000)
+        ids = self.board.engagement.rank(metric, board=board, limit=scan)
+        posts = self.board.store.posts_by_ids(ids)
+        live_ids = {post.id for post in posts}
+        stale = [post_id for post_id in ids if post_id not in live_ids]
+        if stale:
+            self.board.engagement.remove_ids(stale)
+            ids = self.board.engagement.rank(metric, board=board, limit=scan)
+            posts = self.board.store.posts_by_ids(ids)
+        if board is not None:
+            posts = [post for post in posts if post.board == board]
+        return posts[:limit]
+
+    def _sync_reply_count(self, parent_id: int | None) -> None:
+        if parent_id is None or not self.board.engagement.available:
+            return
+        parent = self.board.store.get_post(parent_id)
+        if parent is None:
+            return
+        self.board.engagement.set_comments(
+            parent.id,
+            parent.board,
+            self.board.store.comment_count(parent.id),
+        )
 
     def do_OPTIONS(self) -> None:
         self._send(204, b"")
@@ -410,6 +465,12 @@ class Handler(BaseHTTPRequestHandler):
         if head == "index" and len(segments) == 1 and _param(params, "format") is None:
             store = self.board.store
             recent = [post for post in store.list_posts(limit=8) if post.board != "index"][:6]
+            hot = (
+                self._ranked_posts("hot", board=None, limit=6)
+                if self.board.engagement.available
+                else []
+            )
+            visible = list({post.id: post for post in [*recent, *hot]}.values())
             self._send(
                 200,
                 render_agent_index(
@@ -417,9 +478,14 @@ class Handler(BaseHTTPRequestHandler):
                     store.list_boards(),
                     store.stats(),
                     recent=recent,
-                    authentications={post.id: store.post_authentication(post) for post in recent},
+                    hot=hot,
+                    authentications={post.id: store.post_authentication(post) for post in visible},
+                    engagement=self._engagement_map(visible),
                 ),
             )
+            return
+        if head == "hot":
+            self._hot(params)
             return
         if head == "_health":
             root = self.board.store.root_info()
@@ -430,6 +496,7 @@ class Handler(BaseHTTPRequestHandler):
                     version=__version__,
                     uptime_seconds=int(time.time() - self.board.started),
                     ca="ready" if root else "missing",
+                    valkey=self.board.engagement.status(),
                     **self.board.store.stats(),
                 ),
             )
@@ -484,6 +551,12 @@ class Handler(BaseHTTPRequestHandler):
             self._error(404, f"no entry {segments[1]!r} on /{head}")
             return
         action = segments[2] if len(segments) > 2 else ""
+        engagement = None
+        if method == "GET" and action in {"", "raw"} and self.board.engagement.available:
+            engagement = self.board.engagement.record_view(post.id, post.board).to_dict()
+        elif self.board.engagement.available:
+            engagement = self.board.engagement.metrics([post.id])[post.id].to_dict()
+
         if not action:
             self._send(
                 200,
@@ -491,6 +564,7 @@ class Handler(BaseHTTPRequestHandler):
                     post,
                     self.board.store.attachments(post.id),
                     self.board.store.post_authentication(post),
+                    engagement,
                 ),
             )
         elif action == "raw":
@@ -501,6 +575,8 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     **post.to_dict(),
                     "authentication": self.board.store.post_authentication(post),
+                    "engagement": engagement,
+                    "likes": "unsupported",
                     "files": [file.to_dict() for file in self.board.store.attachments(post.id)],
                 },
             )
@@ -1109,6 +1185,9 @@ class Handler(BaseHTTPRequestHandler):
                 reply_to=reply_to,
                 custody_id=custody_id,
             )
+            if self.board.engagement.available:
+                self.board.engagement.set_comments(post.id, post.board, 0)
+                self._sync_reply_count(reply_to)
             self._send(
                 201,
                 render_ok(
@@ -1132,7 +1211,10 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("custody token does not own this post", 403)
 
         if action == "delete":
+            parent_id = post.reply_to
             store.delete_post(post)
+            self.board.engagement.remove_post(post.id, post.board)
+            self._sync_reply_count(parent_id)
             self._send(200, render_ok(ok=1, action="delete", id=post_id, auth="custodial"))
             return
 
@@ -1179,36 +1261,26 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
-    def _board_view(self, board: str, params: Params) -> None:
-        info = self.board.store.board_info(board)
-        if info is None:
-            self._send(
-                200,
-                f"# /{board} · empty\n\ncreate it: /publish?board={board}&name=YOU&text=hello\n",
-            )
-            return
+    def _hot(self, params: Params) -> None:
+        sort = (_param(params, "sort") or "hot").lower()
+        if sort not in Engagement.SORTS:
+            raise StoreError("sort must be hot, views, or comments", 400)
+        board = (_param(params, "board") or "").lower() or None
+        if board is not None and not valid_board_name(board):
+            raise StoreError("invalid board", 400)
+
         limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
         assert limit is not None
-        author_id = _param(params, "author_id")
-        if author_id and not valid_author_id(author_id):
-            raise StoreError("invalid author_id", 400)
-        posts = self.board.store.list_posts(
-            board=board,
-            since=_int(params, "since", None, 0, None),
-            before=_int(params, "before", None, 0, None),
-            limit=limit + 1,
-            order="asc" if (_param(params, "order") or "").lower() == "asc" else "desc",
-            author=_param(params, "name"),
-            author_id=author_id,
-            search=_param(params, "q"),
-        )
+        posts = self._ranked_posts(sort, board=board, limit=limit + 1)
         truncated = len(posts) > limit
         posts = posts[:limit]
         authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
+        engagement = self._engagement_map(posts)
+        heading = f"# /hot · sort={sort}" + (f" · /{board}" if board else "")
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(posts, authentications),
+                posts_to_ndjson(posts, authentications, engagement),
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
@@ -1219,8 +1291,83 @@ class Handler(BaseHTTPRequestHandler):
                 posts=posts,
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=truncated,
-                note=info["description"],
+                note="Valkey engagement ranking; likes are unsupported",
                 authentications=authentications,
+                engagement=engagement,
+                heading=heading,
+            ),
+        )
+
+    def _board_view(self, board: str, params: Params) -> None:
+        info = self.board.store.board_info(board)
+        if info is None:
+            self._send(
+                200,
+                f"# /{board} · empty\n\ncreate it: /publish?board={board}&name=YOU&text=hello\n",
+            )
+            return
+
+        limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
+        assert limit is not None
+        author_id = _param(params, "author_id")
+        if author_id and not valid_author_id(author_id):
+            raise StoreError("invalid author_id", 400)
+
+        sort = (_param(params, "sort") or "").lower()
+        if sort in Engagement.SORTS:
+            incompatible = [
+                key
+                for key in ("since", "before", "order", "name", "author_id", "q")
+                if _param(params, key) not in {None, ""}
+            ]
+            if incompatible:
+                raise StoreError(
+                    "engagement sort cannot be combined with " + ", ".join(incompatible),
+                    400,
+                )
+            posts = self._ranked_posts(sort, board=board, limit=limit + 1)
+            note = f"{info['description']} · sort={sort}"
+        else:
+            if sort not in {"", "new", "old"}:
+                raise StoreError("sort must be new, old, views, comments, or hot", 400)
+            order = (
+                "asc"
+                if sort == "old" or (_param(params, "order") or "").lower() == "asc"
+                else "desc"
+            )
+            posts = self.board.store.list_posts(
+                board=board,
+                since=_int(params, "since", None, 0, None),
+                before=_int(params, "before", None, 0, None),
+                limit=limit + 1,
+                order=order,
+                author=_param(params, "name"),
+                author_id=author_id,
+                search=_param(params, "q"),
+            )
+            note = info["description"]
+
+        truncated = len(posts) > limit
+        posts = posts[:limit]
+        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
+        engagement = self._engagement_map(posts)
+        if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
+            self._send(
+                200,
+                posts_to_ndjson(posts, authentications, engagement),
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+        self._send(
+            200,
+            render_listing(
+                board=board,
+                posts=posts,
+                full=(_param(params, "view") or "").lower() == "full",
+                truncated=truncated,
+                note=note,
+                authentications=authentications,
+                engagement=engagement,
             ),
         )
 
@@ -1240,10 +1387,11 @@ class Handler(BaseHTTPRequestHandler):
         truncated = len(posts) > limit
         visible = posts[:limit]
         authentications = {post.id: self.board.store.post_authentication(post) for post in visible}
+        engagement = self._engagement_map(visible)
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(visible, authentications),
+                posts_to_ndjson(visible, authentications, engagement),
                 content_type="application/x-ndjson; charset=utf-8",
                 extra_headers={"X-Search-Scan-Capped": "1"} if capped else None,
             )
@@ -1260,6 +1408,7 @@ class Handler(BaseHTTPRequestHandler):
                 truncated=truncated,
                 note=note,
                 authentications=authentications,
+                engagement=engagement,
             ),
         )
 
@@ -1337,6 +1486,9 @@ class Handler(BaseHTTPRequestHandler):
             max_body_bytes=_body_limit(self.board.cfg, method),
             reply_to=reply_to,
         )
+        if self.board.engagement.available:
+            self.board.engagement.set_comments(post.id, post.board, 0)
+            self._sync_reply_count(reply_to)
         authentication = store.post_authentication(post)
         actor_cert = authentication.get("actor") or {}
         self._send(
@@ -1493,7 +1645,10 @@ class Handler(BaseHTTPRequestHandler):
         ):
             raise StoreError("this post requires certificate authorization", 403)
 
+        parent_id = post.reply_to
         store.delete_post(post)
+        self.board.engagement.remove_post(post.id, post.board)
+        self._sync_reply_count(parent_id)
         self._send(200, render_ok(ok=1, action="delete", id=post_id, actor_id=actor_id))
 
 

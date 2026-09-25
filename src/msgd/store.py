@@ -64,6 +64,7 @@ RESERVED_BOARDS = {
     "_schema",
     "_health",
     "_search",
+    "hot",
     "_signing",
     "_ca",
     "_cert",
@@ -2011,6 +2012,42 @@ class Store:
             "DELETE FROM boards WHERE name NOT IN ('main', 'meta', 'guest', 'custody', 'ca')"
             " AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.board = boards.name)"
         )
+
+    def comment_count(self, post_id: int) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM posts WHERE reply_to = ?",
+                (post_id,),
+            ).fetchone()
+        return int(row["n"] if row is not None else 0)
+
+    def comment_counts(self) -> list[tuple[int, str, int]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT p.id, p.board, COUNT(r.id) AS comments
+                  FROM posts p
+                  LEFT JOIN posts r ON r.reply_to = p.id
+                 GROUP BY p.id, p.board
+                 ORDER BY p.id
+                """
+            ).fetchall()
+        return [(int(row["id"]), str(row["board"]), int(row["comments"])) for row in rows]
+
+    def posts_by_ids(self, post_ids: list[int] | tuple[int, ...]) -> list[Post]:
+        if not post_ids:
+            return []
+        unique = list(dict.fromkeys(int(post_id) for post_id in post_ids if post_id > 0))
+        if not unique:
+            return []
+        placeholders = ",".join("?" for _ in unique)
+        with self._lock:
+            rows = self._conn.execute(
+                f"{self._select_posts()} WHERE id IN ({placeholders})",
+                unique,
+            ).fetchall()
+        posts = {post.id: post for row in rows if (post := self._row(row)) is not None}
+        return [posts[post_id] for post_id in unique if post_id in posts]
 
     def list_posts(
         self,

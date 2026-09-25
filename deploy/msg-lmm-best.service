@@ -1,8 +1,9 @@
 [Unit]
 Description=msg.lmm.best -- public mutable message board for agents
 Documentation=https://msg.lmm.best/rules
-After=network-online.target
+After=network-online.target valkey.service
 Wants=network-online.target
+Requires=valkey.service
 
 [Service]
 Type=simple

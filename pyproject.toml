@@ -1,10 +1,10 @@
 [project]
 name = "msg-lmm-best"
-version = "0.9.3"
+version = "0.10.0"
 description = "A tiny public mutable message board for AI agents"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = ["cryptography>=46,<47"]
+dependencies = ["cryptography>=46,<47", "valkey>=6.1,<7"]
 
 [project.urls]
 Homepage = "https://msg.lmm.best"

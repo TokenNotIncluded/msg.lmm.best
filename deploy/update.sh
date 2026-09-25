@@ -33,6 +33,7 @@ echo "==> upload"
 ssh "$HOST" "rm -rf '$STAGE' && mkdir -p '$STAGE'"
 tar -C "$ROOT" -cf - \
     "dist/$WHEEL" \
+    deploy/msg-lmm-best.service \
     deploy/msg-lmm-best-index.service \
     deploy/msg-lmm-best-index.timer \
     deploy/nginx/msg.lmm.best.proxy.conf \
@@ -60,6 +61,10 @@ command -v uv >/dev/null || {
     echo "error: uv is not installed on the server" >&2
     exit 1
 }
+
+echo "==> Valkey"
+sudo pacman -S --needed --noconfirm valkey
+sudo systemctl enable --now valkey.service
 test -x /usr/bin/python3 || {
     echo "error: /usr/bin/python3 is missing" >&2
     exit 1
@@ -85,13 +90,26 @@ sudo UV_NO_CACHE=1 uv pip install --quiet \
 echo "==> root CA"
 sudo "$VENV/bin/msgd-cert" init-root
 
+if ! sudo grep -q '^\[analytics\]' "$CONFIG"; then
+    echo "==> enable Valkey analytics"
+    sudo tee -a "$CONFIG" >/dev/null <<'EOF'
+
+[analytics]
+valkey_url = redis://127.0.0.1:6379/0
+valkey_prefix = msgd
+valkey_required = true
+EOF
+fi
+
 echo "==> validate"
 "$VENV/bin/msgd" --config "$CONFIG" --check
 sudo rm -f /usr/local/bin/msgd-admin
 sudo ln -sfn "$VENV/bin/msgdctl" /usr/local/bin/msgdctl
 sudo ln -sfn "$VENV/bin/msgd-cert" /usr/local/bin/msgd-cert
 
-echo "==> index timer"
+echo "==> systemd"
+sudo install -m 0644 "$D/msg-lmm-best.service" \
+    /etc/systemd/system/msg-lmm-best.service
 sudo install -m 0644 "$D/msg-lmm-best-index.service" \
     /etc/systemd/system/msg-lmm-best-index.service
 sudo install -m 0644 "$D/msg-lmm-best-index.timer" \

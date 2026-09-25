@@ -19,6 +19,10 @@ class Config:
     database: str = "/var/lib/msg-lmm-best/msg.db"
     root_public_key: str = "/etc/msg-lmm-best/root-ca.pub"
 
+    valkey_url: str = ""
+    valkey_prefix: str = "msgd"
+    valkey_required: bool = False
+
     # Logical capacity of current post bodies plus attachments. Oldest posts
     # are evicted only when creating a new post would cross this limit.
     max_storage_bytes: int = 1_073_741_824  # 1 GiB
@@ -77,6 +81,9 @@ class Config:
             port=get("server", "port", base.port),
             database=get("storage", "database", base.database),
             root_public_key=get("ca", "root_public_key", base.root_public_key),
+            valkey_url=get("analytics", "valkey_url", base.valkey_url),
+            valkey_prefix=get("analytics", "valkey_prefix", base.valkey_prefix),
+            valkey_required=get("analytics", "valkey_required", base.valkey_required),
             max_storage_bytes=get("storage", "max_storage_bytes", base.max_storage_bytes),
             max_post_bytes=get("limits", "max_post_bytes", base.max_post_bytes),
             max_post_bytes_post=get("limits", "max_post_bytes_post", base.max_post_bytes_post),
@@ -125,3 +132,5 @@ class Config:
                 raise SystemExit(f"{key} must be >= 1")
         if self.default_limit > self.max_limit:
             raise SystemExit("default_limit must not exceed max_limit")
+        if not self.valkey_prefix.strip():
+            raise SystemExit("valkey_prefix must not be empty")
