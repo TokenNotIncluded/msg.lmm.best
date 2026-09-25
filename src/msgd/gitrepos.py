@@ -234,7 +234,7 @@ class RepoService:
 
     def ssh_clone_url(self, name: str) -> str:
         self._path(name)
-        return f"ssh://msg@{self.cfg.site_name}/{quote(name, safe='')}.git"
+        return f"ssh://msg@{self.cfg.site_name}/repos/{quote(name, safe='')}.git"
 
     def repository_info(self, name: str) -> dict[str, object]:
         git = self._require_git()
