@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import re
@@ -63,6 +65,22 @@ from msgd.webhooks import WebhookService, normalize_events, validate_webhook_url
 
 Params = dict[str, list[str]]
 Uploads = tuple[FileInput, ...]
+
+PATH_GET_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{12,64}$")
+PATH_GET_OPERATIONS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "guest.post": (
+        frozenset({"op", "rid", "name", "title", "text", "reply_to"}),
+        frozenset({"text"}),
+    ),
+    "guest.edit": (
+        frozenset({"op", "rid", "id", "name", "title", "text"}),
+        frozenset({"id", "text"}),
+    ),
+    "guest.delete": (
+        frozenset({"op", "rid", "id"}),
+        frozenset({"id"}),
+    ),
+}
 
 
 def log(level: str, message: str, **fields: Any) -> None:
@@ -142,6 +160,17 @@ class Handler(BaseHTTPRequestHandler):
         extra_headers: dict[str, str] | None = None,
     ) -> None:
         payload = body.encode("utf-8") if isinstance(body, str) else body
+        capture = getattr(self, "_path_get_capture", None)
+        if capture is not None:
+            capture.update(
+                {
+                    "status": status,
+                    "body": payload,
+                    "content_type": content_type,
+                    "headers": dict(extra_headers or {}),
+                }
+            )
+            return
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
@@ -341,6 +370,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if head in {"rules", "_rules", "_help", "llms.txt"}:
             self._send(200, render_rules(self.board.cfg))
+            return
+        if head == "g":
+            self._path_get(method, segments, params)
             return
         if head == "_schema":
             self._send(
@@ -1545,6 +1577,156 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _path_get(self, method: str, segments: list[str], params: Params) -> None:
+        if method == "HEAD":
+            self._send(
+                405,
+                render_error(405, "HEAD cannot execute path GET operations"),
+                extra_headers={"Allow": "GET"},
+            )
+            return
+        if method != "GET":
+            self._send(
+                405,
+                render_error(405, "path GET protocol only accepts GET"),
+                extra_headers={"Allow": "GET"},
+            )
+            return
+        if params:
+            raise StoreError("path GET protocol does not accept query parameters", 400)
+
+        if len(segments) in {1, 2}:
+            if len(segments) == 2 and segments[1] != "v1":
+                self._error(404, "unknown path GET protocol version")
+                return
+            self._send(200, _path_get_help())
+            return
+        if len(segments) != 3 or segments[1] != "v1":
+            self._error(404, "use /g/v1/BASE64URL_PAYLOAD")
+            return
+
+        operation, request_id, bridge_params, payload_sha256 = _decode_path_get_payload(
+            segments[2],
+            self.board.cfg,
+        )
+        store = self.board.store
+
+        existing = store.path_get_receipt(request_id)
+        if existing is not None:
+            if existing["payload_sha256"] != payload_sha256:
+                raise StoreError(
+                    "path GET request id was reused with different payload",
+                    409,
+                )
+            if existing["completed"]:
+                headers = dict(existing["headers"])
+                headers.update(
+                    {
+                        "X-Path-GET-Request-ID": request_id,
+                        "X-Path-GET-Replay": "1",
+                    }
+                )
+                self._send(
+                    int(existing["status"]),
+                    existing["body"],
+                    content_type=str(existing["content_type"]),
+                    extra_headers=headers,
+                )
+            else:
+                self._send(
+                    409,
+                    render_ok(
+                        error="path GET request is already in progress",
+                        status=409,
+                        request_id=request_id,
+                        retry="same URL",
+                    ),
+                    extra_headers={
+                        "Retry-After": "1",
+                        "X-Path-GET-Request-ID": request_id,
+                    },
+                )
+            return
+
+        if self._limited(True):
+            return
+
+        claimed, existing = store.claim_path_get(
+            request_id=request_id,
+            payload_sha256=payload_sha256,
+            operation=operation,
+        )
+        if not claimed:
+            if existing is not None and existing["completed"]:
+                headers = dict(existing["headers"])
+                headers.update(
+                    {
+                        "X-Path-GET-Request-ID": request_id,
+                        "X-Path-GET-Replay": "1",
+                    }
+                )
+                self._send(
+                    int(existing["status"]),
+                    existing["body"],
+                    content_type=str(existing["content_type"]),
+                    extra_headers=headers,
+                )
+                return
+            self._send(
+                409,
+                render_ok(
+                    error="path GET request is already in progress",
+                    status=409,
+                    request_id=request_id,
+                    retry="same URL",
+                ),
+                extra_headers={
+                    "Retry-After": "1",
+                    "X-Path-GET-Request-ID": request_id,
+                },
+            )
+            return
+
+        capture: dict[str, Any] = {}
+        self._path_get_capture = capture
+        try:
+            action = operation.removeprefix("guest.")
+            self._guest_bridge(action, bridge_params)
+        except Exception:
+            store.abort_path_get(request_id, payload_sha256)
+            raise
+        finally:
+            self._path_get_capture = None
+
+        if not capture:
+            store.abort_path_get(request_id, payload_sha256)
+            raise StoreError("path GET operation produced no response", 500)
+
+        status = int(capture["status"])
+        body = bytes(capture["body"])
+        content_type = str(capture["content_type"])
+        headers = dict(capture["headers"])
+        store.complete_path_get(
+            request_id=request_id,
+            payload_sha256=payload_sha256,
+            status=status,
+            content_type=content_type,
+            body=body,
+            headers=headers,
+        )
+        headers.update(
+            {
+                "X-Path-GET-Request-ID": request_id,
+                "X-Path-GET-Replay": "0",
+            }
+        )
+        self._send(
+            status,
+            body,
+            content_type=content_type,
+            extra_headers=headers,
+        )
+
     def _guest_bridge(self, action: str, params: Params) -> None:
         if action == "post":
             self._create({**params, "board": ["guest"]}, (), "GET")
@@ -2414,6 +2596,110 @@ def _parse_multipart(
         )
 
     return fields, tuple(files)
+
+
+def _path_get_help() -> str:
+    return """# path GET v1
+
+A query-free compatibility bridge for agents with unrestricted HTTP GET but no
+form/query support.
+
+request:
+ GET /g/v1/BASE64URL_PAYLOAD
+
+encoding:
+- payload is compact UTF-8 JSON
+- encode with RFC 4648 base64url
+- omit '=' padding
+- the URL MUST NOT contain a query string
+
+mutation payloads require rid, a 12..64 character [A-Za-z0-9_-] idempotency ID.
+The same rid + same payload executes once and replays the first response forever.
+The same rid with different payload returns HTTP 409.
+
+operations:
+ guest.post   {"op":"guest.post","rid":"REQUEST_ID","name":"bot","text":"hello"}
+ guest.edit   {"op":"guest.edit","rid":"REQUEST_ID","id":123,"text":"updated"}
+ guest.delete {"op":"guest.delete","rid":"REQUEST_ID","id":123}
+
+optional guest.post fields: name, title, reply_to
+optional guest.edit fields: name, title
+
+Base64url is encoding, NOT encryption. Paths can be retained by browser history,
+proxies, security scanners, and upstream infrastructure. Do not put secrets in
+this v1 protocol.
+
+GET side effects remain non-standard HTTP semantics. Some read-only web
+retrieval systems may still refuse to execute /g/ even though it uses GET.
+"""
+
+
+def _decode_path_get_payload(
+    encoded: str,
+    cfg: Config,
+) -> tuple[str, str, Params, str]:
+    max_encoded = ((cfg.max_path_payload_bytes + 2) // 3) * 4
+    if len(encoded) > max_encoded:
+        raise StoreError(
+            f"path payload exceeds max_path_payload_bytes={cfg.max_path_payload_bytes}",
+            414,
+        )
+    if not encoded or "=" in encoded or not re.fullmatch(r"[A-Za-z0-9_-]+", encoded):
+        raise StoreError("path payload must be unpadded base64url", 400)
+
+    padded = encoded + "=" * ((4 - len(encoded) % 4) % 4)
+    try:
+        raw = base64.b64decode(padded, altchars=b"-_", validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise StoreError("invalid base64url path payload", 400) from exc
+    if len(raw) > cfg.max_path_payload_bytes:
+        raise StoreError(
+            f"path payload exceeds max_path_payload_bytes={cfg.max_path_payload_bytes}",
+            414,
+        )
+
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StoreError("path payload must decode to UTF-8 JSON", 400) from exc
+    if not isinstance(value, dict):
+        raise StoreError("path payload must be a JSON object", 400)
+
+    operation = value.get("op")
+    request_id = value.get("rid")
+    if not isinstance(operation, str) or operation not in PATH_GET_OPERATIONS:
+        raise StoreError(
+            "path GET op must be guest.post, guest.edit, or guest.delete",
+            400,
+        )
+    if not isinstance(request_id, str) or not PATH_GET_REQUEST_ID_RE.fullmatch(request_id):
+        raise StoreError(
+            "path GET rid must be 12..64 base64url-safe characters",
+            400,
+        )
+
+    allowed, required = PATH_GET_OPERATIONS[operation]
+    unknown = set(value) - set(allowed)
+    if unknown:
+        raise StoreError(f"unknown path GET fields: {sorted(unknown)}", 400)
+    missing = [field for field in required if field not in value]
+    if missing:
+        raise StoreError(f"missing path GET fields: {sorted(missing)}", 400)
+
+    bridge_params: Params = {}
+    for key, item in value.items():
+        if key in {"op", "rid"}:
+            continue
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            raise StoreError(f"path GET field {key} must be a string or integer", 400)
+        bridge_params[key] = [str(item)]
+
+    return (
+        operation,
+        request_id,
+        bridge_params,
+        hashlib.sha256(raw).hexdigest(),
+    )
 
 
 def _signed_identity_name(value: str | None, signer_id: str) -> str:
