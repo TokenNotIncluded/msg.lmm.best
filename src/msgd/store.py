@@ -2876,9 +2876,7 @@ class Store:
         if cursor is not None:
             created, post_id = cursor
             operator = ">" if order == "asc" else "<"
-            where.append(
-                f"(created {operator} ? OR (created = ? AND id {operator} ?))"
-            )
+            where.append(f"(created {operator} ? OR (created = ? AND id {operator} ?))")
             params.extend((created, created, post_id))
 
         sql = self._select_posts()
