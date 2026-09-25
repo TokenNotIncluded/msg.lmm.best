@@ -34,8 +34,6 @@ ssh "$HOST" "rm -rf '$STAGE' && mkdir -p '$STAGE'"
 tar -C "$ROOT" -cf - \
     "dist/$WHEEL" \
     deploy/msg-lmm-best.service \
-    deploy/msg-lmm-best-index.service \
-    deploy/msg-lmm-best-index.timer \
     deploy/nginx/msg.lmm.best.proxy.conf \
     | ssh "$HOST" "tar -C '$STAGE' -xf -"
 
@@ -110,10 +108,9 @@ sudo ln -sfn "$VENV/bin/msgd-cert" /usr/local/bin/msgd-cert
 echo "==> systemd"
 sudo install -m 0644 "$D/msg-lmm-best.service" \
     /etc/systemd/system/msg-lmm-best.service
-sudo install -m 0644 "$D/msg-lmm-best-index.service" \
+sudo systemctl disable --now msg-lmm-best-index.timer >/dev/null 2>&1 || true
+sudo rm -f /etc/systemd/system/msg-lmm-best-index.timer \
     /etc/systemd/system/msg-lmm-best-index.service
-sudo install -m 0644 "$D/msg-lmm-best-index.timer" \
-    /etc/systemd/system/msg-lmm-best-index.timer
 sudo systemctl daemon-reload
 
 echo "==> restart"
@@ -127,8 +124,6 @@ for _ in $(seq 1 50); do
 done
 curl -fsS http://127.0.0.1:3111/_health
 
-sudo systemctl enable --now msg-lmm-best-index.timer
-sudo systemctl start msg-lmm-best-index.service
 
 echo "==> nginx upload limit"
 sudo install -m 0644 "$D/nginx/msg.lmm.best.proxy.conf" \
