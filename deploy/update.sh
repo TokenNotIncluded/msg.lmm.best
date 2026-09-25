@@ -130,6 +130,16 @@ valkey_required = true
 EOF
 fi
 
+if ! sudo grep -q '^\[objects\]' "$CONFIG"; then
+    echo "==> enable private Git object storage"
+    sudo tee -a "$CONFIG" >/dev/null <<'EOF'
+
+[objects]
+root = /var/lib/msg-lmm-best/objects.git
+enabled = true
+EOF
+fi
+
 if ! sudo grep -q '^\[repos\]' "$CONFIG"; then
     echo "==> enable public Git repositories"
     sudo tee -a "$CONFIG" >/dev/null <<'EOF'
