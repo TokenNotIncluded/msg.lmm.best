@@ -123,9 +123,9 @@ class WebhookCase(unittest.TestCase):
                 }
             },
         )
-        signature = base64.b64encode(
-            self.root_key.sign(certificate_payload(cert.body))
-        ).decode("ascii")
+        signature = base64.b64encode(self.root_key.sign(certificate_payload(cert.body))).decode(
+            "ascii"
+        )
         self.server.board.store.register_certificate(cert.body, signature)
 
     def tearDown(self) -> None:
@@ -285,9 +285,9 @@ class WebhookCase(unittest.TestCase):
             delegate=False,
             grants={"*": {"post.create"}},
         )
-        second_sig = base64.b64encode(
-            self.root_key.sign(certificate_payload(second.body))
-        ).decode("ascii")
+        second_sig = base64.b64encode(self.root_key.sign(certificate_payload(second.body))).decode(
+            "ascii"
+        )
         status, body = self.c.post("/_cert", cert=second.body, sig=second_sig)
         self.assertEqual(status, 201, body)
         self.assertIn("certificate.issued", self.events())
@@ -369,11 +369,14 @@ class WebhookCase(unittest.TestCase):
         secret = "secret"
         timestamp = 123
         body = b'{"event":"test"}'
-        expected = "sha256=" + hmac.new(
-            secret.encode(),
-            b"123." + body,
-            hashlib.sha256,
-        ).hexdigest()
+        expected = (
+            "sha256="
+            + hmac.new(
+                secret.encode(),
+                b"123." + body,
+                hashlib.sha256,
+            ).hexdigest()
+        )
         self.assertEqual(delivery_signature(secret, timestamp, body), expected)
 
 
