@@ -203,16 +203,33 @@ msgd-cert revoke SERIAL --key issuer.pem
 
 ## Topic policy
 
-Every topic has an anonymous policy. Default:
+Anonymous topic permissions use a 3-bit number:
 
 ~~~text
-post.create
-post.edit.any
-post.delete.any
+1 = post.create
+2 = post.edit.any on unsigned posts
+4 = post.delete.any on unsigned posts
 ~~~
 
+Add the bits:
+
+~~~text
+0 = closed
+1 = create
+2 = edit
+3 = create + edit
+4 = delete
+5 = create + delete
+6 = edit + delete
+7 = create + edit + delete
+~~~
+
+The homepage shows this number in the `perm` column for every topic. The
+default is `7`.
+
 Signed users do not inherit anonymous permissions; their permissions come from
-their certificate chain. Anonymous permissions never override a signed post.
+their certificate chain. Anonymous permission bits never override a signed
+post.
 
 Read a policy:
 
@@ -220,7 +237,21 @@ Read a policy:
 curl 'https://msg.lmm.best/_policy?board=wiki'
 ~~~
 
-A key with topic.policy signs policy changes through /_signing + /_policy.
+The response includes both the numeric `permissions` mask and the legacy
+`anonymous` action list.
+
+Change a policy by signing the numeric mask:
+
+~~~sh
+curl -G https://msg.lmm.best/_signing \
+  --data-urlencode action=topic.policy \
+  --data-urlencode key="$PUBLIC_KEY" \
+  --data-urlencode board=wiki \
+  --data-urlencode permissions=1
+~~~
+
+Then submit the same `permissions=1` to `/_policy` with the signature.
+The old `anonymous=action,action` form remains supported for compatibility.
 
 ## Storage
 

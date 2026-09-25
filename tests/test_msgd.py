@@ -269,6 +269,27 @@ class ServerCase(unittest.TestCase):
             sig=sign_b64(key, info["payload_b64"]),
         )
 
+    def set_policy_bits(
+        self,
+        key: Ed25519PrivateKey,
+        board: str,
+        permissions: int,
+    ) -> tuple[int, str]:
+        value = str(permissions)
+        info = self.signing(
+            action="topic.policy",
+            key=public_b64(key),
+            board=board,
+            permissions=value,
+        )
+        return self.c.post(
+            "/_policy",
+            board=board,
+            permissions=value,
+            key=public_b64(key),
+            sig=sign_b64(key, info["payload_b64"]),
+        )
+
     def test_create_read_search(self) -> None:
         pid = self.publish("hello needle")
         status, body = self.c.get(f"/main/{pid}/raw")
@@ -431,6 +452,44 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status, 200)
         status, _ = self.signed_edit(member, pid, "after")
         self.assertEqual(status, 403)
+
+    def test_topic_permission_bits_drive_policy_and_homepage(self) -> None:
+        status, body = self.set_policy_bits(self.root_key, "main", 1)
+        self.assertEqual(status, 200, body)
+        policy = json.loads(body)
+        self.assertEqual(policy["permissions"], 1)
+        self.assertEqual(policy["anonymous"], ["post.create"])
+
+        status, home = self.c.get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("| board | posts | perm | description |", home)
+        self.assertIn("| /main | 0 | 1 |", home)
+        self.assertIn("1=create 2=edit unsigned 4=delete unsigned", home)
+
+        post_id = self.publish("create allowed")
+        self.assertEqual(
+            self.c.get("/publish", edit=str(post_id), text="blocked")[0],
+            403,
+        )
+        self.assertEqual(
+            self.c.get("/publish", delete=str(post_id))[0],
+            403,
+        )
+
+        status, body = self.c.get("/_policy", board="main")
+        self.assertEqual(status, 200)
+        policy = json.loads(body)
+        self.assertEqual(policy["permissions"], 1)
+
+    def test_topic_permission_mask_rejects_invalid_values(self) -> None:
+        status, _ = self.c.get(
+            "/_signing",
+            action="topic.policy",
+            key=public_b64(self.root_key),
+            board="main",
+            permissions="8",
+        )
+        self.assertEqual(status, 400)
 
     def test_topic_policy_can_disable_anonymous_create(self) -> None:
         status, _ = self.set_policy(self.root_key, "main", "")

@@ -143,12 +143,21 @@ service; /_ca exposes only the public trust anchor.
 
 ## topic policy
 
-Anonymous policy is per topic. Certificate permissions remain certificate-based.
+Anonymous policy is per topic and is represented by a 3-bit permission number:
 
- /_signing?action=topic.policy&key=K&board=wiki&anonymous=
- /_policy?board=wiki&anonymous=&key=K&sig=SIG
+ 1 = post.create
+ 2 = post.edit.any on unsigned posts
+ 4 = post.delete.any on unsigned posts
 
-Only a key with topic.policy for that topic (or the root key) may change it.
+Add the bits: 0=closed, 1=create only, 3=create+edit, 5=create+delete,
+7=create+edit+delete. Signed posts still require certificate authorization.
+
+ /_policy?board=wiki
+ /_signing?action=topic.policy&key=K&board=wiki&permissions=1
+ /_policy?board=wiki&permissions=1&key=K&sig=SIG
+
+The legacy anonymous=action,action form remains accepted. Only a key with
+topic.policy for that topic (or the root key) may change it.
 
 ## revocation
 
@@ -177,6 +186,11 @@ def render_schema(cfg: Config) -> str:
         "identity": "ed25519 public key; author_id=sha256(raw key)",
         "root_ca": "/_ca",
         "private_actions": ["inbox.read"],
+        "topic_permission_bits": {
+            "1": "post.create",
+            "2": "post.edit.any",
+            "4": "post.delete.any",
+        },
         "actions": [
             "post.create",
             "post.edit.self",
@@ -250,12 +264,18 @@ def render_index(cfg: Config, boards: list[dict[str, Any]], stats: dict[str, int
         "",
         f"storage: {stats['bytes']} / {stats['capacity']} bytes  posts: {stats['posts']} files: {stats.get('files', 0)}",
         "",
-        "| board | posts | description |",
-        "| --- | ---: | --- |",
+        "| board | posts | perm | description |",
+        "| --- | ---: | ---: | --- |",
     ]
     for board in boards:
-        lines.append(f"| /{board['name']} | {board['posts']} | {board['description']} |")
+        lines.append(
+            f"| /{board['name']} | {board['posts']} | {board['permissions']} | "
+            f"{board['description']} |"
+        )
     lines += [
+        "",
+        "perm bits: 1=create 2=edit unsigned 4=delete unsigned; add bits (7=all)",
+        "signed posts: certificate permissions apply instead",
         "",
         "read: /index",
         "search: /_search?q=TEXT",
