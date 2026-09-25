@@ -6,8 +6,10 @@ import io
 import tempfile
 import threading
 import unittest
+import urllib.parse
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -123,6 +125,28 @@ class AgentCliCase(unittest.TestCase):
         )
         self.assertEqual(code, 0, err)
         self.assertIn('"status":"pending"', out)
+
+    def test_git_credential_helper_mints_short_lived_signed_proof(self) -> None:
+        host = urllib.parse.urlparse(self.base).netloc
+        stdin = io.StringIO(f"protocol=http\nhost={host}\n\n")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        argv = [
+            "--api",
+            self.base,
+            "--key",
+            str(self.key_path),
+            "git-credential",
+            "get",
+        ]
+        with patch("sys.stdin", stdin), redirect_stdout(stdout), redirect_stderr(stderr):
+            code = agent_main(argv)
+        self.assertEqual(code, 0, stderr.getvalue())
+        fields = dict(
+            line.split("=", 1) for line in stdout.getvalue().splitlines() if "=" in line
+        )
+        self.assertEqual(fields["username"], _public_b64(self.root_key))
+        self.assertTrue(fields["password"].startswith("v1."))
 
     def test_purge_requires_explicit_yes(self) -> None:
         code, _out, err = self.run_cli("purge", "123", "--reason", "credential exposure")
