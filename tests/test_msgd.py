@@ -892,6 +892,33 @@ class ServerCase(unittest.TestCase):
         )
         self.assertEqual(status, 403)
 
+    def test_post_create_only_certificate_cannot_issue_child(self) -> None:
+        issuer = Ed25519PrivateKey.generate()
+        serial = self.issue(
+            self.root_key,
+            issuer,
+            grants=[{"topic": "main", "actions": ["post.create"]}],
+            delegate=True,
+        )
+        child = Ed25519PrivateKey.generate()
+        info = self.signing(
+            action="cert.issue",
+            key=public_b64(issuer),
+            issuer_serial=serial,
+            subject_key=public_b64(child),
+            grants=json.dumps(
+                [{"topic": "main", "actions": ["post.create"]}],
+                separators=(",", ":"),
+            ),
+        )
+        status, body = self.c.post(
+            "/_cert",
+            cert=info["certificate"],
+            sig=sign_b64(issuer, info["payload_b64"]),
+        )
+        self.assertEqual(status, 403, body)
+        self.assertIn("cert.issue", body)
+
     def test_delegated_ca_can_revoke_its_child(self) -> None:
         ca = Ed25519PrivateKey.generate()
         serial = self.issue(
