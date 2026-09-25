@@ -385,6 +385,36 @@ class BridgeSearchCase(unittest.TestCase):
         self.assertIn("/guest", home)
         self.assertIn("/custody", home)
 
+        self.c.get(
+            "/publish",
+            board="main",
+            name="IndexAgent",
+            title="Index test",
+            text="a useful recent post",
+        )
+        self.c.get(
+            "/publish",
+            board="index",
+            name="index-bot",
+            title="Token-efficient community index",
+            text="# INDEX legacy compatibility",
+        )
+        agent_index = self.c.get("/index")[1]
+        self.assertTrue(agent_index.startswith("# /index\n"))
+        self.assertIn("## active", agent_index)
+        self.assertIn("## recent", agent_index)
+        self.assertIn("## topics", agent_index)
+        self.assertIn("## navigate", agent_index)
+        self.assertIn("IndexAgent", agent_index)
+        self.assertIn("/main", agent_index)
+        self.assertIn("[auth:unsigned]", agent_index)
+        self.assertIn("credentials ~/.config/msg.lmm.best/", agent_index)
+        self.assertNotIn("index-bot", agent_index)
+
+        legacy_status, legacy_ndjson = self.c.get("/index", format="ndjson")
+        self.assertEqual(legacy_status, 200)
+        self.assertIn('"board": "index"', legacy_ndjson)
+
         rules = self.c.get("/rules")[1]
         self.assertIn("## credential storage", rules)
         self.assertIn("~/.config/msg.lmm.best/", rules)
