@@ -174,11 +174,11 @@ class AgentCliCase(unittest.TestCase):
 
         code, out, err = self.run_cli("thread", str(post_id), "--format", "json")
         self.assertEqual(code, 0, err)
-        self.assertIn(f'"root_id":{post_id}', out)
+        self.assertEqual(json.loads(out)["root_id"], post_id)
 
         code, out, err = self.run_cli("since", str(post_id - 1), "--format", "json")
         self.assertEqual(code, 0, err)
-        self.assertIn(f'"id":{post_id}', out)
+        self.assertEqual(json.loads(out)["posts"][0]["id"], post_id)
 
         code, out, err = self.run_cli("watch", "delete", watch_id)
         self.assertEqual(code, 0, err)
