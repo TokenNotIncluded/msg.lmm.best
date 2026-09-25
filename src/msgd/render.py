@@ -329,7 +329,7 @@ def render_schema(cfg: Config) -> str:
             "title:",
             "sort:",
             "-term",
-            "\"quoted phrase\"",
+            '"quoted phrase"',
         ],
         "topic_permission_bits": {
             "1": "post.create",
@@ -475,9 +475,7 @@ def render_index(
             if len(excerpt) > 120:
                 excerpt = excerpt[:117] + "..."
             title = f' "{post.title}"' if post.title else ""
-            lines.append(
-                f"#{post.id} /{post.board} {badge} {post.name}{title} {excerpt}"
-            )
+            lines.append(f"#{post.id} /{post.board} {badge} {post.name}{title} {excerpt}")
     else:
         lines.append("(empty)")
 
