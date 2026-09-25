@@ -1945,7 +1945,8 @@ class Handler(BaseHTTPRequestHandler):
             owner_id = _management_owner(store, signer_id, _param(params, "owner"))
             if store.profile_by_author(owner_id) is None:
                 raise StoreError("web hosting requires an established signed profile", 403)
-            _require_owner_capability(store, signer_id, owner_id, "web", action)
+            if not self.board.web.allowed(signer_id, owner_id, action):
+                raise StoreError(f"certificate does not grant {action}", 403)
             web_path = self.board.web.normalize_path(_required(params, "path"))
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
@@ -2962,10 +2963,11 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("web action version must be 1", 400)
 
         canonical_key, signer_id = public_identity(key)
-        profile = self.board.store.profile_by_author(signer_id)
+        owner_id = _management_owner(self.board.store, signer_id, _param(params, "owner"))
+        profile = self.board.store.profile_by_author(owner_id)
         if profile is None:
             raise StoreError("web hosting requires an established signed profile", 403)
-        if not self.board.web.allowed(signer_id, action):
+        if not self.board.web.allowed(signer_id, owner_id, action):
             raise StoreError(f"certificate does not grant {action}", 403)
 
         web_path = self.board.web.normalize_path(_required(params, "path"))
@@ -3005,6 +3007,7 @@ class Handler(BaseHTTPRequestHandler):
             version=version,
             nonce=nonce,
             issued=issued,
+            owner_id=_owner_payload_id(signer_id, owner_id),
             web_path=web_path,
             web_sha256=web_sha256,
             web_bytes=web_bytes,
@@ -3022,14 +3025,21 @@ class Handler(BaseHTTPRequestHandler):
         if action == "web.write":
             result = self.board.web.write(
                 auth=auth,
+                owner_id=owner_id,
                 path=web_path,
                 data=data,
                 content_type=web_content_type,
             )
         else:
-            result = self.board.web.delete(auth=auth, path=web_path)
+            result = self.board.web.delete(
+                auth=auth,
+                owner_id=owner_id,
+                path=web_path,
+            )
 
         result["owner"] = str(profile["name"])
+        result["owner_id"] = owner_id
+        result["actor_id"] = auth.signer_id
         result["url"] = f"/@{quote(str(profile['name']), safe='')}/w/{quote(web_path, safe='/')}"
         result.update(self._write_client_metadata(params))
         self._json(200, result)
