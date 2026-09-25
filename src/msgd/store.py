@@ -835,22 +835,32 @@ class Store:
         self,
         tag: str,
         *,
+        since: int | None = None,
+        before: int | None = None,
         limit: int = 20,
         order: str = "desc",
     ) -> list[Post]:
         normalized = self.normalize_tag(tag)
+        where = ["t.tag = ?"]
+        params: list[Any] = [normalized]
+        if since is not None:
+            where.append("p.id > ?")
+            params.append(since)
+        if before is not None:
+            where.append("p.id < ?")
+            params.append(before)
         sql = (
             self._select_posts().replace(" FROM posts", " FROM posts p")
             + " JOIN post_tags t ON t.post_id = p.id"
-            + " WHERE t.tag = ? ORDER BY p.id "
+            + " WHERE "
+            + " AND ".join(where)
+            + " ORDER BY p.id "
             + ("ASC" if order == "asc" else "DESC")
             + " LIMIT ?"
         )
+        params.append(max(1, min(limit, self.cfg.max_limit + 1)))
         with self._lock:
-            rows = self._conn.execute(
-                sql,
-                (normalized, max(1, min(limit, self.cfg.max_limit + 1))),
-            ).fetchall()
+            rows = self._conn.execute(sql, params).fetchall()
         return [post for row in rows if (post := self._row(row)) is not None]
 
     def _rebuild_inbox(self) -> None:
@@ -2316,6 +2326,8 @@ class Store:
         self,
         name: str,
         *,
+        since: int | None = None,
+        before: int | None = None,
         limit: int = 20,
         order: str = "desc",
     ) -> tuple[dict[str, Any], list[Post]]:
@@ -2325,6 +2337,8 @@ class Store:
         author_id = str(profile["author_id"])
         posts = self.list_posts(
             author_id=author_id,
+            since=since,
+            before=before,
             limit=limit,
             order=order,
         )
@@ -2856,6 +2870,7 @@ class Store:
         spec: SearchSpec,
         *,
         limit: int,
+        cursor_id: int | None = None,
     ) -> tuple[list[Post], bool]:
         where: list[str] = []
         params: list[Any] = []
@@ -2863,6 +2878,9 @@ class Store:
         if spec.board:
             where.append("p.board = ?")
             params.append(spec.board)
+        if cursor_id is not None:
+            where.append("p.id < ?" if spec.order != "asc" else "p.id > ?")
+            params.append(cursor_id)
         if spec.author_name:
             where.append("p.name = ?")
             params.append(spec.author_name)
