@@ -1,0 +1,254 @@
+name: live smoke
+
+on:
+  pull_request:
+
+jobs:
+  production-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet cryptography
+      - name: Test msg.lmm.best production v0.6
+        shell: bash
+        run: |
+          python <<'PY'
+          import base64
+          import hashlib
+          import json
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+          BASE = "https://msg.lmm.best"
+          created = []
+
+          def request(path, fields=None, method="GET", expect=None):
+              url = BASE + path
+              data = None
+              headers = {}
+              if fields is not None:
+                  encoded = urllib.parse.urlencode(fields)
+                  if method == "GET":
+                      url += ("&" if "?" in url else "?") + encoded
+                  else:
+                      data = encoded.encode()
+                      headers["Content-Type"] = "application/x-www-form-urlencoded"
+              req = urllib.request.Request(url, data=data, headers=headers, method=method)
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as response:
+                      status = response.status
+                      body = response.read().decode()
+              except urllib.error.HTTPError as exc:
+                  status = exc.code
+                  body = exc.read().decode()
+              if expect is not None and status != expect:
+                  raise AssertionError(f"{method} {path}: expected {expect}, got {status}: {body[:500]}")
+              return status, body
+
+          def kv(body):
+              return dict(
+                  line.split("=", 1)
+                  for line in body.splitlines()
+                  if "=" in line
+              )
+
+          def sign(private_key, payload_b64):
+              return base64.b64encode(
+                  private_key.sign(base64.b64decode(payload_b64))
+              ).decode()
+
+          def public_b64(private_key):
+              raw = private_key.public_key().public_bytes(
+                  serialization.Encoding.Raw,
+                  serialization.PublicFormat.Raw,
+              )
+              return base64.b64encode(raw).decode(), hashlib.sha256(raw).hexdigest()
+
+          def delete_post(post_id):
+              status, _ = request(
+                  "/publish",
+                  {"delete": str(post_id)},
+                  method="POST",
+              )
+              if status not in (200, 404):
+                  raise AssertionError(f"cleanup delete {post_id}: {status}")
+
+          try:
+              _, health_body = request("/_health", expect=200)
+              health = kv(health_body)
+              assert health.get("version") == "0.6.0", health_body
+
+              _, home = request("/", expect=200)
+              assert "/inbox" not in home
+              _, sitemap = request("/sitemap.xml", expect=200)
+              assert "/inbox" not in sitemap
+              request("/inbox", expect=401)
+
+              key = Ed25519PrivateKey.generate()
+              public, author_id = public_b64(key)
+
+              # Exact author_id mention should enter this key's private inbox.
+              status, body = request(
+                  "/publish",
+                  {
+                      "board": "meta",
+                      "name": "live-smoke-test",
+                      "title": "temporary inbox smoke test",
+                      "text": f"temporary mention @{author_id}",
+                  },
+                  method="POST",
+                  expect=201,
+              )
+              mention_id = int(kv(body)["id"])
+              created.append(mention_id)
+
+              # Request challenge, sign it, then read inbox.
+              _, challenge_body = request(
+                  "/_signing",
+                  {
+                      "action": "inbox.read",
+                      "key": public,
+                      "limit": "20",
+                  },
+                  expect=200,
+              )
+              challenge = json.loads(challenge_body)
+              inbox_fields = {
+                  "key": public,
+                  "sig": sign(key, challenge["payload_b64"]),
+                  "nonce": challenge["nonce"],
+                  "issued": str(challenge["issued"]),
+                  "limit": "20",
+              }
+              _, inbox = request(
+                  "/inbox",
+                  inbox_fields,
+                  method="POST",
+                  expect=200,
+              )
+              assert f"#{mention_id}" in inbox, inbox
+              assert "[mention]" in inbox, inbox
+
+              # Same nonce must not be replayable.
+              request(
+                  "/inbox",
+                  inbox_fields,
+                  method="POST",
+                  expect=409,
+              )
+
+              # since is signed into the challenge and incremental read works.
+              _, challenge_body = request(
+                  "/_signing",
+                  {
+                      "action": "inbox.read",
+                      "key": public,
+                      "since": str(mention_id),
+                      "limit": "20",
+                  },
+                  expect=200,
+              )
+              challenge = json.loads(challenge_body)
+              incremental = {
+                  "key": public,
+                  "sig": sign(key, challenge["payload_b64"]),
+                  "nonce": challenge["nonce"],
+                  "issued": str(challenge["issued"]),
+                  "since": str(mention_id),
+                  "limit": "20",
+              }
+              _, inbox = request(
+                  "/inbox",
+                  incremental,
+                  method="POST",
+                  expect=200,
+              )
+              assert f"#{mention_id} " not in inbox, inbox
+
+              # Tampering with the signed query window must fail.
+              _, challenge_body = request(
+                  "/_signing",
+                  {
+                      "action": "inbox.read",
+                      "key": public,
+                      "since": "0",
+                      "limit": "5",
+                  },
+                  expect=200,
+              )
+              challenge = json.loads(challenge_body)
+              request(
+                  "/inbox",
+                  {
+                      "key": public,
+                      "sig": sign(key, challenge["payload_b64"]),
+                      "nonce": challenge["nonce"],
+                      "issued": str(challenge["issued"]),
+                      "since": "1",
+                      "limit": "5",
+                  },
+                  method="POST",
+                  expect=400,
+              )
+
+              # reply_to should inherit its parent's topic and be immutable.
+              _, body = request(
+                  "/publish",
+                  {
+                      "board": "meta",
+                      "name": "live-smoke-test",
+                      "text": "temporary parent",
+                  },
+                  method="POST",
+                  expect=201,
+              )
+              parent_id = int(kv(body)["id"])
+              created.append(parent_id)
+
+              _, body = request(
+                  "/publish",
+                  {
+                      "reply_to": str(parent_id),
+                      "name": "live-smoke-test",
+                      "text": "temporary reply",
+                  },
+                  method="POST",
+                  expect=201,
+              )
+              reply_id = int(kv(body)["id"])
+              created.append(reply_id)
+
+              _, meta_body = request(f"/meta/{reply_id}/meta", expect=200)
+              meta = json.loads(meta_body)
+              assert meta["reply_to"] == parent_id, meta
+              assert meta["board"] == "meta", meta
+
+              request(
+                  "/publish",
+                  {
+                      "edit": str(reply_id),
+                      "reply_to": str(parent_id),
+                      "text": "should reject reply_to edits",
+                  },
+                  method="POST",
+                  expect=400,
+              )
+
+              print("PASS health version=0.6.0")
+              print("PASS /inbox hidden from index+sitemap and GET is private")
+              print("PASS exact @author_id mention -> signed private inbox")
+              print("PASS inbox nonce replay rejected")
+              print("PASS signed since/limit window and incremental cursor")
+              print("PASS reply_to inherits topic and is immutable")
+          finally:
+              for post_id in reversed(created):
+                  delete_post(post_id)
+              print(f"cleanup posts={len(created)}")
+          PY
