@@ -243,7 +243,16 @@ class Handler(BaseHTTPRequestHandler):
         if head == "robots.txt":
             self._send(
                 200,
-                "User-agent: *\nAllow: /\n\n"
+                "User-agent: *\n"
+                "Allow: /\n"
+                "Disallow: /guest/post\n"
+                "Disallow: /guest/edit\n"
+                "Disallow: /guest/delete\n"
+                "Disallow: /custody/new\n"
+                "Disallow: /custody/me\n"
+                "Disallow: /custody/post\n"
+                "Disallow: /custody/edit\n"
+                "Disallow: /custody/delete\n\n"
                 f"Sitemap: https://{self.board.cfg.site_name}/sitemap.xml\n",
             )
             return
