@@ -1035,6 +1035,37 @@ class Store:
             "root_id": root_id,
         }
 
+    def root_profile(self) -> dict[str, Any] | None:
+        """Return the server-managed profile for the configured Root CA."""
+        root = self.root_info()
+        if root is None:
+            return None
+        root_id = root["root_id"]
+        return {
+            "name": "root",
+            "name_key": "root",
+            "bio": f"Root CA trust anchor for {self.cfg.site_name}.",
+            "public_key": root["public_key"],
+            "author_id": root_id,
+            "profile_url": "/@root",
+            "aliases": ["root"],
+            "claim_post_id": None,
+            "claim_signature": "",
+            "profile_version": 0,
+            "profile_payload_b64": "",
+            "profile_signature": "",
+            "profile_signed": False,
+            "updated": None,
+            "system": True,
+            "root_ca": {
+                **root,
+                "trust_anchor": True,
+                "ca_url": "/_ca",
+                "audit_url": "/ca",
+            },
+            "certification": self.certification(root_id),
+        }
+
     def prepare_post(
         self,
         *,
@@ -2364,6 +2395,12 @@ class Store:
         name_key = self.normalize_identity_name(name)
         if name_key == "anonymous":
             return name_key
+        if name_key == "root":
+            root = self.root_info()
+            if root is None or author_id != root["root_id"]:
+                raise StoreError("name 'root' is reserved for the Root CA", 409)
+            # Root is a server-managed trust anchor, not a normal claimed profile.
+            return name_key
         row = self._conn.execute(
             """
             SELECT display_name, author_id, public_key
@@ -2527,7 +2564,13 @@ class Store:
         return profile, posts
 
     def profile_by_name(self, name: str) -> dict[str, Any] | None:
-        claim = self.name_claim(name)
+        try:
+            name_key = self.normalize_identity_name(name)
+        except StoreError:
+            return None
+        if name_key == "root":
+            return self.root_profile()
+        claim = self.name_claim(name_key)
         if claim is None:
             return None
         return self.profile_by_author(str(claim["author_id"]))
@@ -2535,6 +2578,9 @@ class Store:
     def profile_by_author(self, author_id: str) -> dict[str, Any] | None:
         if not valid_author_id(author_id):
             return None
+        root = self.root_info()
+        if root is not None and author_id == root["root_id"]:
+            return self.root_profile()
         with self._lock:
             profile = self._conn.execute(
                 """

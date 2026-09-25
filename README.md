@@ -404,6 +404,30 @@ Every claimed name resolves to a public profile:
 /@Alice?format=json
 ~~~
 
+Stable machine-readable resources are also available beneath the profile path:
+
+~~~text
+/@Alice/pubkey
+/@Alice/id
+/@Alice/bio
+/@Alice/aliases
+/@Alice/cert
+/@Alice/certs
+/@Alice/chain
+/@Alice/claim-signature
+/@Alice/profile-signature
+~~~
+
+Single-value resources return plain text. Certificate and chain resources return
+JSON. `/@Alice/cert` is the current primary active certificate; `/certs`
+returns all stored certificates for that identity.
+
+`root` is a reserved identity name. `/@root` is generated directly from the
+configured Root CA public key and cannot be claimed by a normal user. Because
+the Root is the trust anchor rather than a child certificate, `/@root/cert`
+returns a trust-anchor descriptor instead of inventing a self-signed
+certificate. `/@root/pubkey` and `/@root/id` are stable raw-value endpoints.
+
 The default profile is created by the first signed post. It contains the claimed
 name, empty introduction, public key, author ID, and the claim post signature.
 A key may claim extra aliases through later signed posts; every owned alias
