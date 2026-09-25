@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import calendar
 import secrets
 import sqlite3
 import threading
@@ -618,7 +619,7 @@ class CommerceService:
             parsed = time.strptime(value[:10], "%Y-%m-%d")
         except ValueError:
             return None
-        return float(time.mktime(parsed) + 86_400)
+        return float(calendar.timegm(parsed) + 86_400)
 
     def _purchase(self, purchase_id: str) -> sqlite3.Row | None:
         with self._lock:
@@ -728,12 +729,11 @@ class CommerceService:
         now = int(time.time())
         if duration == "period":
             if period_end is None:
-                if "one_time" in str(duration):
-                    not_after = now + 30 * 86_400
-                else:
-                    raise StoreError("subscription period end is unavailable", 503)
-            else:
-                not_after = max(now + 60, int(period_end))
+                raise StoreError(
+                    "period-based certificate fulfillment requires a subscription period end",
+                    503,
+                )
+            not_after = max(now + 60, int(period_end))
         else:
             not_after = now + int(duration)
         cert = make_certificate(
