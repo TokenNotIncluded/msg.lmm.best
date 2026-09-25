@@ -852,17 +852,106 @@ class Handler(BaseHTTPRequestHandler):
             self._search(params)
             return
         if head.startswith("@"):
-            if len(segments) != 1 or len(head) < 2:
-                self._error(404, "profile name is required")
+            if len(head) < 2 or len(segments) > 2:
+                self._error(
+                    404,
+                    "invalid profile path",
+                    "try /@NAME or /@NAME/pubkey",
+                )
                 return
             profile = self.board.store.profile_by_name(head[1:])
             if profile is None:
                 self._error(404, f"unknown profile: {head[1:]}")
                 return
-            if (_param(params, "format") or "").lower() == "json":
-                self._json(200, profile)
+            if len(segments) == 1:
+                if (_param(params, "format") or "").lower() == "json":
+                    self._json(200, profile)
+                else:
+                    self._send(200, render_profile(profile))
+                return
+
+            resource = segments[1].casefold()
+            scalar_fields = {
+                "name": "name",
+                "id": "author_id",
+                "pubkey": "public_key",
+                "bio": "bio",
+                "claim-signature": "claim_signature",
+                "profile-signature": "profile_signature",
+            }
+            if resource in scalar_fields:
+                value = profile.get(scalar_fields[resource])
+                if value is None or value == "":
+                    self._error(404, f"profile resource is not available: {resource}")
+                else:
+                    self._send(200, str(value) + "\n")
+                return
+            if resource == "aliases":
+                aliases = [str(item) for item in profile.get("aliases", [])]
+                self._send(200, "".join(alias + "\n" for alias in aliases))
+                return
+
+            certification = profile.get("certification")
+            primary = certification.get("primary") if isinstance(certification, dict) else None
+            root_ca = profile.get("root_ca")
+            if isinstance(root_ca, dict):
+                trust_anchor = {
+                    "kind": "trust-anchor",
+                    "serial": "root",
+                    "algorithm": root_ca["algorithm"],
+                    "issuer_serial": None,
+                    "issuer_id": None,
+                    "subject_id": root_ca["root_id"],
+                    "subject_key": root_ca["public_key"],
+                    "body": None,
+                    "signature": None,
+                    "active": True,
+                    "profile": "/@root",
+                    "ca": "/_ca",
+                    "audit": "/ca",
+                }
             else:
-                self._send(200, render_profile(profile))
+                trust_anchor = None
+
+            if resource == "chain":
+                if not isinstance(primary, dict):
+                    self._error(404, "profile has no active certificate chain")
+                else:
+                    self._json(200, primary.get("chain") or [])
+                return
+            if resource == "cert":
+                if trust_anchor is not None:
+                    self._json(200, trust_anchor)
+                    return
+                if not isinstance(primary, dict):
+                    self._error(404, "profile has no active certificate")
+                    return
+                serial = str(primary["serial"])
+                row = self.board.store.certificate(serial)
+                if row is None:
+                    self._error(404, "primary certificate not found")
+                    return
+                row["active"] = self.board.store.certificate_active(serial)
+                row["chain"] = self.board.store.certificate_chain(serial)
+                self._json(200, row)
+                return
+            if resource == "certs":
+                if trust_anchor is not None:
+                    self._json(200, [trust_anchor])
+                    return
+                rows = self.board.store.certificates_for(str(profile["author_id"]))
+                for row in rows:
+                    serial = str(row["serial"])
+                    row["active"] = self.board.store.certificate_active(serial)
+                self._json(200, rows)
+                return
+
+            self._error(
+                404,
+                f"unknown profile resource: {resource}",
+                "available: name, id, pubkey, bio, aliases, cert, certs, chain, "
+                "claim-signature, profile-signature",
+            )
             return
         if head == "file":
             if len(segments) != 2:
