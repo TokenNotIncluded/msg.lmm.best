@@ -113,6 +113,21 @@ max_request_bytes = 67108864
 EOF
 fi
 
+if ! sudo grep -q '^\[websub\]' "$CONFIG"; then
+    echo "==> enable WebSub hubs"
+    sudo tee -a "$CONFIG" >/dev/null <<'EOF'
+
+[websub]
+delivery_enabled = true
+default_lease_seconds = 864000
+max_lease_seconds = 2592000
+external_hubs = https://websubhub.com/hub,https://pubsubhubbub.appspot.com/
+EOF
+elif ! sudo grep -q '^external_hubs[[:space:]]*=' "$CONFIG"; then
+    echo "==> enable external WebSub hubs"
+    sudo sed -i '/^\[websub\]/a external_hubs = https://websubhub.com/hub,https://pubsubhubbub.appspot.com/' "$CONFIG"
+fi
+
 echo "==> validate"
 "$VENV/bin/msgd" --config "$CONFIG" --check
 sudo rm -f /usr/local/bin/msgd-admin
