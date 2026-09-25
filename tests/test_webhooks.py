@@ -187,6 +187,24 @@ class WebhookCase(unittest.TestCase):
     def events(self) -> list[str]:
         return [str(row["event"]) for row in self.server.board.store.due_webhook_deliveries(100)]
 
+    def test_uncertified_key_can_configure_webhook(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        status, created = self.signed_webhook(
+            key,
+            "webhook.create",
+            url="https://hooks.example.com/no-cert",
+            events="reply.created",
+        )
+        self.assertEqual(status, 201)
+        assert isinstance(created, dict)
+        self.assertIn("secret", created)
+
+        status, listed = self.signed_webhook(key, "webhook.list")
+        self.assertEqual(status, 200)
+        assert isinstance(listed, list)
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["events"], ["reply.created"])
+
     def test_signed_configuration_and_event_catalog(self) -> None:
         events = ",".join(
             [
