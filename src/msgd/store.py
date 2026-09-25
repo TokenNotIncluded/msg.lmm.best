@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from msgd.config import Config
+from msgd.search import SearchSpec
 from msgd.crypto import (
     ACTIONS,
     Certificate,
@@ -2003,6 +2004,128 @@ class Store:
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [post for row in rows if (post := self._row(row)) is not None]
+
+    def search_posts(
+        self,
+        spec: SearchSpec,
+        *,
+        limit: int,
+    ) -> tuple[list[Post], bool]:
+        where: list[str] = []
+        params: list[Any] = []
+
+        if spec.board:
+            where.append("p.board = ?")
+            params.append(spec.board)
+        if spec.author_name:
+            where.append("p.name = ?")
+            params.append(spec.author_name)
+        if spec.author_id:
+            if not valid_author_id(spec.author_id):
+                raise StoreError("author: must be a 64-character author id", 400)
+            where.append("p.author_id = ?")
+            params.append(spec.author_id)
+        if spec.after is not None:
+            where.append("p.created >= ?")
+            params.append(spec.after)
+        if spec.before is not None:
+            where.append("p.created < ?")
+            params.append(spec.before)
+        if spec.reply_to is not None:
+            where.append("p.reply_to = ?")
+            params.append(spec.reply_to)
+        elif spec.replies_only:
+            where.append("p.reply_to IS NOT NULL")
+        if spec.has_files is True:
+            where.append("EXISTS (SELECT 1 FROM attachments a WHERE a.post_id = p.id)")
+        elif spec.has_files is False:
+            where.append("NOT EXISTS (SELECT 1 FROM attachments a WHERE a.post_id = p.id)")
+
+        for term in spec.terms:
+            where.append("(p.title LIKE ? OR p.body LIKE ?)")
+            needle = f"%{term}%"
+            params.extend((needle, needle))
+        for term in spec.excluded_terms:
+            where.append("NOT (p.title LIKE ? OR p.body LIKE ?)")
+            needle = f"%{term}%"
+            params.extend((needle, needle))
+        for term in spec.title_terms:
+            where.append("p.title LIKE ?")
+            params.append(f"%{term}%")
+
+        dynamic_auth = spec.auth in {"certified", "certified-ca", "signed-inactive"}
+        if spec.auth == "unsigned":
+            where.append("p.author_id IS NULL AND p.system = 0 AND p.custody_id IS NULL")
+        elif spec.auth == "system":
+            where.append("p.system = 1")
+        elif spec.auth == "custodial":
+            where.append("p.custody_id IS NOT NULL")
+        elif spec.auth == "signed":
+            where.append("p.author_id IS NOT NULL")
+        elif spec.auth == "root":
+            root = self.root_info()
+            if root is None:
+                return [], False
+            where.append("p.actor_id = ?")
+            params.append(root["root_id"])
+
+        base = (
+            "SELECT p.id, p.board, p.seq, p.name, p.title, p.body, p.created, p.updated, "
+            "p.nbytes, p.author_key, p.author_id, p.actor_key, p.actor_id, p.signature, "
+            "p.sig_version, p.sig_nonce, p.sig_issued, p.reply_to, p.system, p.custody_id "
+            "FROM posts p"
+        )
+        if where:
+            base += " WHERE " + " AND ".join(where)
+        base += " ORDER BY p.id " + ("ASC" if spec.order == "asc" else "DESC")
+
+        if not dynamic_auth:
+            with self._lock:
+                rows = self._conn.execute(base + " LIMIT ?", [*params, limit + 1]).fetchall()
+            posts = [post for row in rows if (post := self._row(row)) is not None]
+            return posts[: limit + 1], False
+
+        collected: list[Post] = []
+        offset = 0
+        scan_cap = 5000
+        chunk = 200
+        capped = False
+
+        while len(collected) <= limit and offset < scan_cap:
+            with self._lock:
+                rows = self._conn.execute(
+                    base + " LIMIT ? OFFSET ?",
+                    [*params, chunk, offset],
+                ).fetchall()
+            if not rows:
+                break
+            offset += len(rows)
+            for row in rows:
+                post = self._row(row)
+                if post is None:
+                    continue
+                status = self.post_authentication(post)["status"]
+                if spec.auth == "certified" and status == "certified":
+                    collected.append(post)
+                elif spec.auth == "certified-ca":
+                    auth = self.post_authentication(post)
+                    actor = auth.get("actor")
+                    if (
+                        status == "certified"
+                        and isinstance(actor, dict)
+                        and actor.get("role") == "ca"
+                    ):
+                        collected.append(post)
+                elif spec.auth == "signed-inactive" and status == "signed-inactive":
+                    collected.append(post)
+                if len(collected) > limit:
+                    break
+            if len(rows) < chunk:
+                break
+
+        if offset >= scan_cap and len(collected) <= limit:
+            capped = True
+        return collected[: limit + 1], capped
 
     def inbox(
         self,
