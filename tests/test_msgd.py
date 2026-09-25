@@ -556,6 +556,79 @@ class ServerCase(unittest.TestCase):
             "pending",
         )
 
+    def test_delegated_ca_can_approve_matching_request(self) -> None:
+        ca = Ed25519PrivateKey.generate()
+        ca_serial = self.issue(
+            self.root_key,
+            ca,
+            grants=[
+                {
+                    "topic": "skills",
+                    "actions": [
+                        "post.create",
+                        "post.edit.self",
+                        "post.delete.self",
+                        "cert.issue",
+                        "cert.revoke",
+                    ],
+                }
+            ],
+            delegate=True,
+        )
+        applicant = Ed25519PrivateKey.generate()
+        public = public_b64(applicant)
+        grants = '[{"topic":"skills","actions":["post.create","post.edit.self"]}]'
+        info = self.signing(
+            action="cert.request",
+            key=public,
+            issuer_serial=ca_serial,
+            grants=grants,
+        )
+        status, body = self.c.post(
+            "/_csr",
+            key=public,
+            sig=sign_b64(applicant, info["payload_b64"]),
+            nonce=info["nonce"],
+            issued=str(info["issued"]),
+            issuer_serial=ca_serial,
+            grants=grants,
+        )
+        self.assertEqual(status, 201, body)
+        csr_id = json.loads(body)["id"]
+
+        ca_public = public_b64(ca)
+        ca_id = json.loads(self.c.get("/_cert", serial=ca_serial)[1])["subject_id"]
+        cert = make_certificate(
+            serial="3" * 32,
+            issuer_serial=ca_serial,
+            issuer_id=ca_id,
+            subject_key=public,
+            not_before=int(time.time()) - 60,
+            not_after=int(time.time()) + 86400,
+            delegate=False,
+            grants={"skills": ("post.create", "post.edit.self")},
+        )
+        cert_sig = base64.b64encode(
+            ca.sign(certificate_payload(cert.body))
+        ).decode()
+        decision = self.signing(
+            action="cert.request.decision",
+            key=ca_public,
+            csr_id=str(csr_id),
+            decision="approve",
+        )
+        status, body = self.c.post(
+            "/_csr",
+            csr_id=str(csr_id),
+            decision="approve",
+            key=ca_public,
+            sig=sign_b64(ca, decision["payload_b64"]),
+            cert=cert.body,
+            cert_sig=cert_sig,
+        )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(self.server.board.store.certificate_active(cert.serial))
+
     def test_delegated_ca_can_revoke_its_child(self) -> None:
         ca = Ed25519PrivateKey.generate()
         serial = self.issue(
