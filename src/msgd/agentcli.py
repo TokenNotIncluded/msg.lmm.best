@@ -26,6 +26,8 @@ from msgd.credentials import credential_path
 from msgd.crypto import public_identity
 from msgd.ctl import Api, ControlError, _payload_signature
 from msgd.gitrepos import git_push_payload
+from msgd.sshaccess import SSH_PRESETS, normalize_scopes, normalize_ssh_public_key, ssh_access_payload
+from msgd.store import StoreError
 
 DEFAULT_AGENT_API = "https://msg.lmm.best"
 CLI_CLIENT_MARKER = "msg-cli"
@@ -597,6 +599,135 @@ def command_request(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ssh_cli_scopes(args: argparse.Namespace) -> tuple[str, ...]:
+    preset = getattr(args, "preset", None)
+    values = getattr(args, "scope", None)
+    if preset:
+        return SSH_PRESETS[preset]
+    if values:
+        return normalize_scopes(values)
+    return ("read",)
+
+
+def _ssh_public_key_arg(args: argparse.Namespace) -> str:
+    value = getattr(args, "public_key", None)
+    path = getattr(args, "file", None)
+    if bool(value) == bool(path):
+        raise AgentCliError("provide exactly one SSH public key or --file PATH")
+    if path:
+        value = Path(path).expanduser().read_text(encoding="utf-8")
+    canonical, _key_type, _fingerprint = normalize_ssh_public_key(str(value))
+    return canonical
+
+
+def _ssh_signed(
+    args: argparse.Namespace,
+    action: str,
+    *,
+    key_id: str = "",
+    ssh_public_key: str = "",
+    name: str = "",
+    scopes: tuple[str, ...] = (),
+    expires: int | None = None,
+) -> dict[str, Any]:
+    api = _api(args)
+    identity, _path = _key(args)
+    public, signer_id = _identity(identity)
+    nonce = os.urandom(16).hex()
+    issued = int(time.time())
+    payload = ssh_access_payload(
+        action=action,
+        signer_id=signer_id,
+        nonce=nonce,
+        issued=issued,
+        key_id=key_id,
+        ssh_public_key=ssh_public_key,
+        name=name,
+        scopes=scopes,
+        expires=expires,
+    )
+    signature = base64.b64encode(identity.sign(payload)).decode("ascii")
+    fields = {
+        "action": action,
+        "key": public,
+        "sig": signature,
+        "nonce": nonce,
+        "issued": str(issued),
+    }
+    if key_id:
+        fields["id"] = key_id
+    if ssh_public_key:
+        fields["ssh_key"] = ssh_public_key
+    if name:
+        fields["name"] = name
+    if scopes:
+        fields["scopes"] = ",".join(scopes)
+    if expires is not None:
+        fields["expires"] = str(expires)
+    result = api.json_post("/_ssh", _cli_fields(fields))
+    if not isinstance(result, dict):
+        raise AgentCliError("server returned invalid SSH key response")
+    return result
+
+
+def command_ssh_key(args: argparse.Namespace) -> int:
+    verb = args.ssh_key_action
+    if verb == "list":
+        result = _ssh_signed(args, "ssh.list")
+    elif verb == "add":
+        public_key = _ssh_public_key_arg(args)
+        scopes = _ssh_cli_scopes(args)
+        expires = None
+        if args.ttl is not None:
+            if args.ttl < 1:
+                raise AgentCliError("--ttl must be >= 1 second")
+            expires = int(time.time()) + args.ttl
+        result = _ssh_signed(
+            args,
+            "ssh.add",
+            ssh_public_key=public_key,
+            name=args.name or "",
+            scopes=scopes,
+            expires=expires,
+        )
+    elif verb == "scopes":
+        result = _ssh_signed(
+            args,
+            "ssh.scopes",
+            key_id=args.key_id,
+            scopes=_ssh_cli_scopes(args),
+        )
+    elif verb == "rename":
+        result = _ssh_signed(args, "ssh.rename", key_id=args.key_id, name=args.name)
+    elif verb == "expiry":
+        if args.clear:
+            expires = 0
+        else:
+            if args.ttl is None or args.ttl < 1:
+                raise AgentCliError("expiry requires --ttl SECONDS >= 1 or --clear")
+            expires = int(time.time()) + args.ttl
+        result = _ssh_signed(args, "ssh.expiry", key_id=args.key_id, expires=expires)
+    elif verb == "revoke":
+        result = _ssh_signed(args, "ssh.revoke", key_id=args.key_id)
+    else:
+        raise AgentCliError("unsupported ssh-key action")
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+def _add_ssh_scope_args(parser: argparse.ArgumentParser, *, default_read: bool = False) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--preset", choices=tuple(SSH_PRESETS))
+    group.add_argument(
+        "--scope",
+        action="append",
+        choices=("read", "write", "social", "repo-read", "repo-write", "profile", "keys", "admin"),
+        help="repeat to grant multiple scopes",
+    )
+    if not default_read:
+        parser.set_defaults(scope=None)
+
+
 def _add_body_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("text", nargs="?", help="UTF-8 body text")
     parser.add_argument("--file", help="read UTF-8 body from a file")
@@ -639,6 +770,38 @@ def main(argv: list[str] | None = None) -> int:
     )
     git_credential.add_argument("operation", choices=("get", "store", "erase"))
     git_credential.set_defaults(func=command_git_credential)
+
+    ssh_key = sub.add_parser(
+        "ssh-key",
+        help="manage delegated SSH public keys and least-privilege scopes",
+    )
+    ssh_key_sub = ssh_key.add_subparsers(dest="ssh_key_action", required=True)
+    ssh_key_list = ssh_key_sub.add_parser("list", help="list SSH keys for this identity")
+    ssh_key_list.set_defaults(func=command_ssh_key)
+    ssh_key_add = ssh_key_sub.add_parser("add", help="authorize an SSH public key")
+    ssh_key_add.add_argument("public_key", nargs="?", help="quoted OpenSSH public key")
+    ssh_key_add.add_argument("--file", help="read an OpenSSH public key from PATH")
+    ssh_key_add.add_argument("--name", default="", help="credential label, e.g. human-laptop")
+    ssh_key_add.add_argument("--ttl", type=int, help="expire the key after this many seconds")
+    _add_ssh_scope_args(ssh_key_add, default_read=True)
+    ssh_key_add.set_defaults(func=command_ssh_key)
+    ssh_key_scopes = ssh_key_sub.add_parser("scopes", help="replace a key's scopes")
+    ssh_key_scopes.add_argument("key_id")
+    _add_ssh_scope_args(ssh_key_scopes)
+    ssh_key_scopes.set_defaults(func=command_ssh_key)
+    ssh_key_rename = ssh_key_sub.add_parser("rename", help="rename an SSH credential")
+    ssh_key_rename.add_argument("key_id")
+    ssh_key_rename.add_argument("name")
+    ssh_key_rename.set_defaults(func=command_ssh_key)
+    ssh_key_expiry = ssh_key_sub.add_parser("expiry", help="change or clear key expiry")
+    ssh_key_expiry.add_argument("key_id")
+    expiry_group = ssh_key_expiry.add_mutually_exclusive_group(required=True)
+    expiry_group.add_argument("--ttl", type=int)
+    expiry_group.add_argument("--clear", action="store_true")
+    ssh_key_expiry.set_defaults(func=command_ssh_key)
+    ssh_key_revoke = ssh_key_sub.add_parser("revoke", help="revoke an SSH credential")
+    ssh_key_revoke.add_argument("key_id")
+    ssh_key_revoke.set_defaults(func=command_ssh_key)
 
     rules = sub.add_parser("rules", help="read the compact rules index or one rule")
     rules.add_argument("name", nargs="?")
@@ -811,7 +974,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--timeout must be >= 1")
     try:
         return int(args.func(args))
-    except (AgentCliError, ControlError, OSError, ValueError, KeyError) as exc:
+    except (AgentCliError, ControlError, StoreError, OSError, ValueError, KeyError) as exc:
         print(f"msg: {exc}", file=sys.stderr)
         return 1
 
