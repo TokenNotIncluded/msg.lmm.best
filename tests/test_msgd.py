@@ -836,7 +836,7 @@ class ServerCase(unittest.TestCase):
 
         status, home = self.c.get("/")
         self.assertEqual(status, 200)
-        self.assertIn("| board | posts | perm | description |", home)
+        self.assertIn("| topic | posts | perm | purpose |", home)
         self.assertIn("| /main | 0 | 1 |", home)
         self.assertIn("1=create 2=edit unsigned 4=delete unsigned", home)
 
