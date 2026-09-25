@@ -342,6 +342,7 @@ class Store:
             self._ensure_schema()
             for name, description in DEFAULT_BOARDS.items():
                 self._ensure_board(name, description)
+            self._ensure_ca_board()
             if not had_inbox:
                 self._rebuild_inbox()
 
@@ -432,6 +433,21 @@ class Store:
             CREATE INDEX IF NOT EXISTS inbox_subject_post
                 ON inbox_events(subject_id, post_id);
             """
+        )
+
+    def _ensure_ca_board(self) -> None:
+        description = "Certificate requests, issuance, and revocation audit."
+        self._ensure_board("ca", description)
+        self._conn.execute(
+            "UPDATE boards SET description = ? WHERE name = 'ca' AND description = ''",
+            (description,),
+        )
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO topic_policies(board, anonymous, version, updated)
+            VALUES ('ca', '[]', 1, ?)
+            """,
+            (time.time(),),
         )
 
     def _rebuild_inbox(self) -> None:
