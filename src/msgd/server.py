@@ -935,6 +935,7 @@ class Handler(BaseHTTPRequestHandler):
                 issued=issued,
                 profile_name=name,
                 profile_bio=bio,
+                profile_public_key=key,
             )
             self._json(
                 200,
@@ -1482,6 +1483,7 @@ class Handler(BaseHTTPRequestHandler):
             issued=issued,
             profile_name=name,
             profile_bio=bio,
+            profile_public_key=canonical_key,
         )
         auth = signed_request(
             canonical_key,
