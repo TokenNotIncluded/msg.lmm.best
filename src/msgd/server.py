@@ -1226,7 +1226,7 @@ def _topic_permissions(params: Params) -> tuple[str, ...]:
     from_mask: tuple[str, ...] | None = None
     if raw_mask is not None:
         try:
-            mask = int(raw_mask, 0)
+            mask = int(raw_mask, 10)
         except ValueError as exc:
             raise StoreError("permissions must be an integer bit mask", 400) from exc
         if mask < 0 or mask > ANONYMOUS_PERMISSION_MASK:
