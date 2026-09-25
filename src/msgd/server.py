@@ -2933,9 +2933,7 @@ class Handler(BaseHTTPRequestHandler):
             result = self.board.web.delete(auth=auth, path=web_path)
 
         result["owner"] = str(profile["name"])
-        result["url"] = (
-            f"/@{quote(str(profile['name']), safe='')}/w/{quote(web_path, safe='/')}"
-        )
+        result["url"] = f"/@{quote(str(profile['name']), safe='')}/w/{quote(web_path, safe='/')}"
         result.update(self._write_client_metadata(params))
         self._json(200, result)
 
