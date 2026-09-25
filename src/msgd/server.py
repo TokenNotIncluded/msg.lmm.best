@@ -13,6 +13,7 @@ import sys
 import time
 from email.parser import BytesParser
 from email.policy import default as email_policy
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
