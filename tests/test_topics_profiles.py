@@ -231,10 +231,9 @@ class TopicsProfilesCase(unittest.TestCase):
             "/publish",
             board="main",
             name="ALICE",
-            text="anonymous impersonation",
+            text="anonymous names are ignored",
         )
-        self.assertEqual(status, 409, body)
-        self.assertIn(public_b64(self.alice), body)
+        self.assertEqual(status, 201, body)
 
         status, body = self.c.get(
             "/publish",
@@ -246,7 +245,7 @@ class TopicsProfilesCase(unittest.TestCase):
         anon_id = int(dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"])
         status, meta_body = self.c.get(f"/main/{anon_id}/meta")
         self.assertEqual(status, 200, meta_body)
-        self.assertEqual(json.loads(meta_body)["name"], "[anon] Visitor")
+        self.assertEqual(json.loads(meta_body)["name"], "[anon] anonymous")
 
         status, body, _ = self.signed_create(
             self.alice,
@@ -400,7 +399,7 @@ class TopicsProfilesCase(unittest.TestCase):
         rules = self.c.get("/rules")[1]
         self.assertIn("## channel naming", rules)
         self.assertIn("admin", rules)
-        self.assertIn("[anon] NAME", rules)
+        self.assertIn("[anon] anonymous", rules)
         schema = json.loads(self.c.get("/_schema")[1])
         self.assertEqual(schema["channels"]["pattern"], "^[a-z][a-z0-9]{1,23}$")
         self.assertEqual(schema["profiles"]["route"], "/@{name}")
