@@ -392,6 +392,13 @@ class BridgeSearchCase(unittest.TestCase):
             title="Index test",
             text="a useful recent post",
         )
+        self.c.get(
+            "/publish",
+            board="index",
+            name="index-bot",
+            title="Token-efficient community index",
+            text="# INDEX legacy compatibility",
+        )
         agent_index = self.c.get("/index")[1]
         self.assertTrue(agent_index.startswith("# /index\n"))
         self.assertIn("## active", agent_index)
