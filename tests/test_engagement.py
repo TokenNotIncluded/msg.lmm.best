@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import tempfile
@@ -26,8 +27,6 @@ def public_b64(key: Ed25519PrivateKey) -> str:
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
     )
-    import base64
-
     return base64.b64encode(raw).decode("ascii")
 
 
@@ -47,6 +46,23 @@ class Client:
             finally:
                 exc.close()
 
+    def post(self, path: str, **params: str) -> tuple[int, str]:
+        data = urllib.parse.urlencode(params).encode()
+        request = urllib.request.Request(
+            self.base + path,
+            data=data,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, response.read().decode()
+        except urllib.error.HTTPError as exc:
+            try:
+                return exc.code, exc.read().decode()
+            finally:
+                exc.close()
+
 
 @unittest.skipUnless(os.environ.get("VALKEY_TEST_URL"), "VALKEY_TEST_URL is not configured")
 class EngagementCase(unittest.TestCase):
@@ -57,6 +73,7 @@ class EngagementCase(unittest.TestCase):
         root_public.write_text(public_b64(root_key) + "\n", encoding="utf-8")
         self.prefix = "msgd-test-" + uuid.uuid4().hex
         self.valkey_url = os.environ["VALKEY_TEST_URL"]
+        self.like_key = Ed25519PrivateKey.generate()
 
         cfg = Config(
             host="127.0.0.1",
@@ -102,7 +119,33 @@ class EngagementCase(unittest.TestCase):
         self.assertEqual(status, 200, body)
         return json.loads(body)
 
-    def test_views_comments_and_rankings_without_likes(self) -> None:
+    def set_like(self, post_id: int, liked: bool) -> dict[str, str]:
+        public = public_b64(self.like_key)
+        signed_action = "post.like" if liked else "post.unlike"
+        status, body = self.c.get(
+            "/_signing",
+            action=signed_action,
+            key=public,
+            id=str(post_id),
+        )
+        self.assertEqual(status, 200, body)
+        challenge = json.loads(body)
+        signature = base64.b64encode(
+            self.like_key.sign(base64.b64decode(challenge["payload_b64"]))
+        ).decode("ascii")
+        status, body = self.c.post(
+            "/like",
+            id=str(post_id),
+            action="like" if liked else "unlike",
+            key=public,
+            sig=signature,
+            nonce=str(challenge["nonce"]),
+            issued=str(challenge["issued"]),
+        )
+        self.assertEqual(status, 200, body)
+        return dict(line.split("=", 1) for line in body.splitlines() if "=" in line)
+
+    def test_views_comments_likes_and_rankings(self) -> None:
         parent = self.publish("parent")
         first_reply = self.publish("first reply", reply_to=parent)
         self.publish("second reply", reply_to=parent)
@@ -111,7 +154,13 @@ class EngagementCase(unittest.TestCase):
         initial = self.meta(parent)
         self.assertEqual(initial["engagement"]["views"], 0)
         self.assertEqual(initial["engagement"]["comments"], 2)
-        self.assertEqual(initial["likes"], "unsupported")
+        self.assertEqual(initial["engagement"]["likes"], 0)
+
+        first_like = self.set_like(parent, True)
+        self.assertEqual(first_like["likes"], "1")
+        duplicate_like = self.set_like(parent, True)
+        self.assertEqual(duplicate_like["changed"], "0")
+        self.assertEqual(duplicate_like["likes"], "1")
 
         self.assertEqual(self.c.get(f"/main/{parent}")[0], 200)
         self.assertEqual(self.c.get(f"/main/{parent}")[0], 200)
@@ -121,13 +170,19 @@ class EngagementCase(unittest.TestCase):
         parent_meta = self.meta(parent)
         self.assertEqual(parent_meta["engagement"]["views"], 3)
         self.assertEqual(parent_meta["engagement"]["comments"], 2)
-        self.assertGreater(parent_meta["engagement"]["hot"], 10)
+        self.assertEqual(parent_meta["engagement"]["likes"], 1)
+        self.assertGreater(parent_meta["engagement"]["hot"], 12)
 
         status, views = self.c.get("/hot", sort="views")
         self.assertEqual(status, 200, views)
         self.assertLess(views.index(f"#{parent} "), views.index(f"#{other} "))
         self.assertIn("3 views", views)
         self.assertIn("2 comments", views)
+
+        status, likes = self.c.get("/hot", sort="likes")
+        self.assertEqual(status, 200, likes)
+        self.assertLess(likes.index(f"#{parent} "), likes.index(f"#{other} "))
+        self.assertIn("1 likes", likes)
 
         status, comments = self.c.get("/hot", sort="comments")
         self.assertEqual(status, 200, comments)
@@ -144,8 +199,12 @@ class EngagementCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.meta(parent)["engagement"]["comments"], 1)
 
+        unlike = self.set_like(parent, False)
+        self.assertEqual(unlike["likes"], "0")
+        self.assertEqual(self.meta(parent)["engagement"]["likes"], 0)
+
         schema = json.loads(self.c.get("/_schema")[1])
-        self.assertFalse(schema["engagement"]["likes"])
+        self.assertTrue(schema["engagement"]["likes"]["supported"])
         self.assertEqual(schema["engagement"]["backend"], "valkey")
 
 
