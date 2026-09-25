@@ -202,6 +202,66 @@ class AgentCliCase(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn('"deleted":true', out)
 
+    def test_keystore_encrypts_locally_and_restores_locally(self) -> None:
+        root = self.key_path.parent
+        secret_path = root / "external-private.key"
+        restored_path = root / "restored-private.key"
+        secret = b"external-platform-private-key\x00never-send-plaintext"
+        secret_path.write_bytes(secret)
+
+        code, out, err = self.run_cli(
+            "keystore",
+            "put",
+            "github",
+            "--file",
+            str(secret_path),
+        )
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(result["name"], "github")
+        self.assertEqual(result["format"], "libsodium-sealed-box-v1")
+        self.assertNotIn("never-send-plaintext", out)
+
+        import hashlib
+
+        root_id = hashlib.sha256(
+            self.root_key.public_key().public_bytes(
+                serialization.Encoding.Raw,
+                serialization.PublicFormat.Raw,
+            )
+        ).hexdigest()
+        row = self.server.board.store._conn.execute(
+            "SELECT ciphertext FROM keystore_entries WHERE owner_id = ? AND name = ?",
+            (root_id, "github"),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertNotIn(secret, bytes(row["ciphertext"]))
+
+        code, out, err = self.run_cli("keystore", "pubkey")
+        self.assertEqual(code, 0, err)
+        self.assertIn("algorithm=curve25519", out)
+
+        code, out, err = self.run_cli("keystore", "list")
+        self.assertEqual(code, 0, err)
+        listing = json.loads(out)
+        self.assertEqual(listing["entries"][0]["name"], "github")
+        self.assertNotIn("ciphertext", listing["entries"][0])
+
+        code, out, err = self.run_cli(
+            "keystore",
+            "get",
+            "github",
+            "--out",
+            str(restored_path),
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(restored_path.read_bytes(), secret)
+        self.assertEqual(restored_path.stat().st_mode & 0o777, 0o600)
+
+        code, out, err = self.run_cli("keystore", "delete", "github")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["deleted"])
+
     def test_git_credential_helper_mints_short_lived_signed_proof(self) -> None:
         host = urllib.parse.urlparse(self.base).netloc
         stdin = io.StringIO(f"protocol=http\nhost={host}\n\n")

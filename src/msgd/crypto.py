@@ -11,6 +11,7 @@ from typing import Any
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from nacl.signing import VerifyKey
 
 REQUEST_MAGIC = b"msg.lmm.best/request/v1\n"
 CERT_MAGIC = b"msg.lmm.best/cert/v1\n"
@@ -78,6 +79,13 @@ def public_identity(value: str) -> tuple[str, str]:
     return canonical, hashlib.sha256(raw).hexdigest()
 
 
+def curve25519_public_key(value: str) -> str:
+    """Derive the Curve25519 encryption public key for an Ed25519 identity."""
+    canonical, _ = public_identity(value)
+    curve_key = VerifyKey(base64.b64decode(canonical)).to_curve25519_public_key()
+    return base64.b64encode(bytes(curve_key)).decode("ascii")
+
+
 def canonical_signature(value: str) -> str:
     raw = _decode_b64(value, "signature")
     if len(raw) != 64:
@@ -139,6 +147,9 @@ def request_payload(
     watch_target: str = "",
     ack_status: str = "",
     task_scope: str = "",
+    keystore_name: str = "",
+    keystore_ciphertext: str = "",
+    keystore_sha256: str = "",
 ) -> bytes:
     if not IDENTITY_RE.fullmatch(signer_id):
         raise SignatureError("invalid signer id")
@@ -300,6 +311,21 @@ def request_payload(
             ("task_scope", task_scope),
             ("limit", "" if limit is None else str(limit)),
         ]
+    elif action in {"keystore.put", "keystore.delete"}:
+        if nonce is None or issued is None:
+            raise SignatureError(f"{action} requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("keystore_name", keystore_name),
+        ]
+        if action == "keystore.put":
+            fields += [
+                ("keystore_ciphertext", keystore_ciphertext),
+                ("keystore_sha256", keystore_sha256),
+            ]
     elif action in {
         "webhook.create",
         "webhook.update",

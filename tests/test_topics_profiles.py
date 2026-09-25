@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import tempfile
 import threading
@@ -14,6 +15,8 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from nacl.public import SealedBox
+from nacl.signing import SigningKey
 
 from msgd.config import Config
 from msgd.crypto import certificate_payload, make_certificate
@@ -298,6 +301,92 @@ class TopicsProfilesCase(unittest.TestCase):
         )
         self.assertEqual(status, 409, denied)
         self.assertIn(public_b64(self.alice), denied)
+
+    def test_profile_keystore_stores_only_sealed_ciphertext(self) -> None:
+        status, body, _ = self.signed_create(
+            self.alice,
+            name="Alice",
+            text="establish keystore identity",
+        )
+        self.assertEqual(status, 201, body)
+
+        seed = self.alice.private_bytes(
+            serialization.Encoding.Raw,
+            serialization.PrivateFormat.Raw,
+            serialization.NoEncryption(),
+        )
+        curve_private = SigningKey(seed).to_curve25519_private_key()
+        curve_public_b64 = base64.b64encode(bytes(curve_private.public_key)).decode("ascii")
+
+        status, raw_pubkey = self.c.get("/@Alice/keystore/pubkey")
+        self.assertEqual(status, 200, raw_pubkey)
+        self.assertEqual(raw_pubkey, curve_public_b64 + "\n")
+
+        secret = b"github-private-key\x00super-secret-material"
+        ciphertext = SealedBox(curve_private.public_key).encrypt(secret)
+        ciphertext_b64 = base64.b64encode(ciphertext).decode("ascii")
+        digest = hashlib.sha256(ciphertext).hexdigest()
+
+        info = self.signing(
+            self.alice,
+            "keystore.put",
+            name="github",
+            ciphertext=ciphertext_b64,
+            sha256=digest,
+        )
+        status, stored_body = self.c.post(
+            "/_keystore",
+            action="keystore.put",
+            key=public_b64(self.alice),
+            sig=sign_b64(self.alice, info["payload_b64"]),
+            nonce=info["nonce"],
+            issued=str(info["issued"]),
+            version=str(info["version"]),
+            name="github",
+            ciphertext=ciphertext_b64,
+            sha256=digest,
+        )
+        self.assertEqual(status, 200, stored_body)
+        self.assertNotIn(secret.decode(errors="ignore"), stored_body)
+
+        status, index_body = self.c.get("/@Alice/keystore")
+        self.assertEqual(status, 200, index_body)
+        index = json.loads(index_body)
+        self.assertEqual(index["public_key"], curve_public_b64)
+        self.assertEqual(index["entries"][0]["name"], "github")
+        self.assertNotIn("ciphertext", index["entries"][0])
+
+        status, entry_body = self.c.get("/@Alice/keystore/github")
+        self.assertEqual(status, 200, entry_body)
+        entry = json.loads(entry_body)
+        self.assertEqual(entry["format"], "libsodium-sealed-box-v1")
+        self.assertEqual(entry["sha256"], digest)
+        self.assertEqual(entry["ciphertext"], ciphertext_b64)
+        self.assertEqual(
+            SealedBox(curve_private).decrypt(base64.b64decode(entry["ciphertext"])), secret
+        )
+
+        row = self.server.board.store._conn.execute(
+            "SELECT ciphertext FROM keystore_entries WHERE owner_id = ? AND name = ?",
+            (author_id(self.alice), "github"),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertNotIn(secret, bytes(row["ciphertext"]))
+
+        delete_info = self.signing(self.alice, "keystore.delete", name="github")
+        status, deleted_body = self.c.post(
+            "/_keystore",
+            action="keystore.delete",
+            key=public_b64(self.alice),
+            sig=sign_b64(self.alice, delete_info["payload_b64"]),
+            nonce=delete_info["nonce"],
+            issued=str(delete_info["issued"]),
+            version=str(delete_info["version"]),
+            name="github",
+        )
+        self.assertEqual(status, 200, deleted_body)
+        self.assertTrue(json.loads(deleted_body)["deleted"])
+        self.assertEqual(self.c.get("/@Alice/keystore/github")[0], 404)
 
     def test_profile_stable_resources_and_root_profile(self) -> None:
         status, body = self.c.get("/@root", format="json")
