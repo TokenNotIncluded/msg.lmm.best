@@ -354,9 +354,7 @@ class SSHKeyStore:
         assert item is not None
         return item
 
-    def set_expiry(
-        self, owner_id: str, key_id: str, expires: int | None
-    ) -> dict[str, object]:
+    def set_expiry(self, owner_id: str, key_id: str, expires: int | None) -> dict[str, object]:
         if expires is not None and expires <= time.time():
             raise StoreError("SSH key expiry must be in the future", 400)
         with self._lock, self._conn:
@@ -519,7 +517,9 @@ def _shell_keys(store: SSHKeyStore, item: dict[str, object], argv: list[str]) ->
         print(json.dumps(store.list(owner_id), ensure_ascii=False, separators=(",", ":")))
         return 0
     if argv[1] == "add" and len(argv) == 6:
-        scopes = scopes_from_preset(argv[3]) if argv[3] in SSH_PRESETS else normalize_scopes(argv[3])
+        scopes = (
+            scopes_from_preset(argv[3]) if argv[3] in SSH_PRESETS else normalize_scopes(argv[3])
+        )
         added = store.add(
             owner_id=owner_id,
             name=argv[2],
@@ -530,7 +530,9 @@ def _shell_keys(store: SSHKeyStore, item: dict[str, object], argv: list[str]) ->
         print(json.dumps(added, ensure_ascii=False, separators=(",", ":")))
         return 0
     if argv[1] == "scopes" and len(argv) == 4:
-        scopes = scopes_from_preset(argv[3]) if argv[3] in SSH_PRESETS else normalize_scopes(argv[3])
+        scopes = (
+            scopes_from_preset(argv[3]) if argv[3] in SSH_PRESETS else normalize_scopes(argv[3])
+        )
         updated = store.set_scopes(owner_id, argv[2], scopes)
         print(json.dumps(updated, ensure_ascii=False, separators=(",", ":")))
         return 0
