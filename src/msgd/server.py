@@ -174,6 +174,43 @@ class Handler(BaseHTTPRequestHandler):
         )
         return True
 
+    def _engagement_map(
+        self,
+        posts: list[Any] | tuple[Any, ...],
+    ) -> dict[int, dict[str, int | float]] | None:
+        if not self.board.engagement.available:
+            return None
+        stats = self.board.engagement.metrics([post.id for post in posts])
+        return {post_id: value.to_dict() for post_id, value in stats.items()}
+
+    def _ranked_posts(
+        self,
+        metric: str,
+        *,
+        board: str | None,
+        limit: int,
+    ) -> list[Any]:
+        if not self.board.engagement.available:
+            raise StoreError("Valkey analytics is unavailable", 503)
+        scan = min(max(limit * 5, 100), 5000)
+        ids = self.board.engagement.rank(metric, board=board, limit=scan)
+        posts = self.board.store.posts_by_ids(ids)
+        if board is not None:
+            posts = [post for post in posts if post.board == board]
+        return posts[:limit]
+
+    def _sync_reply_count(self, parent_id: int | None) -> None:
+        if parent_id is None or not self.board.engagement.available:
+            return
+        parent = self.board.store.get_post(parent_id)
+        if parent is None:
+            return
+        self.board.engagement.set_comments(
+            parent.id,
+            parent.board,
+            self.board.store.comment_count(parent.id),
+        )
+
     def do_OPTIONS(self) -> None:
         self._send(204, b"")
 
