@@ -2,6 +2,7 @@
 
 import configparser
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Self
@@ -42,6 +43,10 @@ class Config:
     web_root: str = ""
     web_max_site_bytes: int = 10_485_760  # 10 MiB
 
+    # Data-driven topic templates and topics whose create permission is certificate-only.
+    topic_template_dir: str = "/etc/msg-lmm-best/templates"
+    certificate_only_topics: str = "store,ads"
+
     # OpenSSH restricted-shell integration.
     ssh_shell_command: str = "/usr/local/bin/msg-ssh-shell"
     ssh_max_keys_per_identity: int = 16
@@ -81,6 +86,14 @@ class Config:
             part.strip() for part in self.websub_external_hubs.split(",") if part.strip()
         )
         return (f"https://{self.site_name}/hub", *external)
+
+    @property
+    def certificate_only_topic_set(self) -> frozenset[str]:
+        return frozenset(
+            part.strip().lower()
+            for part in self.certificate_only_topics.split(",")
+            if part.strip()
+        )
 
     @classmethod
     def load(cls, path: str | os.PathLike[str] | None = None) -> Self:
@@ -139,6 +152,10 @@ class Config:
             repo_max_request_bytes=get("repos", "max_request_bytes", base.repo_max_request_bytes),
             web_root=get("web", "root", base.web_root),
             web_max_site_bytes=get("web", "max_site_bytes", base.web_max_site_bytes),
+            topic_template_dir=get("topics", "template_dir", base.topic_template_dir),
+            certificate_only_topics=get(
+                "topics", "certificate_only", base.certificate_only_topics
+            ),
             ssh_shell_command=get("ssh", "shell_command", base.ssh_shell_command),
             ssh_max_keys_per_identity=get(
                 "ssh", "max_keys_per_identity", base.ssh_max_keys_per_identity
@@ -226,3 +243,6 @@ class Config:
             raise SystemExit("websub external_hubs must not contain duplicates")
         if not self.valkey_prefix.strip():
             raise SystemExit("valkey_prefix must not be empty")
+        topic_re = re.compile(r"^[a-z][a-z0-9]{1,23}$")
+        if any(not topic_re.fullmatch(name) for name in self.certificate_only_topic_set):
+            raise SystemExit("topics.certificate_only contains an invalid topic name")
