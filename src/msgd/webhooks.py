@@ -49,14 +49,20 @@ def normalize_events(values: list[str] | tuple[str, ...] | set[str]) -> tuple[st
 
 def validate_webhook_url(value: str) -> str:
     raw = value.strip()
+    if "\\" in raw:
+        raise StoreError("webhook URL must not contain backslashes", 400)
     if any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F for char in raw):
         raise StoreError("webhook URL must not contain whitespace or control characters", 400)
     if len(raw.encode("utf-8")) > 2048:
         raise StoreError("webhook URL is too long", 400)
-    parsed = urlsplit(raw)
+    try:
+        parsed = urlsplit(raw)
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise StoreError("invalid webhook URL", 400) from exc
     if parsed.scheme.lower() != "https":
         raise StoreError("webhook URL must use https", 400)
-    if not parsed.hostname:
+    if not hostname:
         raise StoreError("webhook URL requires a hostname", 400)
     if parsed.username is not None or parsed.password is not None:
         raise StoreError("webhook URL must not contain userinfo", 400)
@@ -69,7 +75,7 @@ def validate_webhook_url(value: str) -> str:
     if port not in {None, 443}:
         raise StoreError("webhook URL must use HTTPS port 443", 400)
 
-    host = parsed.hostname.rstrip(".").lower()
+    host = hostname.rstrip(".").lower()
     if not re.fullmatch(r"[a-z0-9.-]+", host):
         raise StoreError("webhook hostname must be ASCII DNS/punycode", 400)
     if host in {"localhost", "localhost.localdomain"} or host.endswith(
@@ -392,7 +398,12 @@ class WebhookService:
         return len(rows)
 
     def _worker(self) -> None:
+        last_prune = 0.0
         while not self._stop.is_set():
+            now = time.time()
+            if now - last_prune >= 3600:
+                self.store.prune_webhook_deliveries()
+                last_prune = now
             processed = self._run_once()
             if processed:
                 continue
