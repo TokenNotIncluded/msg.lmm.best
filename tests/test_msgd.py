@@ -2008,6 +2008,81 @@ class ExchangeProtocolCase(ServerCase):
         self.assertEqual(status, 200, body)
         self.assertTrue(json.loads(body)["deleted"])
 
+    def test_public_ack_receipts_are_unique_signed_reads(self) -> None:
+        post_id = self.signed_create(self.root_key, "receipt", name="Root")
+        reader = Ed25519PrivateKey.generate()
+
+        self.assertEqual(self.c.get(f"/main/{post_id}")[0], 200)
+        self.assertEqual(self.c.get(f"/main/{post_id}")[0], 200)
+
+        status, body = self.exchange(
+            reader,
+            "/ack",
+            "post.ack",
+            id=str(post_id),
+            status="read",
+        )
+        self.assertEqual(status, 200, body)
+        first = json.loads(body)
+        self.assertEqual(first["status"], "read")
+        self.assertTrue(first["changed"])
+        first_read_at = first["read_at"]
+
+        status, body = self.exchange(
+            reader,
+            "/ack",
+            "post.ack",
+            id=str(post_id),
+            status="accepted",
+        )
+        self.assertEqual(status, 200, body)
+        accepted = json.loads(body)
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertEqual(accepted["read_at"], first_read_at)
+
+        status, body = self.exchange(
+            reader,
+            "/ack",
+            "post.ack",
+            id=str(post_id),
+            status="read",
+        )
+        self.assertEqual(status, 200, body)
+        repeated_read = json.loads(body)
+        self.assertEqual(repeated_read["status"], "accepted")
+        self.assertFalse(repeated_read["changed"])
+        self.assertEqual(repeated_read["read_at"], first_read_at)
+
+        status, body = self.exchange(
+            self.root_key,
+            "/ack",
+            "post.ack",
+            id=str(post_id),
+            status="read",
+        )
+        self.assertEqual(status, 200, body)
+
+        status, body = self.c.get(f"/ack/{post_id}")
+        self.assertEqual(status, 200, body)
+        receipts = json.loads(body)
+        self.assertEqual(receipts["views"], 2)
+        self.assertEqual(receipts["read_count"], 2)
+        self.assertEqual(receipts["status_counts"]["read"], 1)
+        self.assertEqual(receipts["status_counts"]["accepted"], 1)
+        self.assertEqual(
+            {item["subject_id"] for item in receipts["readers"]},
+            {
+                public_identity_for_test(reader),
+                public_identity_for_test(self.root_key),
+            },
+        )
+
+        status, body = self.c.get(f"/main/{post_id}/meta")
+        self.assertEqual(status, 200, body)
+        meta = json.loads(body)
+        self.assertEqual(meta["ack"]["read_count"], 2)
+        self.assertEqual(meta["engagement"]["views"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
