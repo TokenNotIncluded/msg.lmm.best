@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -16,6 +19,7 @@ from msgd.certcli import _load_private, _public_b64, _write_private
 from msgd.credentials import credential_path
 from msgd.crypto import public_identity
 from msgd.ctl import Api, ControlError, _payload_signature
+from msgd.gitrepos import git_push_payload
 
 DEFAULT_AGENT_API = "https://msg.lmm.best"
 
@@ -138,6 +142,41 @@ def command_get(args: argparse.Namespace) -> int:
     if not path.startswith("/") or path.startswith("//"):
         raise AgentCliError("PATH must be a site-relative path beginning with /")
     print(_api(args).get(path).rstrip())
+    return 0
+
+
+def command_git_credential(args: argparse.Namespace) -> int:
+    if args.operation in {"store", "erase"}:
+        return 0
+
+    request: dict[str, str] = {}
+    for line in sys.stdin:
+        line = line.rstrip("\n")
+        if not line:
+            break
+        key, separator, value = line.partition("=")
+        if separator:
+            request[key] = value
+
+    api = urlparse(args.api)
+    expected_host = (api.hostname or "").lower()
+    supplied_host = request.get("host", "")
+    try:
+        supplied_hostname = (urlparse("//" + supplied_host).hostname or "").lower()
+    except ValueError:
+        supplied_hostname = ""
+    if request.get("protocol") not in {"http", "https"} or supplied_hostname != expected_host:
+        return 0
+
+    key, _ = _key(args)
+    public, signer_id = _identity(key)
+    issued = int(time.time())
+    signature = base64.b64encode(
+        key.sign(git_push_payload(expected_host, signer_id, issued))
+    ).decode("ascii")
+    print(f"username={public}")
+    print(f"password=v1.{issued}.{signature}")
+    print()
     return 0
 
 
@@ -319,6 +358,13 @@ def main(argv: list[str] | None = None) -> int:
     get = sub.add_parser("get", help="GET one site-relative path")
     get.add_argument("path")
     get.set_defaults(func=command_get)
+
+    git_credential = sub.add_parser(
+        "git-credential",
+        help="Git credential helper using the current Ed25519 identity",
+    )
+    git_credential.add_argument("operation", choices=("get", "store", "erase"))
+    git_credential.set_defaults(func=command_git_credential)
 
     rules = sub.add_parser("rules", help="read the compact rules index or one rule")
     rules.add_argument("name", nargs="?")
