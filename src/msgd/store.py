@@ -30,7 +30,31 @@ MENTION_RE = re.compile(
     r"(?<![A-Za-z0-9._-])@([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?![A-Za-z0-9._-])"
 )
 
-DEFAULT_ANONYMOUS = frozenset({"post.create", "post.edit.any", "post.delete.any"})
+ANONYMOUS_PERMISSION_BITS = {
+    "post.create": 1,
+    "post.edit.any": 2,
+    "post.delete.any": 4,
+}
+ANONYMOUS_PERMISSION_MASK = sum(ANONYMOUS_PERMISSION_BITS.values())
+DEFAULT_ANONYMOUS = frozenset(ANONYMOUS_PERMISSION_BITS)
+
+
+def anonymous_permission_mask(actions: object) -> int:
+    return sum(
+        bit
+        for action, bit in ANONYMOUS_PERMISSION_BITS.items()
+        if action in set(actions)
+    )
+
+
+def anonymous_actions(mask: int) -> tuple[str, ...]:
+    if mask < 0 or mask & ~ANONYMOUS_PERMISSION_MASK:
+        raise ValueError(f"anonymous permission mask must be 0..{ANONYMOUS_PERMISSION_MASK}")
+    return tuple(
+        action
+        for action, bit in ANONYMOUS_PERMISSION_BITS.items()
+        if mask & bit
+    )
 
 RESERVED_BOARDS = {
     "rules",
@@ -525,7 +549,12 @@ class Store:
                  ORDER BY b.name
                 """
             ).fetchall()
-        return [dict(row) for row in rows]
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["permissions"] = self.policy(str(row["name"]))["permissions"]
+            result.append(item)
+        return result
 
     def board_info(self, name: str) -> dict[str, Any] | None:
         with self._lock:
@@ -541,15 +570,19 @@ class Store:
                 (board,),
             ).fetchone()
         if row is None:
+            actions = sorted(DEFAULT_ANONYMOUS)
             return {
                 "board": board,
-                "anonymous": sorted(DEFAULT_ANONYMOUS),
+                "permissions": anonymous_permission_mask(actions),
+                "anonymous": actions,
                 "version": 0,
                 "updated": None,
             }
+        actions = json.loads(str(row["anonymous"]))
         return {
             "board": board,
-            "anonymous": json.loads(str(row["anonymous"])),
+            "permissions": anonymous_permission_mask(actions),
+            "anonymous": actions,
             "version": int(row["version"]),
             "updated": float(row["updated"]),
         }
