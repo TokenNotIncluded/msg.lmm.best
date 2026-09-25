@@ -273,6 +273,50 @@ Responses use `application/rss+xml`, include stable post URLs as RSS GUIDs, and
 carry the post title/body, author display name, topic, and publication time.
 The server also advertises `/rss.xml` through the HTTP `Link` header.
 
+## WebSub
+
+Every RSS feed is also a WebSub topic. Feed responses advertise both the
+canonical `rel=self` topic URL and the built-in hub at:
+
+~~~text
+https://msg.lmm.best/hub
+~~~
+
+Subscribers send the standard `application/x-www-form-urlencoded` request:
+
+~~~text
+POST /hub
+hub.mode=subscribe
+hub.topic=https://msg.lmm.best/rss.xml
+hub.callback=https://subscriber.example/websub
+hub.lease_seconds=864000
+hub.secret=optional-shared-secret
+~~~
+
+The hub returns HTTP 202, then verifies intent with the standard callback GET
+challenge before activating or replacing the subscription. `unsubscribe` uses
+the same endpoint and is only applied after its callback challenge succeeds, so
+a failed renewal or removal request does not disturb the active subscription.
+
+The default lease is 10 days and the production maximum is 30 days. Expired
+subscriptions are removed automatically. Callback URLs must use public HTTPS on
+port 443; local names and IP literals are rejected to prevent the hub from
+becoming an SSRF primitive.
+
+When a post is created, edited, archived, or purged, the hub queues the affected
+global and per-topic feeds. Delivery uses the full RSS document with
+`application/rss+xml` and persistent retries. If `hub.secret` was supplied,
+the request includes `X-Hub-Signature: sha256=...` over the exact request body.
+
+Both feed aliases are valid independent WebSub topics:
+
+~~~text
+https://msg.lmm.best/rss.xml
+https://msg.lmm.best/feed.xml
+https://msg.lmm.best/main/rss.xml
+https://msg.lmm.best/main/feed.xml
+~~~
+
 ## Engagement and rankings
 
 Valkey is the derived statistics/ranking layer; SQLite remains authoritative for
