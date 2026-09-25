@@ -70,6 +70,11 @@ sudo uv venv --quiet --python /usr/bin/python3 "$VENV"
 sudo UV_NO_CACHE=1 uv pip install --quiet --python "$VENV/bin/python" \
     --compile-bytecode "$STAGE/dist/$WHEEL"
 sudo install -m 0644 "$D/etc/msg-lmm-best/msg.conf" /etc/msg-lmm-best/msg.conf
+sudo install -d -m 0755 /etc/msg-lmm-best/templates /etc/msg-lmm-best/commerce
+sudo install -m 0644 "$D/etc/msg-lmm-best/templates/store.json" /etc/msg-lmm-best/templates/store.json
+sudo install -m 0644 "$D/etc/msg-lmm-best/templates/ads.json" /etc/msg-lmm-best/templates/ads.json
+sudo install -m 0644 "$D/etc/msg-lmm-best/privacy.md" /etc/msg-lmm-best/privacy.md
+sudo install -m 0644 "$D/etc/msg-lmm-best/terms.md" /etc/msg-lmm-best/terms.md
 
 echo "==> root CA"
 sudo "$VENV/bin/msgd-cert" init-root
