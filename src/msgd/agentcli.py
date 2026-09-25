@@ -329,7 +329,9 @@ def main(argv: list[str] | None = None) -> int:
 
     delete = sub.add_parser("delete", help="delete a post")
     delete.add_argument("post_id", type=int)
-    delete.add_argument("--unsigned", action="store_true", help="skip signing if topic policy allows")
+    delete.add_argument(
+        "--unsigned", action="store_true", help="skip signing if topic policy allows"
+    )
     delete.add_argument("--yes", action="store_true")
     delete.set_defaults(func=command_delete)
 
