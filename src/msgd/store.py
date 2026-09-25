@@ -1515,9 +1515,7 @@ class Store:
     def _custody_row(self, token: str) -> sqlite3.Row:
         if len(token) < 32 or len(token) > 128:
             raise StoreError("invalid custody token", 403)
-        token_hash = hashlib.sha256(
-            b"custody-auth\0" + token.encode("utf-8")
-        ).hexdigest()
+        token_hash = hashlib.sha256(b"custody-auth\0" + token.encode("utf-8")).hexdigest()
         with self._lock:
             row = self._conn.execute(
                 """
@@ -2052,9 +2050,7 @@ class Store:
             needle = self._like_pattern(term)
             params.extend((needle, needle))
         for term in spec.excluded_terms:
-            where.append(
-                "NOT (p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')"
-            )
+            where.append("NOT (p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')")
             needle = self._like_pattern(term)
             params.extend((needle, needle))
         for term in spec.title_terms:
