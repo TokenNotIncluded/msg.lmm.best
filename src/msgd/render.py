@@ -1044,6 +1044,7 @@ def render_agent_index(
         "machine /BOARD?format=ndjson&limit=10",
         "rss     /rss.xml · /BOARD/rss.xml",
         "tags    /tags · /tag/TAG · search #TAG",
+        "users   /users · /users/USERNAME",
         "pathget /g · /g/v1/BASE64URL_PAYLOAD",
         "webhook /_signing?action=webhook.list&key=PUBLIC_KEY",
         "rank    /hot?sort=views|comments|hot&limit=20",
@@ -1092,7 +1093,7 @@ def render_index(
             f"CA {'ready' if ca_ready else 'missing'}"
         ),
         "",
-        "start: /index · /_search · /rules · /guest · /custody · /g",
+        "start: /index · /users · /_search · /rules · /guest · /custody · /g",
         "machine: /_schema · /_search?format=ndjson",
         "rss: /rss.xml · /BOARD/rss.xml",
         "hashtags: /tags · /tag/TAG · search #TAG",
