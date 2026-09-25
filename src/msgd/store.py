@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import contextlib
 import hashlib
 import json
@@ -30,6 +31,7 @@ from msgd.crypto import (
     SignedRequest,
     canonical_json,
     certificate_payload,
+    curve25519_public_key,
     parse_certificate,
     public_identity,
     verify_detached,
@@ -41,6 +43,10 @@ AUTHOR_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 MENTION_RE = re.compile(r"(?<![A-Za-z0-9._-])@([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?![A-Za-z0-9._-])")
 HASHTAG_RE = re.compile(r"(?<![\w/#])#([\w][\w-]{0,31})(?![\w-])", re.UNICODE)
 MAX_TAGS_PER_POST = 16
+KEYSTORE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+KEYSTORE_FORMAT = "libsodium-sealed-box-v1"
+KEYSTORE_MAX_ENTRY_BYTES = 64 * 1024
+KEYSTORE_MAX_TOTAL_BYTES = 1024 * 1024
 
 LEGACY_ANONYMOUS_PERMISSION_BITS = {
     "post.create": 1,
@@ -156,6 +162,8 @@ RESERVED_BOARDS = {
     "index",
     "file",
     "key",
+    "keystore",
+    "_keystore",
     "_profile",
     "latest",
     "like",
@@ -338,6 +346,19 @@ CREATE TABLE IF NOT EXISTS profiles (
     updated           REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS profiles_name ON profiles(primary_name_key);
+
+CREATE TABLE IF NOT EXISTS keystore_entries (
+    owner_id    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    ciphertext  BLOB NOT NULL,
+    sha256      TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    created     REAL NOT NULL,
+    updated     REAL NOT NULL,
+    PRIMARY KEY(owner_id, name)
+);
+CREATE INDEX IF NOT EXISTS keystore_owner_updated
+    ON keystore_entries(owner_id, updated DESC, name);
 
 CREATE TABLE IF NOT EXISTS revocations (
     serial     TEXT PRIMARY KEY REFERENCES certificates(serial) ON DELETE CASCADE,
@@ -1106,6 +1127,7 @@ class Store:
             "name_key": "root",
             "bio": f"Root CA trust anchor for {self.cfg.site_name}.",
             "public_key": root["public_key"],
+            "keystore_public_key": curve25519_public_key(root["public_key"]),
             "author_id": root_id,
             "profile_url": "/@root",
             "aliases": ["root"],
@@ -2674,6 +2696,7 @@ class Store:
             "name_key": str(primary["name_key"]),
             "bio": str(profile["bio"]),
             "public_key": str(primary["public_key"]),
+            "keystore_public_key": curve25519_public_key(str(primary["public_key"])),
             "author_id": author_id,
             "profile_url": f"/@{quote(str(primary['display_name']), safe='')}",
             "aliases": [str(item["display_name"]) for item in claim_items],
@@ -2686,6 +2709,183 @@ class Store:
             "updated": round(float(profile["updated"]), 3),
             "certification": self.certification(author_id),
         }
+
+    @staticmethod
+    def normalize_keystore_name(value: str) -> str:
+        name = value.strip().casefold()
+        if name == "pubkey":
+            raise StoreError("keystore name 'pubkey' is reserved", 400)
+        if not KEYSTORE_NAME_RE.fullmatch(name):
+            raise StoreError(
+                "keystore name must be 1..64 lowercase letters, digits, dot, underscore, or hyphen",
+                400,
+            )
+        return name
+
+    @staticmethod
+    def prepare_keystore_ciphertext(
+        value: str,
+        expected_sha256: str = "",
+    ) -> tuple[bytes, str, str]:
+        try:
+            raw = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise StoreError("keystore ciphertext must be valid base64", 400) from exc
+        if len(raw) < 48:
+            raise StoreError("keystore ciphertext is too short for a sealed box", 400)
+        if len(raw) > KEYSTORE_MAX_ENTRY_BYTES:
+            raise StoreError(
+                f"keystore ciphertext exceeds {KEYSTORE_MAX_ENTRY_BYTES} bytes",
+                413,
+            )
+        digest = hashlib.sha256(raw).hexdigest()
+        if expected_sha256 and expected_sha256.casefold() != digest:
+            raise StoreError("keystore ciphertext sha256 mismatch", 400)
+        return raw, base64.b64encode(raw).decode("ascii"), digest
+
+    def keystore_version(self, owner_id: str, name: str) -> int:
+        name = self.normalize_keystore_name(name)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT version FROM keystore_entries WHERE owner_id = ? AND name = ?",
+                (owner_id, name),
+            ).fetchone()
+        return int(row["version"]) if row is not None else 0
+
+    def keystore_list(self, owner_id: str) -> list[dict[str, Any]]:
+        if not valid_author_id(owner_id):
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT name, sha256, version, length(ciphertext) AS nbytes, created, updated
+                  FROM keystore_entries
+                 WHERE owner_id = ?
+                 ORDER BY name
+                """,
+                (owner_id,),
+            ).fetchall()
+        return [
+            {
+                "name": str(row["name"]),
+                "format": KEYSTORE_FORMAT,
+                "bytes": int(row["nbytes"]),
+                "sha256": str(row["sha256"]),
+                "version": int(row["version"]),
+                "created": round(float(row["created"]), 3),
+                "updated": round(float(row["updated"]), 3),
+            }
+            for row in rows
+        ]
+
+    def keystore_entry(self, owner_id: str, name: str) -> dict[str, Any] | None:
+        name = self.normalize_keystore_name(name)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT name, ciphertext, sha256, version, created, updated
+                  FROM keystore_entries
+                 WHERE owner_id = ? AND name = ?
+                """,
+                (owner_id, name),
+            ).fetchone()
+        if row is None:
+            return None
+        ciphertext = bytes(row["ciphertext"])
+        return {
+            "name": str(row["name"]),
+            "format": KEYSTORE_FORMAT,
+            "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+            "bytes": len(ciphertext),
+            "sha256": str(row["sha256"]),
+            "version": int(row["version"]),
+            "created": round(float(row["created"]), 3),
+            "updated": round(float(row["updated"]), 3),
+        }
+
+    def keystore_put(
+        self,
+        *,
+        auth: SignedRequest,
+        name: str,
+        ciphertext_b64: str,
+        expected_sha256: str,
+    ) -> dict[str, Any]:
+        if self.profile_by_author(auth.signer_id) is None:
+            raise StoreError("keystore requires an established signed profile", 403)
+        name = self.normalize_keystore_name(name)
+        ciphertext, _canonical, digest = self.prepare_keystore_ciphertext(
+            ciphertext_b64,
+            expected_sha256,
+        )
+        self.consume_nonce(auth)
+        now = time.time()
+        with self._lock, self._conn:
+            current = self._conn.execute(
+                "SELECT version, created FROM keystore_entries WHERE owner_id = ? AND name = ?",
+                (auth.signer_id, name),
+            ).fetchone()
+            expected_version = int(current["version"] if current is not None else 0) + 1
+            if auth.version != expected_version:
+                raise StoreError("stale keystore version", 409)
+            used = int(
+                self._conn.execute(
+                    """
+                    SELECT COALESCE(SUM(length(ciphertext)), 0) AS n
+                      FROM keystore_entries
+                     WHERE owner_id = ? AND name <> ?
+                    """,
+                    (auth.signer_id, name),
+                ).fetchone()["n"]
+            )
+            if used + len(ciphertext) > KEYSTORE_MAX_TOTAL_BYTES:
+                raise StoreError(
+                    f"keystore exceeds per-identity limit {KEYSTORE_MAX_TOTAL_BYTES} bytes",
+                    413,
+                )
+            created = float(current["created"]) if current is not None else now
+            self._conn.execute(
+                """
+                INSERT INTO keystore_entries(
+                    owner_id, name, ciphertext, sha256, version, created, updated
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_id, name) DO UPDATE SET
+                    ciphertext = excluded.ciphertext,
+                    sha256 = excluded.sha256,
+                    version = excluded.version,
+                    updated = excluded.updated
+                """,
+                (
+                    auth.signer_id,
+                    name,
+                    ciphertext,
+                    digest,
+                    auth.version,
+                    created,
+                    now,
+                ),
+            )
+        result = self.keystore_entry(auth.signer_id, name)
+        assert result is not None
+        return result
+
+    def keystore_delete(self, *, auth: SignedRequest, name: str) -> dict[str, Any]:
+        name = self.normalize_keystore_name(name)
+        self.consume_nonce(auth)
+        with self._lock, self._conn:
+            current = self._conn.execute(
+                "SELECT version FROM keystore_entries WHERE owner_id = ? AND name = ?",
+                (auth.signer_id, name),
+            ).fetchone()
+            if current is None:
+                raise StoreError("keystore entry not found", 404)
+            if auth.version != int(current["version"]) + 1:
+                raise StoreError("stale keystore version", 409)
+            self._conn.execute(
+                "DELETE FROM keystore_entries WHERE owner_id = ? AND name = ?",
+                (auth.signer_id, name),
+            )
+        return {"ok": 1, "deleted": True, "name": name}
 
     def profile_version(self, author_id: str) -> int:
         with self._lock:
