@@ -36,13 +36,13 @@ from msgd.render import (
     posts_to_ndjson,
     render_agent_index,
     render_error,
-    render_name_index,
-    render_post_index,
     render_inbox,
     render_index,
     render_listing,
+    render_name_index,
     render_ok,
     render_post,
+    render_post_index,
     render_profile,
     render_rss,
     render_rule,
@@ -2102,7 +2102,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         kind = segments[1]
-        limit = _int(params, "limit", min(50, self.board.cfg.max_limit), 1, self.board.cfg.max_limit)
+        limit = _int(
+            params,
+            "limit",
+            min(50, self.board.cfg.max_limit),
+            1,
+            self.board.cfg.max_limit,
+        )
         assert limit is not None
         default_order = "desc" if kind == "by-time" else "asc"
         order = (_param(params, "order") or default_order).lower()
