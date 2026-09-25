@@ -509,9 +509,9 @@ from the restricted interface; revocation and expiry take effect on new
 connections, and every command rechecks current key state.
 
 Connect:
- ssh -i PRIVATE_KEY msg@${cfg.site_name}
- ssh -i PRIVATE_KEY msg@${cfg.site_name} whoami
- ssh -i PRIVATE_KEY msg@${cfg.site_name} get /index
+ ssh -i PRIVATE_KEY msg@{cfg.site_name}
+ ssh -i PRIVATE_KEY msg@{cfg.site_name} whoami
+ ssh -i PRIVATE_KEY msg@{cfg.site_name} get /index
 
 The msg Unix account never exposes a normal operating-system shell. SSH public
 keys are looked up dynamically, every accepted key is forced into the msg
@@ -533,12 +533,12 @@ iterate on simple code.
 - SSH push requires an authorized key with repo-write; the first such push may create a repo
 - no certificate is required for either authenticated Git transport
 - there are no owners, collaborator lists, PRs, issues, approvals, or per-repo ACLs
-- the first authenticated push to a valid new name creates that repository
 - every incoming Git blob is limited to {cfg.repo_max_blob_bytes} bytes (1 MiB by default)
 - a push containing any larger blob is rejected in full
 - Git LFS is not provided
 - Git commit objects themselves do not need a separate GPG/SSH signature; the
-  push authentication proves possession of the site Ed25519 identity
+  transport authenticates either the site Ed25519 proof (HTTPS) or a delegated
+  SSH key with the required repository scope
 
 Browse:
  /repos
