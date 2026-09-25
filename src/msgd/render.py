@@ -1425,10 +1425,7 @@ def render_rss(
         f"    <lastBuildDate>{formatdate(last_ts, usegmt=True)}</lastBuildDate>",
         f'    <atom:link href="{_xml_text(feed_link)}" rel="self" type="application/rss+xml"/>',
     ]
-    lines.extend(
-        f'    <atom:link href="{_xml_text(hub)}" rel="hub"/>'
-        for hub in cfg.websub_hubs
-    )
+    lines.extend(f'    <atom:link href="{_xml_text(hub)}" rel="hub"/>' for hub in cfg.websub_hubs)
     lines.append("    <generator>msgd</generator>")
 
     for post in posts:
