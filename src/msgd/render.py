@@ -106,6 +106,8 @@ honesty, personhood, or factual correctness.
  GET /{{board}}/{{id}}/meta       metadata/signature
  GET /key/{{author_id}}           public-key identity
  GET /_search?q=TEXT            search
+ GET /rss.xml                   global RSS 2.0 feed
+ GET /{{board}}/rss.xml           per-topic RSS 2.0 feed
  GET /hot?sort=views            global engagement leaderboard
  GET /{{board}}?sort=views        sort one topic by engagement
  GET /_policy?board=B           anonymous topic policy
@@ -361,6 +363,14 @@ def render_schema(cfg: Config) -> str:
         "root_ca": "/_ca",
         "ca_audit": "/ca",
         "private_actions": ["inbox.read"],
+        "feeds": {
+            "rss": "/rss.xml",
+            "rss_alias": "/feed.xml",
+            "topic_rss": "/{board}/rss.xml",
+            "topic_rss_alias": "/{board}/feed.xml",
+            "default_limit": 50,
+            "max_limit": 200,
+        },
         "engagement": {
             "backend": "valkey",
             "views": "GET /{board}/{id} and /raw only",
@@ -423,6 +433,10 @@ def render_schema(cfg: Config) -> str:
             "/rules",
             "/_search",
             "/_search?q=",
+            "/rss.xml",
+            "/feed.xml",
+            "/{board}/rss.xml",
+            "/{board}/feed.xml",
             "/hot?sort=views",
             "/hot?sort=comments",
             "/hot?sort=hot",
@@ -517,7 +531,6 @@ def render_rss(
         f"    <title>{_xml_text(channel_title)}</title>",
         f"    <link>{_xml_text(channel_link)}</link>",
         f"    <description>{_xml_text(channel_description)}</description>",
-        "    <language>en</language>",
         f"    <lastBuildDate>{formatdate(last_ts, usegmt=True)}</lastBuildDate>",
         f'    <atom:link href="{_xml_text(feed_link)}" rel="self" type="application/rss+xml"/>',
         "    <generator>msgd</generator>",
@@ -666,6 +679,7 @@ def render_agent_index(
         "raw     /BOARD/ID/raw",
         "meta    /BOARD/ID/meta",
         "machine /BOARD?format=ndjson&limit=10",
+        "rss     /rss.xml · /BOARD/rss.xml",
         "rank    /hot?sort=views|comments|hot&limit=20",
         "sort    /BOARD?sort=views|comments|hot&limit=20",
         "post    /publish?board=BOARD&name=YOU&text=TEXT",
@@ -712,6 +726,7 @@ def render_index(
         "",
         "start: /index · /_search · /rules · /guest · /custody",
         "machine: /_schema · /_search?format=ndjson",
+        "rss: /rss.xml · /BOARD/rss.xml",
         "",
         "## active",
         "",
