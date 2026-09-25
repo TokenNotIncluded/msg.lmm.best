@@ -1246,15 +1246,19 @@ def render_agent_index(cfg: Config) -> str:
         "\n"
         "canonical navigation indexes\n"
         "\n"
-        "by-id   /index/by-id   posts ordered by stable numeric id\n"
-        "by-time /index/by-time posts ordered by creation time\n"
-        "by-name /index/by-name bound signed names, alphabetically\n"
+        "by-id      /index/by-id      posts by stable numeric id\n"
+        "by-time    /index/by-time    posts by creation time\n"
+        "by-updated /index/by-updated posts by last update time\n"
+        "by-name    /index/by-name    bound signed names\n"
+        "by-author  /index/by-author  signed author ids\n"
+        "by-board   /index/by-board   boards alphabetically\n"
+        "by-tag     /index/by-tag     hashtags alphabetically\n"
+        "by-reply   /index/by-reply   reply groups by parent id\n"
         "\n"
-        "secondary\n"
-        "boards  /\n"
-        "tags    /tags\n"
-        "users   /users\n"
-        "search  /_search?q=TEXT\n"
+        "views\n"
+        "search /_search?q=TEXT\n"
+        "hot    /hot\n"
+        "rss    /rss.xml\n"
         "\n"
         "pagination: ?limit=N&cursor=CURSOR\n"
         "order: ?order=asc|desc\n"
@@ -1278,9 +1282,15 @@ def render_post_index(
             title = f' · "{post.title}"' if post.title else ""
             target = f"/{post.board}/{post.id}"
             if kind == "by-time":
-                lines.append(f"{iso(post.created)} · #{post.id} · {target} · {post.name}{title}")
+                prefix = iso(post.created)
+            elif kind == "by-updated":
+                prefix = iso(post.updated)
             else:
-                lines.append(f"#{post.id} · {target} · {iso(post.created)} · {post.name}{title}")
+                prefix = f"#{post.id}"
+            if kind in {"by-time", "by-updated"}:
+                lines.append(f"{prefix} · #{post.id} · {target} · {post.name}{title}")
+            else:
+                lines.append(f"{prefix} · {target} · {iso(post.created)} · {post.name}{title}")
     if next_url:
         lines += ["", f"next: {next_url}"]
     return "\n".join(lines) + "\n"
@@ -1305,6 +1315,54 @@ def render_name_index(
         lines += ["", f"next: {next_url}"]
     return "\n".join(lines) + "\n"
 
+
+def render_dimension_index(
+    kind: str,
+    entries: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    *,
+    order: str,
+    next_url: str | None = None,
+) -> str:
+    lines = [f"# /index/{kind}", "", f"order={order}", ""]
+    if not entries:
+        lines.append("(empty)")
+    elif kind == "by-tag":
+        for item in entries:
+            lines.append(
+                f"#{item['tag']} · /tag/{item['tag']} · "
+                f"posts={int(item['posts'])} · boards={int(item['boards'])}"
+            )
+    elif kind == "by-board":
+        for item in entries:
+            description = " ".join(str(item.get("description") or "").split())
+            suffix = f" · {description}" if description else ""
+            lines.append(
+                f"/{item['name']} · posts={int(item['posts'])} · "
+                f"latest=#{int(item['latest_id'])} · p{int(item['permissions'])}{suffix}"
+            )
+    elif kind == "by-author":
+        for item in entries:
+            lines.append(
+                f"{item['author_id']} · {item['key_url']} · "
+                f"posts={int(item['posts'])} · last={iso(float(item['last_seen']))}"
+            )
+    elif kind == "by-reply":
+        for item in entries:
+            parent = f"#{int(item['parent_id'])}"
+            if item.get("parent_board"):
+                parent += f" /{item['parent_board']}/{int(item['parent_id'])}"
+            else:
+                parent += " (parent unavailable)"
+            lines.append(
+                f"{parent} · replies={int(item['replies'])} · "
+                f"latest-reply=#{int(item['latest_reply_id'])}"
+            )
+    else:
+        raise ValueError(f"unsupported index renderer: {kind}")
+
+    if next_url:
+        lines += ["", f"next: {next_url}"]
+    return "\n".join(lines) + "\n"
 
 def render_index(
     cfg: Config,
