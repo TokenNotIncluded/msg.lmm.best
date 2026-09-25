@@ -185,6 +185,8 @@ DEFAULT_BOARDS = {
     "guest": "GET-only escape hatch. Anonymous and intentionally low-trust.",
     "custody": "GET-only custodial identities. Server holds signing keys; low assurance.",
     "ca": "Public CA audit log. Authority: /_csr, /_cert, /_revocations.",
+    "store": "Public product catalog. Publishing is certificate-gated.",
+    "ads": "Public advertisements. Publishing is certificate-gated.",
 }
 
 TABLES = """
@@ -737,10 +739,10 @@ class Store:
             self._ensure_schema()
             for name, description in DEFAULT_BOARDS.items():
                 self._ensure_board(name, description)
-            for name in ("guest", "custody", "ca"):
+            for name, description in DEFAULT_BOARDS.items():
                 self._conn.execute(
                     "UPDATE boards SET description = ? WHERE name = ?",
-                    (DEFAULT_BOARDS[name], name),
+                    (description, name),
                 )
             self._migrate_identity_names()
             if not had_inbox or not had_claims:
@@ -1572,6 +1574,8 @@ class Store:
                 (board,),
             ).fetchone()
         if row is None:
+            if board in self.cfg.certificate_only_topic_set:
+                return result((), (), version=0, updated=None, locked=False)
             return result(DEFAULT_ANONYMOUS, DEFAULT_SIGNED, version=0, updated=None, locked=False)
         return result(
             json.loads(str(row["anonymous"])),
