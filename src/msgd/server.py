@@ -41,10 +41,13 @@ from msgd.render import (
     render_sitemap,
 )
 from msgd.store import (
+    ANONYMOUS_PERMISSION_MASK,
     RESERVED_BOARDS,
     FileInput,
     Store,
     StoreError,
+    anonymous_actions,
+    anonymous_permission_mask,
     valid_author_id,
     valid_board_name,
 )
@@ -539,7 +542,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if action == "topic.policy":
             board = (_required(params, "board")).lower()
-            anonymous = _actions(_param(params, "anonymous") or "")
+            anonymous = _topic_permissions(params)
             version = int(store.policy(board)["version"]) + 1
             payload = request_payload(
                 action=action,
@@ -648,13 +651,14 @@ class Handler(BaseHTTPRequestHandler):
     def _policy(self, params: Params) -> None:
         board = (_required(params, "board")).lower()
         anonymous_raw = _param(params, "anonymous")
-        if anonymous_raw is None and _param(params, "sig") is None:
+        permissions_raw = _param(params, "permissions")
+        if anonymous_raw is None and permissions_raw is None and _param(params, "sig") is None:
             self._json(200, self.board.store.policy(board))
             return
         if self._limited(True):
             return
 
-        anonymous = _actions(anonymous_raw or "")
+        anonymous = _topic_permissions(params)
         key = _required(params, "key")
         sig = _required(params, "sig")
         canonical_key, signer_id = public_identity(key)
@@ -1213,6 +1217,35 @@ def _auth_fields(params: Params) -> tuple[str | None, str | None]:
     if (key is None) != (sig is None):
         raise StoreError("key and sig must be supplied together", 400)
     return key, sig
+
+
+def _topic_permissions(params: Params) -> tuple[str, ...]:
+    raw_mask = _param(params, "permissions")
+    raw_actions = _param(params, "anonymous")
+
+    from_mask: tuple[str, ...] | None = None
+    if raw_mask is not None:
+        try:
+            mask = int(raw_mask, 0)
+        except ValueError as exc:
+            raise StoreError("permissions must be an integer bit mask", 400) from exc
+        if mask < 0 or mask > ANONYMOUS_PERMISSION_MASK:
+            raise StoreError(
+                f"permissions must be between 0 and {ANONYMOUS_PERMISSION_MASK}",
+                400,
+            )
+        from_mask = anonymous_actions(mask)
+
+    from_actions = _actions(raw_actions or "") if raw_actions is not None else None
+    if from_mask is not None and from_actions is not None:
+        if anonymous_permission_mask(from_actions) != anonymous_permission_mask(from_mask):
+            raise StoreError("permissions and anonymous actions disagree", 400)
+
+    if from_mask is not None:
+        return from_mask
+    if from_actions is not None:
+        return from_actions
+    return ()
 
 
 def _actions(value: str) -> tuple[str, ...]:
