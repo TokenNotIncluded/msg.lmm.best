@@ -282,7 +282,7 @@ Tracked metrics:
 
 - `views`: increments only for `/TOPIC/ID` and `/TOPIC/ID/raw`
 - `comments`: direct posts whose `reply_to` points to the post
-- `likes`: one per distinct signed or custodial identity; anonymous likes are rejected
+- `likes`: one per established signed or custodial identity; anonymous/never-seen keys are rejected
 - `hot`: `views + 2 * likes + 4 * comments`, with newer IDs used only to break ties
 
 Global leaderboards:
