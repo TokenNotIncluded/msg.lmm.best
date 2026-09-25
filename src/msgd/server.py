@@ -73,6 +73,7 @@ from msgd.store import (
     valid_board_name,
 )
 from msgd.webhooks import WebhookService, normalize_events, validate_webhook_url
+from msgd.websub import WebSubService
 
 Params = dict[str, list[str]]
 Uploads = tuple[FileInput, ...]
@@ -147,6 +148,7 @@ class Board:
             self.engagement.sync_comments(self.store.comment_counts())
             self.engagement.sync_likes(self.store.like_counts())
         self.webhooks = WebhookService(cfg, self.store)
+        self.websub = WebSubService(cfg, self.store)
         self.reads = Limiter(
             burst=max(30, cfg.read_per_minute // 4),
             per_minute=cfg.read_per_minute,
@@ -175,6 +177,7 @@ class MsgServer(ThreadingHTTPServer):
         super().__init__(server_address, handler_class)
 
     def server_close(self) -> None:
+        self.board.websub.close()
         self.board.webhooks.close()
         self.board.engagement.close()
         self.board.exchange.close()
@@ -373,6 +376,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _emit_post_created(self, post: Any) -> None:
         self.board.exchange.index_post(post)
+        self.board.websub.publish(post.board)
         data = self._post_webhook_data(post)
         self.board.webhooks.emit(post.author_id, "post.created", data)
         for subject_id, kind in self.board.store.inbox_targets(post.id):
@@ -383,6 +387,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _emit_post_updated(self, post: Any) -> None:
         self.board.exchange.index_post(post, updated=True)
+        self.board.websub.publish(post.board)
         self.board.webhooks.emit(
             post.author_id,
             "post.updated",
@@ -412,6 +417,7 @@ class Handler(BaseHTTPRequestHandler):
         data["deleted_by"] = actor_id
         data["archived"] = archived
         data["purged"] = purged
+        self.board.websub.publish(post.board)
         self.board.webhooks.emit(post.author_id, "post.deleted", data)
 
     def do_OPTIONS(self) -> None:
@@ -561,18 +567,40 @@ class Handler(BaseHTTPRequestHandler):
                 for post in self.board.store.list_posts(limit=limit + 10)
                 if post.board != "index"
             ][:limit]
+            feed_path = "/rss.xml" if head == "rss.xml" else "/feed.xml"
             self._send(
                 200,
                 render_rss(
                     self.board.cfg,
                     posts,
-                    feed_path="/rss.xml" if head == "rss.xml" else "/feed.xml",
+                    feed_path=feed_path,
                 ),
                 content_type="application/rss+xml; charset=utf-8",
+                extra_headers={
+                    "Link": (
+                        f'<https://{self.board.cfg.site_name}{feed_path}>; rel="self"; '
+                        'type="application/rss+xml", '
+                        f'<https://{self.board.cfg.site_name}/hub>; rel="hub"'
+                    )
+                },
             )
             return
         if head == "favicon.ico":
             self._send(204, b"")
+            return
+        if head == "hub":
+            if method in {"GET", "HEAD"}:
+                self._send(
+                    200,
+                    "# WebSub hub\n\n"
+                    "POST application/x-www-form-urlencoded\n"
+                    "required: hub.mode hub.topic hub.callback\n"
+                    "optional: hub.lease_seconds hub.secret\n",
+                )
+                return
+            if self._limited(True):
+                return
+            self._websub(params)
             return
 
         if uploads and head not in {"publish", "_signing"}:
@@ -1006,6 +1034,7 @@ class Handler(BaseHTTPRequestHandler):
             assert limit is not None
             posts = self.board.store.list_posts(board=head, limit=limit, order="desc")
             feed_name = segments[1]
+            feed_path = f"/{head}/{feed_name}"
             self._send(
                 200,
                 render_rss(
@@ -1013,9 +1042,16 @@ class Handler(BaseHTTPRequestHandler):
                     posts,
                     board=head,
                     description=str(info["description"]),
-                    feed_path=f"/{head}/{feed_name}",
+                    feed_path=feed_path,
                 ),
                 content_type="application/rss+xml; charset=utf-8",
+                extra_headers={
+                    "Link": (
+                        f'<https://{self.board.cfg.site_name}{feed_path}>; rel="self"; '
+                        'type="application/rss+xml", '
+                        f'<https://{self.board.cfg.site_name}/hub>; rel="hub"'
+                    )
+                },
             )
             return
         if len(segments) == 2 and segments[1] == "post":
@@ -2134,6 +2170,16 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         raise StoreError("unsupported exchange action", 400)
+
+    def _websub(self, params: Params) -> None:
+        self.board.websub.request(
+            mode=_required(params, "hub.mode"),
+            topic=_required(params, "hub.topic"),
+            callback=_required(params, "hub.callback"),
+            lease_seconds=_param(params, "hub.lease_seconds"),
+            secret=_param(params, "hub.secret") or "",
+        )
+        self._send(202, b"")
 
     def _webhook(self, params: Params) -> None:
         action = _required(params, "action")
