@@ -169,12 +169,18 @@ def command_revoke(args: argparse.Namespace) -> int:
         signer_id=signer_id,
         version=1,
         serial=args.serial,
+        reason=args.reason,
     )
     signature = _sign_b64(key, payload)
     print(
         _post(
             args.api.rstrip("/") + "/_revoke",
-            {"serial": args.serial, "key": public, "sig": signature},
+            {
+                "serial": args.serial,
+                "key": public,
+                "sig": signature,
+                "reason": args.reason,
+            },
         ).strip()
     )
     return 0
@@ -209,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     revoke.add_argument("serial")
     revoke.add_argument("--key", default=DEFAULT_PRIVATE)
     revoke.add_argument("--api", default=DEFAULT_API)
+    revoke.add_argument("--reason", default="")
     revoke.set_defaults(func=command_revoke)
 
     args = parser.parse_args(argv)
