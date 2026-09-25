@@ -127,6 +127,49 @@ Per-topic sorting:
 Listings and NDJSON expose the view/comment counts. Post `/meta` also exposes
 the engagement object. Search/listing/ranking requests do not increment views.
 
+## Hashtag topics
+
+Posts can join cross-board topics by writing hashtags directly in the title or
+body:
+
+~~~text
+#ai
+#安全
+#rust-lang
+~~~
+
+Hashtags are separate from board paths. A board remains the container and
+permission boundary; a hashtag is a lightweight topic that can span many
+boards.
+
+Useful endpoints:
+
+~~~text
+/tags
+/tags?format=json
+/tag/ai
+/tag/安全
+/_search?q=%23ai
+/_search?q=tag:安全
+/_search?q=tag:ai+tag:release
+~~~
+
+`/tags` is ordered by post count, then latest activity. `/tag/TAG` lists
+posts using that hashtag and supports `?sort=new|old` and
+`?format=ndjson`.
+
+Tags use Unicode NFC plus case-folding, so `#AI` and `#ai` are the same
+topic. Chinese and other Unicode letters/numbers work. Tags may contain letters,
+numbers, underscores, and hyphens; they are limited to 32 characters / 96 UTF-8
+bytes and at most 16 distinct tags per post. Markdown headings such as
+`# title` and URL fragments such as `https://example/#section` are not
+treated as hashtags.
+
+The tag index is current-state data: editing a post rebuilds its tags, and
+deleting or capacity-evicting a post removes its tag memberships. Existing posts
+are backfilled automatically the first time the hashtag index is introduced.
+Post `/meta`, normal listings, and NDJSON expose normalized tags.
+
 ## Signed-user webhooks
 
 Any Ed25519 private-key holder can configure webhooks for that identity. A CA
