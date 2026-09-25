@@ -43,6 +43,7 @@ from msgd.render import (
     render_rules,
     render_schema,
     render_sitemap,
+    render_tags,
 )
 from msgd.search import SearchSyntaxError, parse_search_query, search_help
 from msgd.store import (
@@ -545,6 +546,7 @@ class Handler(BaseHTTPRequestHandler):
                     recent=recent,
                     authentications={post.id: store.post_authentication(post) for post in recent},
                     ca_ready=store.root_info() is not None,
+                    hashtags=store.list_tags(12),
                 ),
             )
             return
@@ -567,11 +569,21 @@ class Handler(BaseHTTPRequestHandler):
                     hot=hot,
                     authentications={post.id: store.post_authentication(post) for post in visible},
                     engagement=self._engagement_map(visible),
+                    hashtags=store.list_tags(10),
                 ),
             )
             return
         if head == "hot":
             self._hot(params)
+            return
+        if head == "tags":
+            self._tags(params)
+            return
+        if head == "tag":
+            if len(segments) != 2:
+                self._error(404, "tag name is required", "try /tags or /tag/TAG")
+                return
+            self._tag_view(segments[1], params)
             return
         if head == "_health":
             root = self.board.store.root_info()
@@ -678,6 +690,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.board.store.attachments(post.id),
                     self.board.store.post_authentication(post),
                     engagement,
+                    self.board.store.post_tags(post.id),
                 ),
             )
         elif action == "raw":
@@ -689,6 +702,7 @@ class Handler(BaseHTTPRequestHandler):
                     **post.to_dict(),
                     "authentication": self.board.store.post_authentication(post),
                     "engagement": engagement,
+                    "tags": list(self.board.store.post_tags(post.id)),
                     "likes": "unsupported",
                     "files": [file.to_dict() for file in self.board.store.attachments(post.id)],
                 },
@@ -1519,6 +1533,70 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _tags(self, params: Params) -> None:
+        limit = _int(params, "limit", 50, 1, self.board.cfg.max_limit)
+        assert limit is not None
+        tags = self.board.store.list_tags(limit)
+        if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
+            if (_param(params, "format") or "").lower() == "ndjson":
+                self._send(
+                    200,
+                    "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in tags),
+                    content_type="application/x-ndjson; charset=utf-8",
+                )
+            else:
+                self._json(200, tags)
+            return
+        self._send(200, render_tags(tags))
+
+    def _tag_view(self, tag: str, params: Params) -> None:
+        normalized = self.board.store.normalize_tag(tag)
+        info = self.board.store.tag_info(normalized)
+        if info is None:
+            self._error(404, f"no such hashtag: #{normalized}", "try /tags")
+            return
+
+        limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
+        assert limit is not None
+        sort = (_param(params, "sort") or "new").lower()
+        if sort not in {"new", "newest", "desc", "old", "oldest", "asc"}:
+            raise StoreError("tag sort must be new or old", 400)
+        order = "asc" if sort in {"old", "oldest", "asc"} else "desc"
+        posts = self.board.store.posts_by_tag(normalized, limit=limit + 1, order=order)
+        truncated = len(posts) > limit
+        posts = posts[:limit]
+        authentications = {
+            post.id: self.board.store.post_authentication(post) for post in posts
+        }
+        engagement = self._engagement_map(posts)
+        tags = self.board.store.tags_for_posts([post.id for post in posts])
+
+        if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
+            self._send(
+                200,
+                posts_to_ndjson(posts, authentications, engagement, tags),
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+
+        self._send(
+            200,
+            render_listing(
+                board=None,
+                posts=posts,
+                full=(_param(params, "view") or "").lower() == "full",
+                truncated=truncated,
+                note=(
+                    f"hashtag #{normalized} · {int(info['posts'])} posts · "
+                    f"{int(info['boards'])} boards"
+                ),
+                authentications=authentications,
+                engagement=engagement,
+                tags=tags,
+                heading=f"# /tag/{normalized}",
+            ),
+        )
+
     def _hot(self, params: Params) -> None:
         sort = (_param(params, "sort") or "hot").lower()
         if sort not in Engagement.SORTS:
@@ -1534,11 +1612,12 @@ class Handler(BaseHTTPRequestHandler):
         posts = posts[:limit]
         authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
+        tags = self.board.store.tags_for_posts([post.id for post in posts])
         heading = f"# /hot · sort={sort}" + (f" · /{board}" if board else "")
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(posts, authentications, engagement),
+                posts_to_ndjson(posts, authentications, engagement, tags),
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
@@ -1552,6 +1631,7 @@ class Handler(BaseHTTPRequestHandler):
                 note="Valkey engagement ranking; likes are unsupported",
                 authentications=authentications,
                 engagement=engagement,
+                tags=tags,
                 heading=heading,
             ),
         )
@@ -1609,10 +1689,11 @@ class Handler(BaseHTTPRequestHandler):
         posts = posts[:limit]
         authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
+        tags = self.board.store.tags_for_posts([post.id for post in posts])
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(posts, authentications, engagement),
+                posts_to_ndjson(posts, authentications, engagement, tags),
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
@@ -1626,6 +1707,7 @@ class Handler(BaseHTTPRequestHandler):
                 note=note,
                 authentications=authentications,
                 engagement=engagement,
+                tags=tags,
             ),
         )
 
@@ -1646,10 +1728,11 @@ class Handler(BaseHTTPRequestHandler):
         visible = posts[:limit]
         authentications = {post.id: self.board.store.post_authentication(post) for post in visible}
         engagement = self._engagement_map(visible)
+        tags = self.board.store.tags_for_posts([post.id for post in visible])
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(visible, authentications, engagement),
+                posts_to_ndjson(visible, authentications, engagement, tags),
                 content_type="application/x-ndjson; charset=utf-8",
                 extra_headers={"X-Search-Scan-Capped": "1"} if capped else None,
             )
@@ -1667,6 +1750,7 @@ class Handler(BaseHTTPRequestHandler):
                 note=note,
                 authentications=authentications,
                 engagement=engagement,
+                tags=tags,
             ),
         )
 
