@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from msgd.config import Config
 from msgd.crypto import certificate_payload, make_certificate
 from msgd.server import build_server
+from msgd.store import StoreError
 from msgd.webhooks import _public_addresses, delivery_signature, validate_webhook_url
 
 
@@ -345,23 +346,25 @@ class WebhookCase(unittest.TestCase):
             "https://localhost/hook",
             "https://example.com:8443/hook",
         ):
-            with self.assertRaises(Exception):
+            with self.assertRaises(StoreError):
                 validate_webhook_url(value)
 
-        with patch(
-            "msgd.webhooks.socket.getaddrinfo",
-            return_value=[
-                (
-                    2,
-                    1,
-                    6,
-                    "",
-                    ("127.0.0.1", 443),
-                )
-            ],
+        with (
+            patch(
+                "msgd.webhooks.socket.getaddrinfo",
+                return_value=[
+                    (
+                        2,
+                        1,
+                        6,
+                        "",
+                        ("127.0.0.1", 443),
+                    )
+                ],
+            ),
+            self.assertRaises(OSError),
         ):
-            with self.assertRaises(OSError):
-                _public_addresses("hooks.example.com")
+            _public_addresses("hooks.example.com")
 
         secret = "secret"
         timestamp = 123
