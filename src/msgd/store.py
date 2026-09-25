@@ -114,7 +114,8 @@ CREATE TABLE IF NOT EXISTS posts (
     sig_version INTEGER NOT NULL DEFAULT 0,
     sig_nonce   TEXT,
     sig_issued  INTEGER,
-    reply_to    INTEGER
+    reply_to    INTEGER,
+    locked      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS posts_board_seq ON posts(board, seq);
@@ -165,6 +166,29 @@ CREATE TABLE IF NOT EXISTS topic_policies (
     version   INTEGER NOT NULL,
     updated   REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS cert_requests (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_key      TEXT NOT NULL,
+    subject_id       TEXT NOT NULL,
+    requested_issuer TEXT NOT NULL,
+    grants           TEXT NOT NULL,
+    delegate         INTEGER NOT NULL,
+    message          TEXT NOT NULL DEFAULT '',
+    signature        TEXT NOT NULL,
+    nonce            TEXT NOT NULL,
+    issued           INTEGER NOT NULL,
+    created          REAL NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    decided          REAL,
+    decided_by       TEXT,
+    certificate_serial TEXT,
+    reason           TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS cert_requests_subject
+    ON cert_requests(subject_id, id);
+CREATE INDEX IF NOT EXISTS cert_requests_issuer_status
+    ON cert_requests(requested_issuer, status, id);
 
 CREATE TABLE IF NOT EXISTS inbox_events (
     post_id    INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
@@ -253,6 +277,7 @@ class Post:
     sig_nonce: str | None = None
     sig_issued: int | None = None
     reply_to: int | None = None
+    locked: bool = False
 
     @property
     def signed(self) -> bool:
@@ -283,6 +308,7 @@ class Post:
             "sig_nonce": self.sig_nonce if self.signed and self.sig_version == 1 else None,
             "sig_issued": self.sig_issued if self.signed and self.sig_version == 1 else None,
             "reply_to": self.reply_to,
+            "locked": self.locked,
         }
 
 
@@ -338,6 +364,7 @@ class Store:
             "sig_nonce": "TEXT",
             "sig_issued": "INTEGER",
             "reply_to": "INTEGER",
+            "locked": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, definition in additions.items():
             if name not in columns:
@@ -374,6 +401,28 @@ class Store:
                 version INTEGER NOT NULL,
                 updated REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS cert_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_key TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                requested_issuer TEXT NOT NULL,
+                grants TEXT NOT NULL,
+                delegate INTEGER NOT NULL,
+                message TEXT NOT NULL DEFAULT '',
+                signature TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                issued INTEGER NOT NULL,
+                created REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                decided REAL,
+                decided_by TEXT,
+                certificate_serial TEXT,
+                reason TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS cert_requests_subject
+                ON cert_requests(subject_id, id);
+            CREATE INDEX IF NOT EXISTS cert_requests_issuer_status
+                ON cert_requests(requested_issuer, status, id);
             CREATE TABLE IF NOT EXISTS inbox_events (
                 post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
                 subject_id TEXT NOT NULL,
