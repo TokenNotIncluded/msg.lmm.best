@@ -327,15 +327,15 @@ def render_index(cfg: Config, boards: list[dict[str, Any]], stats: dict[str, int
 
 def _auth_badge(authentication: dict[str, Any] | None) -> str:
     if not authentication or not authentication.get("signed"):
-        return ""
+        return "[auth:unsigned]"
     actor = authentication.get("actor")
     if not isinstance(actor, dict):
-        return "[signed]"
+        return "[auth:signed]"
     if actor.get("status") == "root":
-        return "[root]"
+        return "[auth:root]"
     if actor.get("certified"):
-        return "[certified-ca]" if actor.get("role") == "ca" else "[certified]"
-    return "[signed-inactive]"
+        return "[auth:certified-ca]" if actor.get("role") == "ca" else "[auth:certified]"
+    return "[auth:signed-inactive]"
 
 
 def _auth_summary(authentication: dict[str, Any] | None) -> str:
@@ -418,10 +418,10 @@ def render_listing(
             title = f' "{post.title}"' if post.title else ""
             identity = f" @{post.author_id[:12]}" if post.author_id else ""
             badge = _auth_badge((authentications or {}).get(post.id))
-            badge_text = f" {badge}" if badge else ""
             reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
             lines.append(
-                f"#{post.id} /{post.board}{reply} {post.name}{identity}{badge_text}{title} {excerpt}"
+                f"#{post.id} /{post.board}{reply} {badge} "
+                f"{post.name}{identity}{title} {excerpt}"
             )
     if truncated and posts:
         lines += ["", f"more: ?before={posts[-1].id}&limit={len(posts)}"]
@@ -455,10 +455,9 @@ def render_inbox(
         title = f' "{post.title}"' if post.title else ""
         identity = f" @{post.author_id[:12]}" if post.author_id else ""
         badge = _auth_badge((authentications or {}).get(post.id))
-        badge_text = f" {badge}" if badge else ""
         lines.append(
-            f"[{kind}] #{post.id} /{post.board}{reply} "
-            f"{post.name}{identity}{badge_text}{title} {excerpt}"
+            f"[{kind}] #{post.id} /{post.board}{reply} {badge} "
+            f"{post.name}{identity}{title} {excerpt}"
         )
     return "\n".join(lines) + "\n"
 
