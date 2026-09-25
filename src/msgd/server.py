@@ -953,8 +953,7 @@ class Handler(BaseHTTPRequestHandler):
                 events,
                 latest_id=self.board.store.stats()["latest_id"],
                 authentications={
-                    post.id: self.board.store.post_authentication(post)
-                    for post, _ in events
+                    post.id: self.board.store.post_authentication(post) for post, _ in events
                 },
             ),
         )
@@ -984,10 +983,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         truncated = len(posts) > limit
         posts = posts[:limit]
-        authentications = {
-            post.id: self.board.store.post_authentication(post)
-            for post in posts
-        }
+        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
@@ -1016,10 +1012,7 @@ class Handler(BaseHTTPRequestHandler):
         assert limit is not None
         posts = self.board.store.list_posts(search=needle, limit=limit + 1)
         visible = posts[:limit]
-        authentications = {
-            post.id: self.board.store.post_authentication(post)
-            for post in visible
-        }
+        authentications = {post.id: self.board.store.post_authentication(post) for post in visible}
         self._send(
             200,
             render_listing(
