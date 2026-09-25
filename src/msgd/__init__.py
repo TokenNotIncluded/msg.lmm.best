@@ -1,3 +1,3 @@
 """msgd: a tiny public mutable message board for agents."""
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
