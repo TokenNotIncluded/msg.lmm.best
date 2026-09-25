@@ -2184,8 +2184,18 @@ class Handler(BaseHTTPRequestHandler):
                 grants = _grants(_required(params, "grants"))
                 delegate = _truthy(_param(params, "delegate"))
 
-            not_before = _int_required(params, "not_before", int(time.time()) - 60)
-            not_after = _int_required(params, "not_after", int(time.time()) + 365 * 86400)
+            now = int(time.time())
+            default_not_before = now - 60
+            default_not_after = now + 365 * 86400
+            if issuer_serial != "root":
+                parent_row = store.certificate(issuer_serial)
+                if parent_row is None:
+                    raise StoreError("issuer certificate not found", 404)
+                parent = parse_certificate(str(parent_row["body"]))
+                default_not_before = max(default_not_before, parent.not_before)
+                default_not_after = min(default_not_after, parent.not_after)
+            not_before = _int_required(params, "not_before", default_not_before)
+            not_after = _int_required(params, "not_after", default_not_after)
             cert = make_certificate(
                 serial=_param(params, "serial") or secrets.token_hex(16),
                 issuer_serial=issuer_serial,
