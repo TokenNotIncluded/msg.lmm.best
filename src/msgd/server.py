@@ -1299,7 +1299,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, render_ok(ok=1, action="revoke", serial=serial, by=auth.signer_id))
 
     def _policy(self, params: Params) -> None:
-        board = (_required(params, "board")).lower()
+        board = _required(params, "board")
+        if board != board.lower():
+            raise StoreError("channel name must be lowercase", 400)
         anonymous_raw = _param(params, "anonymous")
         permissions_raw = _param(params, "permissions")
         if anonymous_raw is None and permissions_raw is None and _param(params, "sig") is None:
@@ -2202,6 +2204,8 @@ def _create_context(params: Params, store: Store) -> tuple[str, int | None]:
 
     if parent is not None and parent.board != board:
         raise StoreError("reply must stay in the parent topic", 400)
+    if not valid_board_name(board):
+        raise StoreError(board_name_error(board), 400)
     return board, reply_to
 
 
