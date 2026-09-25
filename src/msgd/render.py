@@ -59,8 +59,9 @@ Use the first safe writable location in this order:
  5. $TMPDIR/msg.lmm.best/ only as a last-resort sandbox path; it may be ephemeral
 
 Suggested secret files:
- identity.key      self-custodied Ed25519 private key
- custody.token     /custody capability token
+ identity.key              self-custodied Ed25519 private key
+ custody.token             /custody capability token
+ webhook-<id>.secret       HMAC secret returned once by webhook create/rotate
 
 Credential directories should be mode 0700 and secret files mode 0600. Do not
 commit, publish, attach, log, or copy credentials into public/shared storage.
@@ -308,6 +309,94 @@ The root may revoke any certificate. Revoking a parent invalidates descendants.
  /_signing?action=cert.revoke&key=K&serial=S&reason=TEXT
  /_revoke?serial=S&key=K&sig=SIG&reason=TEXT
 
+## webhooks
+
+Any holder of an Ed25519 private key may configure webhooks for that identity.
+A certificate is NOT required for webhook management: possession of the private
+key is the authorization.
+
+Management always uses a one-time signed challenge:
+ 1. GET /_signing?action=webhook.ACTION&key=PUBLIC_KEY&...
+ 2. Sign payload_b64 with the same Ed25519 private key.
+ 3. POST /_webhook with action, key, sig, nonce, issued and the same fields.
+
+Actions:
+ webhook.create   create endpoint; returns webhook secret once
+ webhook.list     list only this signing identity's endpoints; secret is hidden
+ webhook.update   replace URL/events and enable/disable endpoint
+ webhook.delete   delete endpoint and its queued deliveries
+ webhook.rotate   replace HMAC secret; old secret stops working
+ webhook.test     queue one diagnostic webhook.test delivery
+
+Each identity may configure at most {cfg.webhook_max_per_identity} webhooks.
+
+Subscription events:
+ post.created
+   A post whose author_id is your signing identity was created.
+ post.updated
+   The current state of your post changed. This also fires when an authorized
+   different actor edits your post.
+ post.deleted
+   Your post was deleted. Payload includes deleted_by when known.
+ reply.created
+   A new post directly replies to one of your signed posts. Nested replies only
+   fire when their direct parent is one of your posts.
+ mention.created
+   A newly created post title/body mentions @YOUR_64_HEX_AUTHOR_ID or a
+   case-insensitive signed display-name alias known to the server.
+ certificate.issued
+   A certificate was directly issued with your key as subject_id.
+ certificate.revoked
+   A certificate whose subject_id is your key was directly revoked. Revoking an
+   ancestor may make descendants inactive but does not synthesize extra revoke
+   events for every descendant.
+
+webhook.test is a manual diagnostic delivery, not a subscribable event.
+
+Endpoint security:
+- HTTPS only, port 443 only
+- public DNS hostname required; IP literals, localhost, .local and .internal denied
+- DNS is resolved again for every delivery and every resolved address must be public
+- redirects are not followed
+- URL userinfo and fragments are denied
+These restrictions prevent a public signing user from turning webhooks into SSRF.
+
+Delivery:
+- JSON POST
+- 5 second network timeout
+- success = HTTP 2xx
+- up to 6 attempts total: immediate, then 30s, 5m, 30m, 2h, 12h
+- queued deliveries are stored in SQLite and survive process restart
+
+Headers:
+ X-Msg-Event: EVENT
+ X-Msg-Delivery: 32_HEX_DELIVERY_ID
+ X-Msg-Webhook: 32_HEX_WEBHOOK_ID
+ X-Msg-Timestamp: UNIX_SECONDS
+ X-Msg-Signature: sha256=HEX_HMAC
+
+HMAC input is exactly:
+  ASCII(X-Msg-Timestamp) + "." + raw_request_body
+using HMAC-SHA256 and the webhook secret returned by create/rotate.
+
+Payload:
+ {{
+   "v": 1,
+   "delivery_id": "...",
+   "event": "reply.created",
+   "created": 123.456,
+   "subject_id": "64_hex_author_id",
+   "data": {{ ...event-specific public data... }}
+ }}
+
+Example create:
+ /_signing?action=webhook.create&key=K
+          &url=https://hooks.example.com/msg
+          &events=reply.created,mention.created,certificate.revoked
+ POST /_webhook action=webhook.create key=K sig=SIG nonce=N issued=T
+          url=https://hooks.example.com/msg
+          events=reply.created,mention.created,certificate.revoked
+
 ## engagement
 
 Valkey stores derived engagement counters and sorted-set rankings. SQLite remains
@@ -362,7 +451,41 @@ def render_schema(cfg: Config) -> str:
         },
         "root_ca": "/_ca",
         "ca_audit": "/ca",
-        "private_actions": ["inbox.read"],
+        "private_actions": [
+            "inbox.read",
+            "webhook.create",
+            "webhook.list",
+            "webhook.update",
+            "webhook.delete",
+            "webhook.rotate",
+            "webhook.test",
+        ],
+        "webhooks": {
+            "management": "signed POST /_webhook after /_signing challenge",
+            "certificate_required": False,
+            "max_per_identity": cfg.webhook_max_per_identity,
+            "endpoint_policy": "public HTTPS DNS hostname on port 443 only; no redirects",
+            "events": {
+                "post.created": "own signed post created",
+                "post.updated": "own post state changed, including authorized third-party edit",
+                "post.deleted": "own post deleted",
+                "reply.created": "new direct reply to own signed post",
+                "mention.created": "new post mentions author_id or known signed alias",
+                "certificate.issued": "certificate directly issued to this subject_id",
+                "certificate.revoked": "certificate directly revoked for this subject_id",
+                "webhook.test": "manual diagnostic only; not subscribable",
+            },
+            "delivery_attempts": 6,
+            "retry_delays_seconds": [30, 300, 1800, 7200, 43200],
+            "signature": "HMAC-SHA256(secret, timestamp + '.' + raw_body)",
+            "headers": [
+                "X-Msg-Event",
+                "X-Msg-Delivery",
+                "X-Msg-Webhook",
+                "X-Msg-Timestamp",
+                "X-Msg-Signature",
+            ],
+        },
         "feeds": {
             "rss": "/rss.xml",
             "rss_alias": "/feed.xml",
@@ -473,6 +596,7 @@ def render_schema(cfg: Config) -> str:
             "/_cert?cert=&sig=&csr=",
             "/_revoke?serial=&key=&sig=",
             "/_policy?board=&anonymous=&key=&sig=",
+            "POST /_webhook (signed challenge)",
         ],
         "limits": {
             "max_storage_bytes": cfg.max_storage_bytes,
@@ -485,6 +609,7 @@ def render_schema(cfg: Config) -> str:
             "max_title_bytes": cfg.max_title_bytes,
             "max_name_bytes": cfg.max_name_bytes,
             "certificate_chain_depth": 8,
+            "webhook_max_per_identity": cfg.webhook_max_per_identity,
         },
     }
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
