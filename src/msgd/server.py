@@ -240,6 +240,30 @@ class Handler(BaseHTTPRequestHandler):
                 return value.strip()
         return self.client_address[0] if self.client_address else "unknown"
 
+    def _browser_view_mode(self) -> str | None:
+        if not is_browser_user_agent(self.headers.get("User-Agent") or ""):
+            return None
+        cookies = SimpleCookie()
+        try:
+            cookies.load(self.headers.get("Cookie") or "")
+        except CookieError:
+            return "ask"
+        value = cookies.get(VIEW_COOKIE)
+        if value is not None and value.value in {"markdown", "html"}:
+            return value.value
+        return "ask"
+
+    def _is_markdown_response(self, body: str | bytes, content_type: str) -> bool:
+        if not isinstance(body, str) or self.command not in {"GET", "HEAD"}:
+            return False
+        path = urlparse(self.path).path
+        if path.endswith("/raw"):
+            return False
+        media_type = content_type.split(";", 1)[0].strip().casefold()
+        if media_type == "text/markdown":
+            return True
+        return media_type == "text/plain" and body.lstrip().startswith("#")
+
     def _send(
         self,
         status: int,
@@ -248,9 +272,9 @@ class Handler(BaseHTTPRequestHandler):
         content_type: str = "text/plain; charset=utf-8",
         extra_headers: dict[str, str] | None = None,
     ) -> None:
-        payload = body.encode("utf-8") if isinstance(body, str) else body
         capture = getattr(self, "_path_get_capture", None)
         if capture is not None:
+            payload = body.encode("utf-8") if isinstance(body, str) else body
             capture.update(
                 {
                     "status": status,
@@ -260,6 +284,35 @@ class Handler(BaseHTTPRequestHandler):
                 }
             )
             return
+
+        response_headers = dict(extra_headers or {})
+        if self._is_markdown_response(body, content_type):
+            mode = self._browser_view_mode()
+            if mode is not None:
+                vary = response_headers.get("Vary")
+                response_headers["Vary"] = (
+                    f"{vary}, User-Agent, Cookie" if vary else "User-Agent, Cookie"
+                )
+                if mode == "ask":
+                    body = render_view_prompt(
+                        site_name=self.board.cfg.site_name,
+                        current_path=self.path,
+                    )
+                    content_type = "text/html; charset=utf-8"
+                    response_headers.setdefault("Content-Security-Policy", HTML_CSP)
+                elif mode == "html":
+                    assert isinstance(body, str)
+                    body = render_markdown_html(
+                        body,
+                        site_name=self.board.cfg.site_name,
+                        current_path=self.path,
+                    )
+                    content_type = "text/html; charset=utf-8"
+                    response_headers.setdefault("Content-Security-Policy", HTML_CSP)
+                else:
+                    content_type = "text/markdown; charset=utf-8"
+
+        payload = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
@@ -274,7 +327,7 @@ class Handler(BaseHTTPRequestHandler):
             '</rules>; rel="help", '
             '</rss.xml>; rel="alternate"; type="application/rss+xml"; title="RSS"',
         )
-        for key, value in (extra_headers or {}).items():
+        for key, value in response_headers.items():
             self.send_header(key, value)
         self.end_headers()
         if self.command != "HEAD":
