@@ -375,10 +375,11 @@ class Store:
             self._ensure_schema()
             for name, description in DEFAULT_BOARDS.items():
                 self._ensure_board(name, description)
-            self._conn.execute(
-                "UPDATE boards SET description = ? WHERE name = 'ca' AND description = ''",
-                (DEFAULT_BOARDS["ca"],),
-            )
+            for name in ("guest", "custody", "ca"):
+                self._conn.execute(
+                    "UPDATE boards SET description = ? WHERE name = ?",
+                    (DEFAULT_BOARDS[name], name),
+                )
             if not had_inbox:
                 self._rebuild_inbox()
 
@@ -2005,6 +2006,11 @@ class Store:
             rows = self._conn.execute(sql, params).fetchall()
         return [post for row in rows if (post := self._row(row)) is not None]
 
+    @staticmethod
+    def _like_pattern(value: str) -> str:
+        escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return f"%{escaped}%"
+
     def search_posts(
         self,
         spec: SearchSpec,
@@ -2042,16 +2048,18 @@ class Store:
             where.append("NOT EXISTS (SELECT 1 FROM attachments a WHERE a.post_id = p.id)")
 
         for term in spec.terms:
-            where.append("(p.title LIKE ? OR p.body LIKE ?)")
-            needle = f"%{term}%"
+            where.append("(p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')")
+            needle = self._like_pattern(term)
             params.extend((needle, needle))
         for term in spec.excluded_terms:
-            where.append("NOT (p.title LIKE ? OR p.body LIKE ?)")
-            needle = f"%{term}%"
+            where.append(
+                "NOT (p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')"
+            )
+            needle = self._like_pattern(term)
             params.extend((needle, needle))
         for term in spec.title_terms:
-            where.append("p.title LIKE ?")
-            params.append(f"%{term}%")
+            where.append("p.title LIKE ? ESCAPE '\\'")
+            params.append(self._like_pattern(term))
 
         dynamic_auth = spec.auth in {"certified", "certified-ca", "signed-inactive"}
         if spec.auth == "unsigned":
