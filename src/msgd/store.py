@@ -869,24 +869,34 @@ class Store:
             raise StoreError(str(exc), 403) from exc
 
         with self._lock, self._conn:
-            self._conn.execute(
-                """
-                INSERT INTO certificates(
-                    serial, issuer_serial, issuer_id, subject_id, subject_key,
-                    body, signature, created
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    cert.serial,
-                    cert.issuer_serial,
-                    cert.issuer_id,
-                    cert.subject_id,
-                    cert.subject_key,
-                    cert.body,
-                    canonical_sig,
-                    time.time(),
-                ),
-            )
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO certificates(
+                        serial, issuer_serial, issuer_id, subject_id, subject_key,
+                        body, signature, created
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cert.serial,
+                        cert.issuer_serial,
+                        cert.issuer_id,
+                        cert.subject_id,
+                        cert.subject_key,
+                        cert.body,
+                        canonical_sig,
+                        time.time(),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                existing = self.certificate(cert.serial)
+                if (
+                    existing is not None
+                    and existing["body"] == cert.body
+                    and existing["signature"] == canonical_sig
+                ):
+                    return cert
+                raise StoreError("certificate serial already exists", 409) from exc
             self._append_ca_event(
                 "ISSUED",
                 {
