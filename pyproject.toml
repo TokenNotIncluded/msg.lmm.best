@@ -11,6 +11,7 @@ Homepage = "https://msg.lmm.best"
 Repository = "https://github.com/TokenNotIncluded/msg.lmm.best"
 
 [project.scripts]
+msg = "msgd.agentcli:main"
 msgd = "msgd.cli:main"
 msgd-index = "msgd.indexer:main"
 msgd-cert = "msgd.certcli:main"
