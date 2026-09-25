@@ -107,12 +107,8 @@ class Config:
             ),
             repo_root=get("repos", "root", base.repo_root),
             repo_max_blob_bytes=get("repos", "max_blob_bytes", base.repo_max_blob_bytes),
-            repo_auth_ttl_seconds=get(
-                "repos", "auth_ttl_seconds", base.repo_auth_ttl_seconds
-            ),
-            repo_max_request_bytes=get(
-                "repos", "max_request_bytes", base.repo_max_request_bytes
-            ),
+            repo_auth_ttl_seconds=get("repos", "auth_ttl_seconds", base.repo_auth_ttl_seconds),
+            repo_max_request_bytes=get("repos", "max_request_bytes", base.repo_max_request_bytes),
             max_storage_bytes=get("storage", "max_storage_bytes", base.max_storage_bytes),
             max_post_bytes=get("limits", "max_post_bytes", base.max_post_bytes),
             max_post_bytes_post=get("limits", "max_post_bytes_post", base.max_post_bytes_post),
