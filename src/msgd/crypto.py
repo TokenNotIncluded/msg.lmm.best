@@ -128,6 +128,8 @@ def request_payload(
     webhook_url: str = "",
     webhook_events: tuple[str, ...] = (),
     webhook_enabled: bool = True,
+    profile_name: str = "",
+    profile_bio: str = "",
 ) -> bytes:
     if not IDENTITY_RE.fullmatch(signer_id):
         raise SignatureError("invalid signer id")
@@ -240,6 +242,17 @@ def request_payload(
             ("webhook_url", webhook_url),
             ("webhook_events", canonical_json(sorted(webhook_events))),
             ("webhook_enabled", "1" if webhook_enabled else "0"),
+        ]
+    elif action == "profile.update":
+        if nonce is None or issued is None:
+            raise SignatureError("profile.update requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("profile_name", profile_name),
+            ("profile_bio", profile_bio),
         ]
     else:
         raise SignatureError(f"unsupported signed action: {action}")
