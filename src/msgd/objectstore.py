@@ -13,9 +13,9 @@ import shutil
 import subprocess
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 OID_RE = re.compile(r"^[0-9a-f]{40,64}$")
 
