@@ -473,4 +473,4 @@ def _integer(value: dict[str, Any], key: str) -> int:
 
 
 def _valid_topic(topic: str) -> bool:
-    return bool(re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,31}", topic))
+    return bool(re.fullmatch(r"[a-z][a-z0-9]{1,23}", topic))
