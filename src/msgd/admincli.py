@@ -9,7 +9,6 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
@@ -472,17 +471,11 @@ def command_delete_post(args: argparse.Namespace) -> int:
     return 0
 
 
-def _root_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--api", default=DEFAULT_API, help=f"msgd API (default: {DEFAULT_API})")
-    parser.add_argument("--key", default=DEFAULT_PRIVATE, help=f"Ed25519 private key (default: {DEFAULT_PRIVATE})")
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="msgd-admin",
         description="Root/super-admin commands for msg.lmm.best",
     )
-    parser.add_argument("--api", default=DEFAULT_API, help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="command", required=True)
 
     status = sub.add_parser("status", help="show server, Root CA, and pending CSR status")
