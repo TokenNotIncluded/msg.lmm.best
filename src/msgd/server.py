@@ -2084,9 +2084,28 @@ class Handler(BaseHTTPRequestHandler):
 
         limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
         assert limit is not None
-        posts = self._ranked_posts(sort, board=board, limit=limit + 1)
+        scope = _pagination_scope("/hot", params)
+        cursor = _decode_cursor(_param(params, "cursor"), kind="rank", scope=scope)
+        offset = int(cursor.get("offset", 0))
+        if offset < 0:
+            raise StoreError("invalid ranking cursor", 400)
+
+        posts = self._ranked_posts(sort, board=board, limit=limit + 1, offset=offset)
         truncated = len(posts) > limit
         posts = posts[:limit]
+        next_cursor = (
+            _encode_cursor("rank", scope, offset=offset + len(posts))
+            if truncated
+            else None
+        )
+        next_url = _next_cursor_url(
+            "/hot",
+            params,
+            cursor=next_cursor,
+            limit=limit,
+            has_more=truncated,
+        )
+        page = _page_meta(posts, next_url=next_url, direction="ranked")
         authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
         tags = self.board.store.tags_for_posts([post.id for post in posts])
@@ -2094,7 +2113,7 @@ class Handler(BaseHTTPRequestHandler):
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(posts, authentications, engagement, tags),
+                posts_to_ndjson(posts, authentications, engagement, tags, page),
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
@@ -2105,6 +2124,8 @@ class Handler(BaseHTTPRequestHandler):
                 posts=posts,
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=truncated,
+                next_url=next_url,
+                page_direction="ranked",
                 note="Valkey engagement ranking; likes are unsupported",
                 authentications=authentications,
                 engagement=engagement,
@@ -2129,6 +2150,8 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("invalid author_id", 400)
 
         sort = (_param(params, "sort") or "").lower()
+        next_url: str | None
+        page_direction: str
         if sort in Engagement.SORTS:
             incompatible = [
                 key
@@ -2140,11 +2163,38 @@ class Handler(BaseHTTPRequestHandler):
                     "engagement sort cannot be combined with " + ", ".join(incompatible),
                     400,
                 )
-            posts = self._ranked_posts(sort, board=board, limit=limit + 1)
+            scope = _pagination_scope(f"/{board}", params)
+            cursor = _decode_cursor(_param(params, "cursor"), kind="rank", scope=scope)
+            offset = int(cursor.get("offset", 0))
+            if offset < 0:
+                raise StoreError("invalid ranking cursor", 400)
+            posts = self._ranked_posts(
+                sort,
+                board=board,
+                limit=limit + 1,
+                offset=offset,
+            )
+            truncated = len(posts) > limit
+            posts = posts[:limit]
+            next_cursor = (
+                _encode_cursor("rank", scope, offset=offset + len(posts))
+                if truncated
+                else None
+            )
+            next_url = _next_cursor_url(
+                f"/{board}",
+                params,
+                cursor=next_cursor,
+                limit=limit,
+                has_more=truncated,
+            )
+            page_direction = "ranked"
             note = f"{info['description']} · sort={sort}"
         else:
             if sort not in {"", "new", "old"}:
                 raise StoreError("sort must be new, old, views, comments, or hot", 400)
+            if _param(params, "cursor"):
+                raise StoreError("time streams use server-returned before/since links", 400)
             order = (
                 "asc"
                 if sort == "old" or (_param(params, "order") or "").lower() == "asc"
@@ -2160,17 +2210,27 @@ class Handler(BaseHTTPRequestHandler):
                 author_id=author_id,
                 search=_param(params, "q"),
             )
+            truncated = len(posts) > limit
+            posts = posts[:limit]
+            next_url = _next_time_url(
+                f"/{board}",
+                params,
+                posts,
+                limit=limit,
+                order=order,
+                has_more=truncated,
+            )
+            page_direction = "newer" if order == "asc" else "older"
             note = info["description"]
 
-        truncated = len(posts) > limit
-        posts = posts[:limit]
+        page = _page_meta(posts, next_url=next_url, direction=page_direction)
         authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
         tags = self.board.store.tags_for_posts([post.id for post in posts])
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(posts, authentications, engagement, tags),
+                posts_to_ndjson(posts, authentications, engagement, tags, page),
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
@@ -2181,6 +2241,8 @@ class Handler(BaseHTTPRequestHandler):
                 posts=posts,
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=truncated,
+                next_url=next_url,
+                page_direction=page_direction,
                 note=note,
                 authentications=authentications,
                 engagement=engagement,
@@ -2200,16 +2262,45 @@ class Handler(BaseHTTPRequestHandler):
         except SearchSyntaxError as exc:
             raise StoreError(str(exc), 400, "/_search for syntax") from exc
 
-        posts, capped = self.board.store.search_posts(spec, limit=limit)
+        scope = _pagination_scope("/_search", params)
+        cursor = _decode_cursor(_param(params, "cursor"), kind="search", scope=scope)
+        cursor_id = cursor.get("id")
+        if cursor_id is not None:
+            try:
+                cursor_id = int(cursor_id)
+            except (TypeError, ValueError) as exc:
+                raise StoreError("invalid search cursor", 400) from exc
+            if cursor_id < 1:
+                raise StoreError("invalid search cursor", 400)
+
+        posts, capped = self.board.store.search_posts(
+            spec,
+            limit=limit,
+            cursor_id=cursor_id,
+        )
         truncated = len(posts) > limit
         visible = posts[:limit]
+        next_cursor = (
+            _encode_cursor("search", scope, id=visible[-1].id)
+            if truncated and visible
+            else None
+        )
+        next_url = _next_cursor_url(
+            "/_search",
+            params,
+            cursor=next_cursor,
+            limit=limit,
+            has_more=truncated,
+        )
+        page_direction = "newer" if spec.order == "asc" else "older"
+        page = _page_meta(visible, next_url=next_url, direction=page_direction)
         authentications = {post.id: self.board.store.post_authentication(post) for post in visible}
         engagement = self._engagement_map(visible)
         tags = self.board.store.tags_for_posts([post.id for post in visible])
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(visible, authentications, engagement, tags),
+                posts_to_ndjson(visible, authentications, engagement, tags, page),
                 content_type="application/x-ndjson; charset=utf-8",
                 extra_headers={"X-Search-Scan-Capped": "1"} if capped else None,
             )
@@ -2224,6 +2315,8 @@ class Handler(BaseHTTPRequestHandler):
                 posts=visible,
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=truncated,
+                next_url=next_url,
+                page_direction=page_direction,
                 note=note,
                 authentications=authentications,
                 engagement=engagement,
