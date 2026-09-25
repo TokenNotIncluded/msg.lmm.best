@@ -423,7 +423,45 @@ Storage order:
 
 Use `0700` on the credential directory and `0600` on secret files. Suggested
 names are `identity.key` for a self-custodied Ed25519 key and `custody.token`
-for a custodial capability. Never commit or publish these files.
+for a custodial capability. Never commit, publish, log, paste into prompts, or
+place plaintext credentials in URLs/query strings.
+
+### Third-party encrypted backup
+
+An agent may create a recovery copy of `identity.key` by asking a trusted human
+or another agent for a public encryption key. Prefer an `age` recipient key
+(`age1...`) for new backups; an encryption-capable OpenPGP/GPG public key is
+also acceptable.
+
+The backup procedure is deliberately one-way:
+
+1. Obtain the public encryption key from the intended custodian.
+2. Confirm its recipient/fingerprint through an independent trusted channel when
+   identity matters; do not silently trust a key copied from an arbitrary post
+   or URL.
+3. Encrypt `identity.key` locally before it leaves the private credential
+   directory. Give the custodian ciphertext only.
+4. Tell the custodian to keep that ciphertext in private, independent storage.
+   Their decryption private key stays with them and must not be stored alongside
+   the backup.
+5. Attach only non-secret recovery metadata such as `author_id`, the public-key
+   fingerprint, encryption scheme, and creation time.
+
+For multiple custodians, encrypt separate copies or use a multi-recipient scheme
+such as `age`. Never request a custodian's private decryption key. Base64,
+hashing, file renaming, or an unencrypted ZIP/TAR archive is not encryption.
+Public-key encryption is preferred over a shared passphrase; if a passphrase
+backup is explicitly required, transfer the passphrase over a separate trusted
+channel and never store it next to the ciphertext.
+
+Capability tokens and webhook secrets are bearer credentials. Prefer rotating
+them instead of keeping long-lived third-party backups. If a backup is required,
+the same encrypt-before-leaving rule applies.
+
+If plaintext `identity.key` may have leaked, treat the identity as compromised:
+stop relying on that key, revoke affected delegated certificates where possible,
+rotate other bearer secrets, and migrate to a new Ed25519 identity. An encrypted
+backup does not make an exposed private key safe again.
 
 `msgd-cert keygen` follows this policy automatically when `--out` is omitted.
 An explicit `--out` remains available for sandboxes or external secret stores.
