@@ -12,12 +12,14 @@ from valkey.exceptions import ValkeyError
 class EngagementStats:
     views: int = 0
     comments: int = 0
+    likes: int = 0
     hot: float = 0.0
 
     def to_dict(self) -> dict[str, int | float]:
         return {
             "views": self.views,
             "comments": self.comments,
+            "likes": self.likes,
             "hot": round(self.hot, 3),
         }
 
@@ -25,11 +27,11 @@ class EngagementStats:
 class Engagement:
     """Derived engagement state.
 
-    SQLite remains authoritative for posts/replies. Valkey stores fast counters
-    and sorted-set rankings. Likes intentionally do not exist.
+    SQLite remains authoritative for posts/replies/likes. Valkey stores fast
+    counters and sorted-set rankings.
     """
 
-    SORTS = frozenset({"views", "comments", "hot"})
+    SORTS = frozenset({"views", "comments", "likes", "hot"})
 
     def __init__(self, url: str = "", *, prefix: str = "msgd") -> None:
         self.url = url.strip()
@@ -75,10 +77,10 @@ class Engagement:
         return str(post_id)
 
     @staticmethod
-    def _hot_score(post_id: int, views: float, comments: float) -> float:
-        # Comments signal more deliberate engagement than a read. The tiny id
-        # component is only a deterministic newest-first tiebreaker.
-        return views + comments * 4.0 + min(post_id, 999_999_999) * 1e-12
+    def _hot_score(post_id: int, views: float, comments: float, likes: float) -> float:
+        # Likes are stronger than passive reads but weaker than replies. The tiny
+        # id component is only a deterministic newest-first tiebreaker.
+        return views + likes * 2.0 + comments * 4.0 + min(post_id, 999_999_999) * 1e-12
 
     def sync_comments(self, rows: list[tuple[int, str, int]]) -> None:
         """Rebuild comment/hot rankings and reconcile them with live SQLite posts."""
@@ -113,16 +115,69 @@ class Engagement:
                 pipe.zadd(self._key("comments"), {member: count})
                 pipe.zadd(self._key("comments", board), {member: count})
                 pipe.zscore(self._key("views"), member)
+                pipe.zscore(self._key("likes"), member)
             results = pipe.execute()
 
             hot_pipe = client.pipeline(transaction=False)
             for index, (post_id, board, count) in enumerate(rows):
-                raw_views = results[index * 5 + 4]
+                raw_views = results[index * 6 + 4]
+                raw_likes = results[index * 6 + 5]
                 views = float(raw_views or 0)
-                score = self._hot_score(post_id, views, float(count))
+                likes = float(raw_likes or 0)
+                score = self._hot_score(post_id, views, float(count), likes)
                 member = self._member(post_id)
                 hot_pipe.zadd(self._key("hot"), {member: score})
                 hot_pipe.zadd(self._key("hot", board), {member: score})
+            hot_pipe.execute()
+        except (ValkeyError, OSError) as exc:
+            self.error = str(exc)
+
+    def sync_likes(self, rows: list[tuple[int, str, int]]) -> None:
+        """Rebuild like/hot rankings from authoritative SQLite like rows."""
+        client = self.client
+        if client is None:
+            return
+        try:
+            live = {self._member(post_id) for post_id, _, _ in rows}
+            live_by_board: dict[str, set[str]] = {}
+            for post_id, board, _ in rows:
+                live_by_board.setdefault(board, set()).add(self._member(post_id))
+
+            prune = client.pipeline(transaction=False)
+            existing = set(client.zrange(self._key("likes"), 0, -1))
+            stale = existing - live
+            if stale:
+                prune.zrem(self._key("likes"), *stale)
+            for key in client.scan_iter(match=f"{self.prefix}:engagement:likes:board:*"):
+                board = key.rsplit(":board:", 1)[-1]
+                existing = set(client.zrange(key, 0, -1))
+                stale = existing - live_by_board.get(board, set())
+                if stale:
+                    prune.zrem(key, *stale)
+            prune.execute()
+
+            pipe = client.pipeline(transaction=False)
+            for post_id, board, count in rows:
+                member = self._member(post_id)
+                pipe.zadd(self._key("likes"), {member: count})
+                pipe.zadd(self._key("likes", board), {member: count})
+                pipe.zscore(self._key("views"), member)
+                pipe.zscore(self._key("comments"), member)
+            results = pipe.execute()
+
+            hot_pipe = client.pipeline(transaction=False)
+            for index, (post_id, board, count) in enumerate(rows):
+                raw_views = results[index * 4 + 2]
+                raw_comments = results[index * 4 + 3]
+                hot = self._hot_score(
+                    post_id,
+                    float(raw_views or 0),
+                    float(raw_comments or 0),
+                    float(count),
+                )
+                member = self._member(post_id)
+                hot_pipe.zadd(self._key("hot"), {member: hot})
+                hot_pipe.zadd(self._key("hot", board), {member: hot})
             hot_pipe.execute()
         except (ValkeyError, OSError) as exc:
             self.error = str(exc)
@@ -137,12 +192,14 @@ class Engagement:
             pipe.zincrby(self._key("views"), 1, member)
             pipe.zincrby(self._key("views", board), 1, member)
             pipe.zscore(self._key("comments"), member)
-            views, _, raw_comments = pipe.execute()
+            pipe.zscore(self._key("likes"), member)
+            views, _, raw_comments, raw_likes = pipe.execute()
             comments = float(raw_comments or 0)
-            hot = self._hot_score(post_id, float(views), comments)
+            likes = float(raw_likes or 0)
+            hot = self._hot_score(post_id, float(views), comments, likes)
             client.zadd(self._key("hot"), {member: hot})
             client.zadd(self._key("hot", board), {member: hot})
-            return EngagementStats(int(float(views)), int(comments), hot)
+            return EngagementStats(int(float(views)), int(comments), int(likes), hot)
         except (ValkeyError, OSError) as exc:
             self.error = str(exc)
             return EngagementStats()
@@ -159,9 +216,34 @@ class Engagement:
             pipe.zadd(self._key("comments"), {member: comments})
             pipe.zadd(self._key("comments", board), {member: comments})
             pipe.zscore(self._key("views"), member)
-            _, _, _, _, raw_views = pipe.execute()
+            pipe.zscore(self._key("likes"), member)
+            _, _, _, _, raw_views, raw_likes = pipe.execute()
             views = float(raw_views or 0)
-            hot = self._hot_score(post_id, views, float(comments))
+            likes = float(raw_likes or 0)
+            hot = self._hot_score(post_id, views, float(comments), likes)
+            client.zadd(self._key("hot"), {member: hot})
+            client.zadd(self._key("hot", board), {member: hot})
+        except (ValkeyError, OSError) as exc:
+            self.error = str(exc)
+
+    def set_likes(self, post_id: int, board: str, likes: int) -> None:
+        client = self.client
+        if client is None:
+            return
+        member = self._member(post_id)
+        try:
+            pipe = client.pipeline(transaction=False)
+            pipe.zadd(self._key("likes"), {member: likes})
+            pipe.zadd(self._key("likes", board), {member: likes})
+            pipe.zscore(self._key("views"), member)
+            pipe.zscore(self._key("comments"), member)
+            _, _, raw_views, raw_comments = pipe.execute()
+            hot = self._hot_score(
+                post_id,
+                float(raw_views or 0),
+                float(raw_comments or 0),
+                float(likes),
+            )
             client.zadd(self._key("hot"), {member: hot})
             client.zadd(self._key("hot", board), {member: hot})
         except (ValkeyError, OSError) as exc:
@@ -206,6 +288,7 @@ class Engagement:
                 member = self._member(post_id)
                 pipe.zscore(self._key("views"), member)
                 pipe.zscore(self._key("comments"), member)
+                pipe.zscore(self._key("likes"), member)
                 pipe.zscore(self._key("hot"), member)
             values = pipe.execute()
         except (ValkeyError, OSError) as exc:
@@ -214,10 +297,11 @@ class Engagement:
 
         result: dict[int, EngagementStats] = {}
         for index, post_id in enumerate(post_ids):
-            views, comments, hot = values[index * 3 : index * 3 + 3]
+            views, comments, likes, hot = values[index * 4 : index * 4 + 4]
             result[post_id] = EngagementStats(
                 views=int(float(views or 0)),
                 comments=int(float(comments or 0)),
+                likes=int(float(likes or 0)),
                 hot=float(hot or 0),
             )
         return result
