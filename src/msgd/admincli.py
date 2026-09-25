@@ -55,7 +55,10 @@ class Api:
             with urlopen(request, timeout=self.timeout) as response:
                 return response.read().decode("utf-8")
         except HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace")
+            try:
+                body = exc.read().decode("utf-8", "replace")
+            finally:
+                exc.close()
             raise AdminError(f"HTTP {exc.code}: {body.strip()}") from exc
         except URLError as exc:
             raise AdminError(f"cannot reach {url}: {exc.reason}") from exc
