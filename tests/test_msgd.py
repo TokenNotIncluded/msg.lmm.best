@@ -1111,7 +1111,7 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(self.c.get("/publish", board="main", text="anon")[0], 403)
 
         member = Ed25519PrivateKey.generate()
-        pid = self.signed_create(member, "signed without certificate")
+        pid = self.signed_create(member, "signed")
         self.assertGreater(pid, 0)
         meta = json.loads(self.c.get(f"/main/{pid}/meta")[1])
         self.assertEqual(meta["authentication"]["status"], "signed")
@@ -1230,6 +1230,12 @@ class PostUploadCase(unittest.TestCase):
             read_per_minute=1000,
         )
         self.server = build_server(cfg)
+        self.server.board.store.set_policy(
+            "main",
+            ("post.create", "post.edit.any", "post.delete.any"),
+            None,
+            1,
+        )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         host, port = self.server.server_address[:2]
