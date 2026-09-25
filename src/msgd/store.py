@@ -1766,7 +1766,30 @@ class Store:
                 (board, seq, name, title, body, now, now, nbytes),
             )
             post_id = int(cur.lastrowid or 0)
+            revision = None
+            if self._objects.available:
+                try:
+                    revision = self._objects.write_revision(
+                        post_id,
+                        body=body.encode("utf-8"),
+                        timestamp=now,
+                        message="store system post",
+                        activate=False,
+                    )
+                except ObjectStoreError as exc:
+                    raise StoreError(f"failed to store post content: {exc}", 500) from exc
+                stored_body = "" if self._fts_available else body
+                self._conn.execute(
+                    "UPDATE posts SET body = ?, body_oid = ?, content_commit = ? WHERE id = ?",
+                    (stored_body, revision.body_oid, revision.commit_oid, post_id),
+                )
+            self._search_index_replace(post_id, body)
             self._reindex_tags(post_id)
+            if revision is not None:
+                try:
+                    self._objects.set_post_ref(post_id, revision.commit_oid)
+                except ObjectStoreError as exc:
+                    raise StoreError(f"failed to activate post content: {exc}", 500) from exc
         post = self.get_post(post_id)
         if post is None:
             raise StoreError("failed to create CA audit post", 500)
@@ -3314,6 +3337,7 @@ class Store:
                 raise StoreError("reply must stay in the parent topic", 400)
         now = time.time()
         evicted = 0
+        evicted_object_ids: list[int] = []
 
         if auth is not None:
             if auth.version != 1:
@@ -3373,6 +3397,7 @@ class Store:
                         f"DELETE FROM archived_posts WHERE id IN ({marks})",
                         archived_ids,
                     )
+                    evicted_object_ids.extend(archived_ids)
 
                 active_ids: list[int] = []
                 if freed < need:
@@ -3392,8 +3417,17 @@ class Store:
                         if freed >= need:
                             break
                     if active_ids:
+                        for active_id in active_ids:
+                            active_row = self._conn.execute(
+                                self._select_posts() + " WHERE id = ?",
+                                (active_id,),
+                            ).fetchone()
+                            active_post = self._row(active_row)
+                            if active_post is not None:
+                                self._search_index_delete(active_post.id, active_post.body)
                         marks = ",".join("?" for _ in active_ids)
                         self._conn.execute(f"DELETE FROM posts WHERE id IN ({marks})", active_ids)
+                        evicted_object_ids.extend(active_ids)
                         self._prune_empty_boards()
                 evicted = len(archived_ids) + len(active_ids)
 
@@ -3433,6 +3467,25 @@ class Store:
                 ),
             )
             post_id = int(cur.lastrowid or 0)
+            revision = None
+            if self._objects.available:
+                try:
+                    revision = self._objects.write_revision(
+                        post_id,
+                        body=body.encode("utf-8"),
+                        attachments=(file.data for file in files),
+                        timestamp=now,
+                        message="store post",
+                        activate=False,
+                    )
+                except ObjectStoreError as exc:
+                    raise StoreError(f"failed to store post content: {exc}", 500) from exc
+                stored_body = "" if self._fts_available else body
+                self._conn.execute(
+                    "UPDATE posts SET body = ?, body_oid = ?, content_commit = ? WHERE id = ?",
+                    (stored_body, revision.body_oid, revision.commit_oid, post_id),
+                )
+            self._search_index_replace(post_id, body)
             if auth is not None and custody_id is None:
                 self._conn.execute(
                     """
@@ -3455,9 +3508,23 @@ class Store:
                 uploaded_at=now,
                 uploader_name=name,
                 uploader_id=auth.signer_id if auth is not None else None,
+                object_oids=revision.attachment_oids if revision is not None else None,
             )
             self._reindex_inbox(post_id)
             self._reindex_tags(post_id)
+            if revision is not None:
+                try:
+                    self._objects.set_post_ref(post_id, revision.commit_oid)
+                except ObjectStoreError as exc:
+                    raise StoreError(f"failed to activate post content: {exc}", 500) from exc
+
+        if evicted_object_ids and self._objects.available:
+            try:
+                for evicted_id in evicted_object_ids:
+                    self._objects.delete_post_ref(evicted_id)
+                self._objects.prune()
+            except ObjectStoreError as exc:
+                raise StoreError(f"failed to reclaim Git object storage: {exc}", 500) from exc
 
         post = self.get_post(post_id)
         assert post is not None
@@ -3531,6 +3598,20 @@ class Store:
             new_name = self.anonymous_display_name(new_name, check_claim=False)
 
         file_uploader_name = new_name
+        current_attachments = self.attachments(post.id)
+        effective_files = (
+            files
+            if files is not None
+            else tuple(
+                FileInput(
+                    name=item.name,
+                    content_type=item.content_type,
+                    data=item.data,
+                    sha256=item.sha256,
+                )
+                for item in current_attachments
+            )
+        )
         if files is not None and auth is not None:
             uploader_profile = self.profile_by_author(auth.signer_id)
             file_uploader_name = (
@@ -3576,17 +3657,61 @@ class Store:
                     "edit would exceed max_storage_bytes; only new posts may evict old posts",
                     507,
                 )
+            if post.signed:
+                current = self._conn.execute(
+                    "SELECT sig_version FROM posts WHERE id = ?",
+                    (post.id,),
+                ).fetchone()
+                if current is None or int(current["sig_version"]) != post.sig_version:
+                    raise StoreError("signed post changed; request a new signing payload", 409)
+
             now = time.time()
+            revision = None
+            if self._objects.available:
+                parent_commit = post.content_commit
+                if parent_commit is None:
+                    try:
+                        baseline = self._objects.write_revision(
+                            post.id,
+                            body=post.body.encode("utf-8"),
+                            attachments=(item.data for item in current_attachments),
+                            timestamp=post.updated,
+                            message="import legacy post revision",
+                            activate=False,
+                        )
+                    except ObjectStoreError as exc:
+                        raise StoreError(
+                            f"failed to import legacy post content: {exc}", 500
+                        ) from exc
+                    parent_commit = baseline.commit_oid
+                try:
+                    revision = self._objects.write_revision(
+                        post.id,
+                        body=body.encode("utf-8"),
+                        attachments=(file.data for file in effective_files),
+                        parent=parent_commit,
+                        timestamp=now,
+                        message="store post edit",
+                        activate=False,
+                    )
+                except ObjectStoreError as exc:
+                    raise StoreError(f"failed to store post content: {exc}", 500) from exc
+
+            stored_body = "" if revision is not None and self._fts_available else body
+            self._search_index_replace(post.id, body, previous_body=post.body)
             if post.signed:
                 cur = self._conn.execute(
                     """
                     UPDATE posts
-                       SET body = ?, title = ?, name = ?, updated = ?, nbytes = ?,
+                       SET body = ?, body_oid = ?, content_commit = ?,
+                           title = ?, name = ?, updated = ?, nbytes = ?,
                            actor_key = ?, actor_id = ?, signature = ?, sig_version = ?
                      WHERE id = ? AND sig_version = ?
                     """,
                     (
-                        body,
+                        stored_body,
+                        revision.body_oid if revision is not None else post.body_oid,
+                        revision.commit_oid if revision is not None else post.content_commit,
                         new_title,
                         new_name,
                         now,
@@ -3603,8 +3728,18 @@ class Store:
                     raise StoreError("signed post changed; request a new signing payload", 409)
             else:
                 self._conn.execute(
-                    "UPDATE posts SET body=?, title=?, name=?, updated=?, nbytes=? WHERE id=?",
-                    (body, new_title, new_name, now, nbytes, post.id),
+                    "UPDATE posts SET body=?, body_oid=?, content_commit=?, "
+                    "title=?, name=?, updated=?, nbytes=? WHERE id=?",
+                    (
+                        stored_body,
+                        revision.body_oid if revision is not None else post.body_oid,
+                        revision.commit_oid if revision is not None else post.content_commit,
+                        new_title,
+                        new_name,
+                        now,
+                        nbytes,
+                        post.id,
+                    ),
                 )
 
             if files is not None:
@@ -3615,11 +3750,24 @@ class Store:
                     uploaded_at=now,
                     uploader_name=file_uploader_name,
                     uploader_id=auth.signer_id if auth is not None else None,
+                    object_oids=revision.attachment_oids if revision is not None else None,
                 )
+            elif revision is not None:
+                for slot, object_oid in enumerate(revision.attachment_oids):
+                    self._conn.execute(
+                        "UPDATE attachments SET data = X'', object_oid = ? "
+                        "WHERE post_id = ? AND slot = ?",
+                        (object_oid, post.id, slot),
+                    )
             if auth is not None and auth.signer_id == post.author_id:
                 self._remember_identity_name(auth.signer_id, new_name, now)
             self._reindex_inbox(post.id)
             self._reindex_tags(post.id)
+            if revision is not None:
+                try:
+                    self._objects.set_post_ref(post.id, revision.commit_oid)
+                except ObjectStoreError as exc:
+                    raise StoreError(f"failed to activate post content: {exc}", 500) from exc
 
         updated = self.get_post(post.id)
         assert updated is not None
@@ -3636,13 +3784,15 @@ class Store:
             self._conn.execute(
                 """
                 INSERT INTO archived_posts(
-                    id, board, seq, name, title, body, created, updated, nbytes,
+                    id, board, seq, name, title, body, body_oid, content_commit,
+                    created, updated, nbytes,
                     author_key, author_id, actor_key, actor_id, signature,
                     sig_version, sig_nonce, sig_issued, reply_to, system, custody_id,
                     archived_at, archived_by
                 )
                 SELECT
-                    id, board, seq, name, title, body, created, updated, nbytes,
+                    id, board, seq, name, title, body, body_oid, content_commit,
+                    created, updated, nbytes,
                     author_key, author_id, actor_key, actor_id, signature,
                     sig_version, sig_nonce, sig_issued, reply_to, system, custody_id,
                     ?, ?
@@ -3654,16 +3804,17 @@ class Store:
             self._conn.execute(
                 """
                 INSERT INTO archived_attachments(
-                    id, post_id, slot, name, content_type, data, nbytes, sha256,
+                    id, post_id, slot, name, content_type, data, object_oid, nbytes, sha256,
                     created, uploader_name, uploader_id, downloads
                 )
-                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256,
+                SELECT id, post_id, slot, name, content_type, data, object_oid, nbytes, sha256,
                        created, uploader_name, uploader_id, downloads
                   FROM attachments
                  WHERE post_id = ?
                 """,
                 (post.id,),
             )
+            self._search_index_delete(post.id, post.body)
             cur = self._conn.execute("DELETE FROM posts WHERE id = ?", (post.id,))
             if cur.rowcount:
                 self._prune_empty_boards()
@@ -3728,9 +3879,17 @@ class Store:
                 """,
                 (post.id, post.board, time.time(), actor_id, reason),
             )
+            if source == "posts":
+                self._search_index_delete(post.id, post.body)
             self._conn.execute(f"DELETE FROM {source} WHERE id = ?", (post.id,))
             if source == "posts":
                 self._prune_empty_boards()
+
+        if self._objects.available and post.content_commit is not None:
+            try:
+                self._objects.purge_post(post.id)
+            except ObjectStoreError as exc:
+                raise StoreError(f"failed to purge Git object content: {exc}", 500) from exc
 
         # secure_delete overwrites deleted SQLite cells/pages. Truncate the WAL so
         # an emergency purge does not leave the just-removed content in old frames.
