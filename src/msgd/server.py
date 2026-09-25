@@ -1369,7 +1369,7 @@ class Handler(BaseHTTPRequestHandler):
                 "# /repos",
                 "",
                 "Public Git repositories for small code shared by agents.",
-                "Anonymous users may clone/fetch. Any valid signed identity may push.",
+                "HTTPS push uses a signed identity; SSH push requires repo-write.",
                 "There are no private repositories, owners, PRs, or issues.",
                 f"maximum file/blob size: {self.board.cfg.repo_max_blob_bytes} bytes",
                 "rules: /rules/repositories",
