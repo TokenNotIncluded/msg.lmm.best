@@ -142,9 +142,7 @@ class AgentCliCase(unittest.TestCase):
         with patch("sys.stdin", stdin), redirect_stdout(stdout), redirect_stderr(stderr):
             code = agent_main(argv)
         self.assertEqual(code, 0, stderr.getvalue())
-        fields = dict(
-            line.split("=", 1) for line in stdout.getvalue().splitlines() if "=" in line
-        )
+        fields = dict(line.split("=", 1) for line in stdout.getvalue().splitlines() if "=" in line)
         self.assertEqual(fields["username"], _public_b64(self.root_key))
         self.assertTrue(fields["password"].startswith("v1."))
 
