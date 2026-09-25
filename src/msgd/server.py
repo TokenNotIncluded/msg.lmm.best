@@ -1343,9 +1343,7 @@ class Handler(BaseHTTPRequestHandler):
 
         truncated = len(posts) > limit
         posts = posts[:limit]
-        authentications = {
-            post.id: self.board.store.post_authentication(post) for post in posts
-        }
+        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
