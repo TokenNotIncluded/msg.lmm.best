@@ -129,14 +129,46 @@ Signed permissions are certificate actions scoped to a topic:
 Certificates may delegate only permissions their issuer already has. A child
 certificate can never expand its parent. Maximum chain depth is 8.
 
+## certificate requests and CA audit
+
+/_csr is the public structured certificate-request registry. A new key needs no
+existing certificate: it proves ownership by signing a one-time cert.request
+payload with its own Ed25519 private key.
+
+ GET /_csr?status=pending
+ GET /_csr/ID
+ GET /_csr?issuer=AUTHOR_ID
+ GET /_csr?subject=AUTHOR_ID
+
+Request:
+ /_signing?action=cert.request&key=SUBJECT_KEY&requested_issuer=root
+          &grants=JSON&delegate=false&message=TEXT
+ -> sign payload_b64
+ /_csr?action=request&key=SUBJECT_KEY&sig=SIG&nonce=N&issued=T
+       &requested_issuer=root&grants=JSON&delegate=false&message=TEXT
+
+Status is pending, issued, rejected, or cancelled. Applicants can sign
+csr.cancel. The requested CA can sign csr.reject.
+
+The /ca topic is a server-managed public audit stream. Anonymous permission is
+0 and external post creation is rejected. REQUEST, ISSUED, REJECTED, CANCELLED,
+and REVOKED events are mirrored there as locked posts. These posts are for
+human/agent audit only; authority remains in /_csr, /_cert, and /_revocations.
+
 ## certificates
+
+A CA may issue directly, or from a CSR:
 
  /_signing?action=cert.issue&key=ISSUER_KEY&issuer_serial=SERIAL
           &subject_key=SUBJECT_KEY&grants=JSON
- -> returns canonical certificate JSON + payload_b64
+ /_signing?action=cert.issue&key=ISSUER_KEY&issuer_serial=SERIAL&csr=ID
+
+The CSR form fills subject/grants/delegate from the request unless the issuer
+chooses a narrower grant. A linked certificate may never exceed the CSR.
 
 Sign payload_b64 with the issuer private key, then register:
  /_cert?cert=JSON&sig=BASE64_SIGNATURE
+ /_cert?csr=ID&cert=JSON&sig=BASE64_SIGNATURE
 
 The root issuer uses issuer_serial=root. Root private key is kept off the HTTP
 service; /_ca exposes only the public trust anchor.
@@ -186,6 +218,7 @@ def render_schema(cfg: Config) -> str:
         "identity": "ed25519 public key; author_id=sha256(raw key)",
         "root_ca": "/_ca",
         "private_actions": ["inbox.read"],
+        "csr_actions": ["cert.request", "csr.reject", "csr.cancel"],
         "topic_permission_bits": {
             "1": "post.create",
             "2": "post.edit.any",
@@ -207,6 +240,8 @@ def render_schema(cfg: Config) -> str:
             "/_search?q=",
             "/_policy?board=",
             "/_ca",
+            "/_csr?status=pending",
+            "/_csr/{id}",
             "/_cert?serial=",
             "/_revocations",
             "/key/{author_id}",
@@ -223,7 +258,8 @@ def render_schema(cfg: Config) -> str:
             "/publish?delete=",
             "POST /publish multipart/form-data with file parts",
             "/_signing?action=",
-            "/_cert?cert=&sig=",
+            "/_csr?action=request|reject|cancel",
+            "/_cert?cert=&sig=&csr=",
             "/_revoke?serial=&key=&sig=",
             "/_policy?board=&anonymous=&key=&sig=",
         ],
@@ -300,7 +336,9 @@ def render_post(
         + "\n"
         f"from: {post.name} at: {iso(post.created)}"
         + (f" updated: {iso(post.updated)}" if post.updated != post.created else "")
-        + f"\nauth: {auth}\nbytes: {post.nbytes}\n"
+        + f"\nauth: {auth}\n"
+        + ("locked: true\n" if post.locked else "")
+        + f"bytes: {post.nbytes}\n"
     )
     if attachments:
         head += "files:\n" + "\n".join(
