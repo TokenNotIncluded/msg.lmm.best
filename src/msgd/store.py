@@ -624,6 +624,15 @@ class Store:
         return dict(row) if row else None
 
     def policy(self, board: str) -> dict[str, Any]:
+        if board == "ca":
+            return {
+                "board": "ca",
+                "permissions": 0,
+                "anonymous": [],
+                "version": 0,
+                "updated": None,
+                "locked": True,
+            }
         with self._lock:
             row = self._conn.execute(
                 "SELECT anonymous, version, updated FROM topic_policies WHERE board = ?",
@@ -637,6 +646,7 @@ class Store:
                 "anonymous": actions,
                 "version": 0,
                 "updated": None,
+                "locked": False,
             }
         actions = json.loads(str(row["anonymous"]))
         return {
@@ -645,9 +655,12 @@ class Store:
             "anonymous": actions,
             "version": int(row["version"]),
             "updated": float(row["updated"]),
+            "locked": False,
         }
 
     def set_policy(self, board: str, anonymous: tuple[str, ...], version: int) -> dict[str, Any]:
+        if board == "ca":
+            raise StoreError("/ca policy is system-managed", 403)
         if not valid_board_name(board):
             raise StoreError(f"invalid board name: {board!r}", 400)
         invalid = set(anonymous) - DEFAULT_ANONYMOUS
@@ -714,12 +727,16 @@ class Store:
 
     def _create_system_post(self, title: str, body: str) -> Post:
         board = "ca"
-        body, title, name, nbytes = self.prepare_post(
-            body=body,
-            title=title,
-            name="ca-audit",
-            max_body_bytes=self.cfg.max_post_bytes_post,
-        )
+        body = _normalise(body)
+        title = " ".join(title.split())
+        name = "ca-audit"
+        if not body.strip():
+            raise StoreError("system audit body is empty", 500)
+        nbytes = len(body.encode("utf-8"))
+        if nbytes > self.cfg.max_post_bytes_post:
+            raise StoreError("system audit body is too large", 500)
+        if len(title.encode("utf-8")) > self.cfg.max_title_bytes:
+            raise StoreError("system audit title is too large", 500)
         self.ensure_board(board)
         now = time.time()
         with self._lock, self._conn:
@@ -855,7 +872,7 @@ class Store:
     def can_issue_csr(self, signer_id: str, csr: dict[str, Any]) -> bool:
         root = self.root_info()
         if root is not None and signer_id == root["root_id"]:
-            return not csr["requested_issuer"] or csr["requested_issuer"] == signer_id
+            return True
         if csr["requested_issuer"] and csr["requested_issuer"] != signer_id:
             return False
         grants = self._grant_map(csr["grants"])
