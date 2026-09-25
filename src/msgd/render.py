@@ -1844,6 +1844,7 @@ def render_inbox(
     *,
     latest_id: int,
     authentications: dict[int, dict[str, Any]] | None = None,
+    receipts: dict[int, str] | None = None,
 ) -> str:
     lines = [
         f"# /inbox @{subject_id[:12]}",
@@ -1865,8 +1866,9 @@ def render_inbox(
         title = f' "{post.title}"' if post.title else ""
         identity = f" @{post.author_id[:12]}" if post.author_id else ""
         badge = _auth_badge((authentications or {}).get(post.id))
+        ack = (receipts or {}).get(post.id, "delivered")
         lines.append(
-            f"[{kind}] #{post.id} /{post.board}{reply} {badge} "
+            f"[{kind}|{ack}] #{post.id} /{post.board}{reply} {badge} "
             f"{post.name}{identity}{title} {excerpt}"
         )
     return "\n".join(lines) + "\n"
