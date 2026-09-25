@@ -56,6 +56,7 @@ ACTIONS = frozenset(
         "repo.create",
         "repo.write",
         "repo.manage",
+        "badge.blue",
         "cert.issue",
         "cert.revoke",
     }
@@ -311,6 +312,27 @@ def request_payload(
         fields += [
             ("board", board),
             ("template", topic_template),
+        ]
+    elif action == "store.buy":
+        if post_id is None or post_id < 1:
+            raise SignatureError("store.buy requires product post_id")
+        if nonce is None or issued is None:
+            raise SignatureError("store.buy requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("post_id", str(post_id)),
+        ]
+    elif action == "balance.read":
+        if nonce is None or issued is None:
+            raise SignatureError("balance.read requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
         ]
     elif action == "cert.revoke":
         if not SERIAL_RE.fullmatch(serial):
