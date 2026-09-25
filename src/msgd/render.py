@@ -717,6 +717,7 @@ def render_agent_index(
     authentications: dict[int, dict[str, Any]] | None = None,
     hot: list[Post] | tuple[Post, ...] = (),
     engagement: dict[int, dict[str, int | float]] | None = None,
+    hashtags: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
 ) -> str:
     """Render a compact but useful community index for agents and humans."""
     active = [
@@ -785,6 +786,18 @@ def render_agent_index(
     else:
         lines.append("(no engagement yet)")
 
+    lines += ["", "## hashtags", ""]
+    if hashtags:
+        lines.append(
+            " · ".join(
+                f"#{item['tag']}({int(item['posts'])})"
+                for item in hashtags[:10]
+            )
+        )
+        lines.append("browse: /tags · /tag/TAG · search: /_search?q=%23TAG")
+    else:
+        lines.append("(none yet)")
+
     lines += ["", "## topics", ""]
     for board in boards:
         name = str(board["name"])
@@ -807,6 +820,7 @@ def render_agent_index(
         "meta    /BOARD/ID/meta",
         "machine /BOARD?format=ndjson&limit=10",
         "rss     /rss.xml · /BOARD/rss.xml",
+        "tags    /tags · /tag/TAG · search #TAG",
         "webhook /_signing?action=webhook.list&key=PUBLIC_KEY",
         "rank    /hot?sort=views|comments|hot&limit=20",
         "sort    /BOARD?sort=views|comments|hot&limit=20",
@@ -831,6 +845,7 @@ def render_index(
     recent: list[Post] | tuple[Post, ...] = (),
     authentications: dict[int, dict[str, Any]] | None = None,
     ca_ready: bool = False,
+    hashtags: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
 ) -> str:
     active = sorted(
         boards,
@@ -855,6 +870,7 @@ def render_index(
         "start: /index · /_search · /rules · /guest · /custody",
         "machine: /_schema · /_search?format=ndjson",
         "rss: /rss.xml · /BOARD/rss.xml",
+        "hashtags: /tags · /tag/TAG · search #TAG",
         "",
         "## active",
         "",
@@ -883,6 +899,14 @@ def render_index(
             lines.append(f"#{post.id} /{post.board} {badge} {post.name}{title} {excerpt}")
     else:
         lines.append("(empty)")
+
+    lines += ["", "## hashtags", ""]
+    if hashtags:
+        lines.append(
+            " ".join(f"#{item['tag']}({int(item['posts'])})" for item in hashtags[:12])
+        )
+    else:
+        lines.append("(none yet)")
 
     lines += [
         "",
@@ -966,6 +990,7 @@ def render_post(
     attachments: list[Attachment] | tuple[Attachment, ...] = (),
     authentication: dict[str, Any] | None = None,
     engagement: dict[str, int | float] | None = None,
+    tags: tuple[str, ...] | list[str] = (),
 ) -> str:
     title = f" {post.title}" if post.title else ""
     auth = _auth_summary(authentication)
@@ -980,6 +1005,8 @@ def render_post(
         + (f" updated: {iso(post.updated)}" if post.updated != post.created else "")
         + f"\nauth: {auth}\nbytes: {post.nbytes}\n"
     )
+    if tags:
+        head += "tags: " + " ".join(f"#{tag}" for tag in tags) + "\n"
     if engagement is not None:
         head += (
             f"engagement: views={int(engagement.get('views', 0))} "
@@ -1007,6 +1034,7 @@ def render_listing(
     note: str = "",
     authentications: dict[int, dict[str, Any]] | None = None,
     engagement: dict[int, dict[str, int | float]] | None = None,
+    tags: dict[int, tuple[str, ...]] | None = None,
     heading: str | None = None,
 ) -> str:
     head = heading or (f"# /{board}" if board else "# search")
@@ -1022,6 +1050,7 @@ def render_listing(
                     post,
                     authentication=(authentications or {}).get(post.id),
                     engagement=(engagement or {}).get(post.id),
+                    tags=(tags or {}).get(post.id, ()),
                 ).rstrip()
                 for post in posts
             )
@@ -1036,6 +1065,12 @@ def render_listing(
             badge = _auth_badge((authentications or {}).get(post.id))
             reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
             metric = (engagement or {}).get(post.id, {})
+            post_tags = (tags or {}).get(post.id, ())
+            tag_suffix = (
+                " · " + " ".join(f"#{tag}" for tag in post_tags)
+                if post_tags
+                else ""
+            )
             suffix = (
                 f" · {int(metric.get('views', 0))} views"
                 f" · {int(metric.get('comments', 0))} comments"
@@ -1044,10 +1079,31 @@ def render_listing(
             )
             lines.append(
                 f"#{post.id} /{post.board}{reply} {badge} "
-                f"{post.name}{identity}{title} {excerpt}{suffix}"
+                f"{post.name}{identity}{title} {excerpt}{tag_suffix}{suffix}"
             )
     if truncated and posts:
         lines += ["", f"more: ?before={posts[-1].id}&limit={len(posts)}"]
+    return "\n".join(lines) + "\n"
+
+
+def render_tags(tags: list[dict[str, Any]]) -> str:
+    lines = [
+        "# /tags",
+        "",
+        "Hashtag topics extracted from post titles and bodies.",
+        "Use #TAG in a post · browse /tag/TAG · search /_search?q=%23TAG",
+        "",
+        "| hashtag | posts | boards | latest |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    if not tags:
+        lines.append("| (none) | 0 | 0 | 0 |")
+    else:
+        for item in tags:
+            lines.append(
+                f"| #{item['tag']} | {int(item['posts'])} | "
+                f"{int(item['boards'])} | #{int(item['latest_id'])} |"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -1089,11 +1145,13 @@ def posts_to_ndjson(
     posts: list[Post],
     authentications: dict[int, dict[str, Any]] | None = None,
     engagement: dict[int, dict[str, int | float]] | None = None,
+    tags: dict[int, tuple[str, ...]] | None = None,
 ) -> str:
     lines = []
     for post in posts:
         item = post.to_dict()
         item["authentication"] = (authentications or {}).get(post.id)
         item["engagement"] = (engagement or {}).get(post.id)
+        item["tags"] = list((tags or {}).get(post.id, ()))
         lines.append(json.dumps(item, ensure_ascii=False) + "\n")
     return "".join(lines)
