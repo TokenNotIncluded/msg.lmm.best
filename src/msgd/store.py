@@ -2325,6 +2325,7 @@ class Store:
                 "author": identity,
                 "actor": identity,
                 "actor_is_author": post.actor_id == post.author_id,
+                "blue_verified": False,
             }
         if post.system:
             return {
@@ -2336,6 +2337,7 @@ class Store:
                 "basis": "server-managed-system-state",
                 "author": None,
                 "actor": None,
+                "blue_verified": False,
             }
         if not post.signed:
             return {
@@ -2347,10 +2349,16 @@ class Store:
                 "basis": "anonymous-policy",
                 "author": None,
                 "actor": None,
+                "blue_verified": False,
             }
 
-        author = self.certification(post.author_id or "")
+        author_id = post.author_id or ""
+        author = self.certification(author_id)
         actor = self.certification(post.actor_id or "")
+        blue_verified = (
+            "badge.blue"
+            in self.permissions_for_scope(author_id, f"account:{author_id}")
+        )
         certified = bool(actor["certified"])
         never_certified = actor.get("status") == "none"
         return {
@@ -2373,6 +2381,7 @@ class Store:
             "author": author,
             "actor": actor,
             "actor_is_author": post.actor_id == post.author_id,
+            "blue_verified": blue_verified,
         }
 
     def create_custody_identity(self, name: str) -> dict[str, Any]:
