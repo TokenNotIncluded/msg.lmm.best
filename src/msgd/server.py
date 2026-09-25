@@ -1257,6 +1257,45 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _hot(self, params: Params) -> None:
+        sort = (_param(params, "sort") or "hot").lower()
+        if sort not in Engagement.SORTS:
+            raise StoreError("sort must be hot, views, or comments", 400)
+        board = (_param(params, "board") or "").lower() or None
+        if board is not None and not valid_board_name(board):
+            raise StoreError("invalid board", 400)
+
+        limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
+        assert limit is not None
+        posts = self._ranked_posts(sort, board=board, limit=limit + 1)
+        truncated = len(posts) > limit
+        posts = posts[:limit]
+        authentications = {
+            post.id: self.board.store.post_authentication(post) for post in posts
+        }
+        engagement = self._engagement_map(posts)
+        heading = f"# /hot · sort={sort}" + (f" · /{board}" if board else "")
+        if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
+            self._send(
+                200,
+                posts_to_ndjson(posts, authentications, engagement),
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+        self._send(
+            200,
+            render_listing(
+                board=board,
+                posts=posts,
+                full=(_param(params, "view") or "").lower() == "full",
+                truncated=truncated,
+                note="Valkey engagement ranking; likes are unsupported",
+                authentications=authentications,
+                engagement=engagement,
+                heading=heading,
+            ),
+        )
+
     def _board_view(self, board: str, params: Params) -> None:
         info = self.board.store.board_info(board)
         if info is None:
