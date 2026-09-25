@@ -58,10 +58,7 @@ SSH_PRESETS: dict[str, tuple[str, ...]] = {
 
 
 def normalize_scopes(values: str | list[str] | tuple[str, ...] | set[str]) -> tuple[str, ...]:
-    if isinstance(values, str):
-        raw = values.replace(" ", ",").split(",")
-    else:
-        raw = list(values)
+    raw = values.replace(" ", ",").split(",") if isinstance(values, str) else list(values)
     scopes = tuple(sorted({str(item).strip().lower() for item in raw if str(item).strip()}))
     if not scopes:
         raise StoreError("at least one SSH scope is required", 400)
