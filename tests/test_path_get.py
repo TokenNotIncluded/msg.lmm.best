@@ -107,6 +107,8 @@ class PathGetCase(unittest.TestCase):
 
         status, first, first_headers = self.c.raw(path)
         self.assertEqual(status, 201, first)
+        self.assertIn("client=raw-http", first)
+        self.assertIn("hint=prefer msg CLI", first)
         self.assertEqual(first_headers["X-Path-GET-Request-ID"], "agentreq000001")
         self.assertEqual(first_headers["X-Path-GET-Replay"], "0")
         post_id = int(dict(line.split("=", 1) for line in first.splitlines() if "=" in line)["id"])

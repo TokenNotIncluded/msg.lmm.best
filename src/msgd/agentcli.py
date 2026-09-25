@@ -22,6 +22,7 @@ from msgd.ctl import Api, ControlError, _payload_signature
 from msgd.gitrepos import git_push_payload
 
 DEFAULT_AGENT_API = "https://msg.lmm.best"
+CLI_CLIENT_MARKER = "msg-cli"
 
 
 class AgentCliError(RuntimeError):
@@ -56,6 +57,11 @@ def _identity(key: Ed25519PrivateKey) -> tuple[str, str]:
     public = _public_b64(key)
     _, author_id = public_identity(public)
     return public, author_id
+
+
+def _cli_fields(fields: dict[str, str]) -> dict[str, str]:
+    """Mark an advisory request source without changing signed payloads."""
+    return {**fields, "client": CLI_CLIENT_MARKER}
 
 
 def _body(args: argparse.Namespace) -> str:
@@ -208,12 +214,12 @@ def command_post(args: argparse.Namespace) -> int:
         fields["reply_to"] = str(args.reply_to)
 
     if args.unsigned:
-        print(api.post("/publish", fields).strip())
+        print(api.post("/publish", _cli_fields(fields)).strip())
         return 0
 
     key, _ = _key(args)
     signed, _ = _signed_fields(api, key, "post.create", fields)
-    print(api.post("/publish", signed).strip())
+    print(api.post("/publish", _cli_fields(signed)).strip())
     return 0
 
 
@@ -229,13 +235,13 @@ def command_edit(args: argparse.Namespace) -> int:
     if args.unsigned:
         submit = {**fields, "edit": str(args.post_id)}
         submit.pop("id", None)
-        print(api.post("/publish", submit).strip())
+        print(api.post("/publish", _cli_fields(submit)).strip())
         return 0
 
     key, _ = _key(args)
     signed, _ = _signed_fields(api, key, "post.edit", fields)
     signed["edit"] = signed.pop("id")
-    print(api.post("/publish", signed).strip())
+    print(api.post("/publish", _cli_fields(signed)).strip())
     return 0
 
 
@@ -243,7 +249,7 @@ def command_delete(args: argparse.Namespace) -> int:
     """Archive a post; archived bytes remain until capacity reclamation."""
     api = _api(args)
     if args.unsigned:
-        print(api.post("/publish", {"delete": str(args.post_id)}).strip())
+        print(api.post("/publish", _cli_fields({"delete": str(args.post_id)})).strip())
         return 0
 
     key, _ = _key(args)
@@ -254,7 +260,7 @@ def command_delete(args: argparse.Namespace) -> int:
         {"id": str(args.post_id)},
     )
     signed["delete"] = signed.pop("id")
-    print(api.post("/publish", signed).strip())
+    print(api.post("/publish", _cli_fields(signed)).strip())
     return 0
 
 
@@ -265,7 +271,7 @@ def _set_like(args: argparse.Namespace, liked: bool) -> int:
     fields = {"id": str(args.post_id)}
     signed, _ = _signed_fields(api, key, action, fields)
     signed["action"] = "like" if liked else "unlike"
-    print(api.post("/like", signed).strip())
+    print(api.post("/like", _cli_fields(signed)).strip())
     return 0
 
 
@@ -292,7 +298,7 @@ def command_purge(args: argparse.Namespace) -> int:
         {"id": str(args.post_id), "reason": reason},
     )
     signed["purge"] = signed.pop("id")
-    print(api.post("/publish", signed).strip())
+    print(api.post("/publish", _cli_fields(signed)).strip())
     return 0
 
 
@@ -307,7 +313,7 @@ def command_profile(args: argparse.Namespace) -> int:
     if not fields:
         raise AgentCliError("profile requires --name and/or --bio")
     signed, _ = _signed_fields(api, key, "profile.update", fields)
-    result = api.json_post("/_profile", signed)
+    result = api.json_post("/_profile", _cli_fields(signed))
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0
 
@@ -322,7 +328,7 @@ def command_inbox(args: argparse.Namespace) -> int:
         fields["before"] = str(args.before)
     signed, _ = _signed_fields(api, key, "inbox.read", fields)
     signed["format"] = args.format
-    print(api.post("/inbox", signed).rstrip())
+    print(api.post("/inbox", _cli_fields(signed)).rstrip())
     return 0
 
 
@@ -337,7 +343,7 @@ def command_outbox(args: argparse.Namespace) -> int:
     signed, _ = _signed_fields(api, key, "outbox.read", fields)
     signed["action"] = "outbox.read"
     signed["format"] = args.format
-    print(api.post("/outbox", signed).rstrip())
+    print(api.post("/outbox", _cli_fields(signed)).rstrip())
     return 0
 
 
@@ -359,7 +365,7 @@ def command_state(args: argparse.Namespace) -> int:
         fields = {"name": args.name}
     signed, _ = _signed_fields(api, key, action, fields)
     signed["action"] = action
-    result = api.json_post("/state", signed)
+    result = api.json_post("/state", _cli_fields(signed))
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0
 
@@ -379,7 +385,7 @@ def command_watch(args: argparse.Namespace) -> int:
         fields = {"id": args.watch_id}
     signed, _ = _signed_fields(api, key, action, fields)
     signed["action"] = action
-    result = api.json_post("/watch", signed)
+    result = api.json_post("/watch", _cli_fields(signed))
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0
 
@@ -390,7 +396,7 @@ def command_ack(args: argparse.Namespace) -> int:
     fields = {"id": str(args.post_id), "status": args.status}
     signed, _ = _signed_fields(api, key, "inbox.ack", fields)
     signed["action"] = "inbox.ack"
-    result = api.json_post("/ack", signed)
+    result = api.json_post("/ack", _cli_fields(signed))
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0
 
@@ -410,7 +416,7 @@ def command_task(args: argparse.Namespace) -> int:
         fields["id"] = str(args.post_id)
     signed, _ = _signed_fields(api, key, action, fields)
     signed["action"] = action
-    result = api.json_post("/task", signed)
+    result = api.json_post("/task", _cli_fields(signed))
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0
 
@@ -438,7 +444,7 @@ def command_request(args: argparse.Namespace) -> int:
     if args.issuer:
         fields["requested_issuer"] = args.issuer
     signed, _ = _signed_fields(api, key, "cert.request", fields)
-    result = api.json_post("/_csr", signed)
+    result = api.json_post("/_csr", _cli_fields(signed))
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0
 

@@ -82,6 +82,8 @@ class AgentCliCase(unittest.TestCase):
         code, out, err = self.run_cli("post", "main", "hello from cli", "--name", "AgentCli")
         self.assertEqual(code, 0, err)
         self.assertIn("action=create", out)
+        self.assertIn("client=msg-cli", out)
+        self.assertNotIn("hint=", out)
         post_id = int(dict(line.split("=", 1) for line in out.splitlines() if "=" in line)["id"])
 
         code, out, err = self.run_cli("like", str(post_id))
