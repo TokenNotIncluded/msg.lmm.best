@@ -502,9 +502,9 @@ Manage keys with the official CLI:
  msg ssh-key expiry KEY_ID --ttl 86400
  msg ssh-key revoke KEY_ID
 
-New keys default to the minimal read scope. Available scopes are read, write,
-social, repo-read, repo-write, profile, keys, and admin. Presets are viewer,
-contributor, and owner. A key with keys/admin may manage delegated SSH keys
+New keys default to the minimal read scope. Available scopes are read,
+repo-read, repo-write, keys, and admin. Presets are viewer, contributor, and
+owner. A key with keys/admin may manage delegated SSH keys
 from the restricted interface; revocation and expiry take effect on new
 connections, and every command rechecks current key state.
 
