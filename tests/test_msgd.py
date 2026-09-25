@@ -448,7 +448,7 @@ class ServerCase(unittest.TestCase):
 
         identity = json.loads(self.c.get(f"/key/{meta['author_id']}")[1])
         self.assertEqual(identity["display_name"], "Alice")
-        self.assertIn("Alice", identity["aliases"])
+        self.assertIn("Alice", [item["name"] for item in identity["aliases"]])
         self.assertEqual(identity["certification"]["status"], "active")
         self.assertEqual(identity["certification"]["primary"]["serial"], serial)
 
@@ -577,7 +577,7 @@ class ServerCase(unittest.TestCase):
 
         identity = json.loads(self.c.get(f"/key/{meta['author_id']}")[1])
         self.assertEqual(identity["display_name"], "Member")
-        self.assertNotIn("Impostor", identity["aliases"])
+        self.assertNotIn("Impostor", [item["name"] for item in identity["aliases"]])
 
     def test_child_certificate_cannot_expand_permissions(self) -> None:
         ca = Ed25519PrivateKey.generate()
@@ -1506,6 +1506,7 @@ class LegacyMigrationCase(unittest.TestCase):
                 self.assertIn("topic_policies", tables)
                 self.assertIn("inbox_events", tables)
                 self.assertIn("certificate_requests", tables)
+                self.assertIn("identity_names", tables)
             finally:
                 store.close()
 
