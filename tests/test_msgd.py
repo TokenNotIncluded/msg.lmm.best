@@ -1707,9 +1707,7 @@ class LegacyMigrationCase(unittest.TestCase):
             exchange = ExchangeService(cfg, store)
             try:
                 check = sqlite3.connect(db)
-                columns = {
-                    row[1] for row in check.execute("PRAGMA table_info(inbox_receipts)")
-                }
+                columns = {row[1] for row in check.execute("PRAGMA table_info(inbox_receipts)")}
                 row = check.execute(
                     "SELECT read_at, public_key FROM inbox_receipts WHERE post_id = 7"
                 ).fetchone()
