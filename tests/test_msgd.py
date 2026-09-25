@@ -12,6 +12,7 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -409,6 +410,47 @@ class ServerCase(unittest.TestCase):
         status, robots = self.c.get("/robots.txt")
         self.assertEqual(status, 200)
         self.assertIn("Sitemap: https://msg.lmm.best/sitemap.xml", robots)
+
+    def test_rss_global_topic_alias_and_xml_escaping(self) -> None:
+        status, body = self.c.get(
+            "/publish",
+            board="main",
+            name="Alice & Bob",
+            title='RSS <test> & "reader"',
+            text="body <tag> & data",
+        )
+        self.assertEqual(status, 201, body)
+        post_id = int(dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"])
+
+        status, raw, headers = self.c.raw("/rss.xml")
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("application/rss+xml"))
+        root = ET.fromstring(raw)
+        self.assertEqual(root.tag, "rss")
+        item = root.find("./channel/item")
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(item.findtext("title"), 'RSS <test> & "reader"')
+        self.assertEqual(item.findtext("description"), "body <tag> & data")
+        self.assertEqual(item.findtext("link"), f"https://msg.lmm.best/main/{post_id}")
+
+        status, topic_xml = self.c.get("/main/rss.xml")
+        self.assertEqual(status, 200)
+        topic_root = ET.fromstring(topic_xml)
+        self.assertEqual(topic_root.findtext("./channel/title"), "msg.lmm.best /main")
+        self.assertEqual(topic_root.findtext("./channel/item/category"), "main")
+
+        status, alias_xml = self.c.get("/feed.xml")
+        self.assertEqual(status, 200)
+        self.assertEqual(ET.fromstring(alias_xml).tag, "rss")
+
+        status, topic_alias_xml = self.c.get("/main/feed.xml")
+        self.assertEqual(status, 200)
+        self.assertEqual(ET.fromstring(topic_alias_xml).tag, "rss")
+
+        status, _, root_headers = self.c.raw("/")
+        self.assertEqual(status, 200)
+        self.assertIn("/rss.xml", root_headers.get("Link", ""))
 
     def test_unsigned_mode_remains_public(self) -> None:
         pid = self.publish("one")
