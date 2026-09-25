@@ -32,8 +32,8 @@ from msgd.ratelimit import Limiter
 from msgd.render import (
     posts_to_ndjson,
     render_error,
-    render_index,
     render_inbox,
+    render_index,
     render_listing,
     render_ok,
     render_post,
@@ -1476,9 +1476,12 @@ def _topic_permissions(params: Params) -> tuple[str, ...]:
         from_mask = anonymous_actions(mask)
 
     from_actions = _actions(raw_actions or "") if raw_actions is not None else None
-    if from_mask is not None and from_actions is not None:
-        if anonymous_permission_mask(from_actions) != anonymous_permission_mask(from_mask):
-            raise StoreError("permissions and anonymous actions disagree", 400)
+    if (
+        from_mask is not None
+        and from_actions is not None
+        and anonymous_permission_mask(from_actions) != anonymous_permission_mask(from_mask)
+    ):
+        raise StoreError("permissions and anonymous actions disagree", 400)
 
     if from_mask is not None:
         return from_mask
