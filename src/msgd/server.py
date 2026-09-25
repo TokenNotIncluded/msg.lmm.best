@@ -143,6 +143,7 @@ class Board:
             )
         if self.engagement.available:
             self.engagement.sync_comments(self.store.comment_counts())
+            self.engagement.sync_likes(self.store.like_counts())
         self.webhooks = WebhookService(cfg, self.store)
         self.reads = Limiter(
             burst=max(30, cfg.read_per_minute // 4),
@@ -530,6 +531,8 @@ class Handler(BaseHTTPRequestHandler):
                 "Disallow: /custody/post\n"
                 "Disallow: /custody/edit\n"
                 "Disallow: /custody/delete\n"
+                "Disallow: /custody/like\n"
+                "Disallow: /custody/unlike\n"
                 "Disallow: /custody/purge\n"
                 "Disallow: /g/\n\n"
                 f"Sitemap: https://{self.board.cfg.site_name}/sitemap.xml\n",
@@ -601,6 +604,18 @@ class Handler(BaseHTTPRequestHandler):
             if self._limited(bool(uploads)):
                 return
             self._signing(params, uploads, method)
+            return
+        if head == "like":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "signed POST required"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            if self._limited(True):
+                return
+            self._like(params)
             return
         if head == "_profile":
             if method != "POST":
@@ -681,6 +696,8 @@ class Handler(BaseHTTPRequestHandler):
                 "post",
                 "edit",
                 "delete",
+                "like",
+                "unlike",
             }
         ):
             if method != "GET":
@@ -946,7 +963,6 @@ class Handler(BaseHTTPRequestHandler):
                     "authentication": self.board.store.post_authentication(post),
                     "engagement": engagement,
                     "tags": list(self.board.store.post_tags(post.id)),
-                    "likes": "unsupported",
                     "files": [file.to_dict() for file in self.board.store.attachments(post.id)],
                 },
             )
@@ -1209,6 +1225,36 @@ class Handler(BaseHTTPRequestHandler):
             if action == "post.edit":
                 response["files"] = list(manifest)
             self._json(200, response)
+            return
+
+        if action in {"post.like", "post.unlike"}:
+            if store.key_info(signer_id) is None:
+                raise StoreError("like requires an established signed identity", 403)
+            post_id = _post_id(_required(params, "id"))
+            post = store.get_post(post_id)
+            if post is None:
+                raise StoreError("post not found", 404)
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+                post_id=post.id,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "id": post.id,
+                    "liked": action == "post.like",
+                    **payload_info(payload),
+                },
+            )
             return
 
         if action in EXCHANGE_ACTIONS:
@@ -1722,6 +1768,60 @@ class Handler(BaseHTTPRequestHandler):
         if not self.board.store.signed_allowed(auth.signer_id, board, "topic.policy"):
             raise StoreError("certificate does not grant topic.policy", 403)
         self._json(200, self.board.store.set_policy(board, anonymous, version))
+
+    def _like(self, params: Params) -> None:
+        requested = (_param(params, "action") or "like").lower()
+        if requested not in {"like", "unlike"}:
+            raise StoreError("like action must be like or unlike", 400)
+        action = "post.like" if requested == "like" else "post.unlike"
+        post_id = _post_id(_required(params, "id"))
+        post = self.board.store.get_post(post_id)
+        if post is None:
+            raise StoreError("post not found", 404)
+
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        nonce = _required(params, "nonce")
+        issued = _int_required(params, "issued")
+        canonical_key, signer_id = public_identity(key)
+        payload = request_payload(
+            action=action,
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            post_id=post.id,
+        )
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        if self.board.store.key_info(auth.signer_id) is None:
+            raise StoreError("like requires an established signed identity", 403)
+        self.board.store.consume_nonce(auth)
+        changed, likes = self.board.store.set_post_like(
+            post.id,
+            auth.signer_id,
+            requested == "like",
+        )
+        if self.board.engagement.available:
+            self.board.engagement.set_likes(post.id, post.board, likes)
+        self._send(
+            200,
+            render_ok(
+                ok=1,
+                action=requested,
+                id=post.id,
+                liked=1 if requested == "like" else 0,
+                changed=1 if changed else 0,
+                likes=likes,
+                author_id=auth.signer_id,
+            ),
+        )
 
     def _inbox(self, params: Params) -> None:
         key = _required(params, "key")
@@ -2445,6 +2545,34 @@ class Handler(BaseHTTPRequestHandler):
         raise StoreError("unsupported path GET operation", 400)
 
     def _guest_bridge(self, action: str, params: Params, method: str = "GET") -> None:
+        if action in {"like", "unlike"}:
+            info = store.custody_info(token)
+            post_id = _post_id(_required(params, "id"))
+            post = store.get_post(post_id)
+            if post is None:
+                raise StoreError("post not found", 404)
+            changed, likes = store.set_post_like(
+                post.id,
+                str(info["author_id"]),
+                action == "like",
+            )
+            if self.board.engagement.available:
+                self.board.engagement.set_likes(post.id, post.board, likes)
+            self._send(
+                200,
+                render_ok(
+                    ok=1,
+                    action=action,
+                    id=post.id,
+                    liked=1 if action == "like" else 0,
+                    changed=1 if changed else 0,
+                    likes=likes,
+                    auth="custodial",
+                    author_id=info["author_id"],
+                ),
+            )
+            return
+
         if action == "post":
             self._create({**params, "board": ["guest"]}, (), method)
             return
@@ -3427,7 +3555,7 @@ class Handler(BaseHTTPRequestHandler):
     def _hot(self, params: Params) -> None:
         sort = (_param(params, "sort") or "hot").lower()
         if sort not in Engagement.SORTS:
-            raise StoreError("sort must be hot, views, or comments", 400)
+            raise StoreError("sort must be hot, views, likes, or comments", 400)
         board = (_param(params, "board") or "").lower() or None
         if board is not None and not valid_board_name(board):
             raise StoreError("invalid board", 400)
@@ -3538,7 +3666,7 @@ class Handler(BaseHTTPRequestHandler):
             note = f"{info['description']} · sort={sort}"
         else:
             if sort not in {"", "new", "old"}:
-                raise StoreError("sort must be new, old, views, comments, or hot", 400)
+                raise StoreError("sort must be new, old, views, likes, comments, or hot", 400)
             if _param(params, "cursor"):
                 raise StoreError("time streams use server-returned before/since links", 400)
             order = (
