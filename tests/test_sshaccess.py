@@ -18,6 +18,7 @@ from msgd.sshaccess import (
     SSHKeyStore,
     _authorized_line,
     _repo_name_from_ssh_path,
+    _run_git_command,
     auth_main,
     has_scope,
     normalize_scopes,
@@ -114,6 +115,39 @@ class SSHAccessTests(unittest.TestCase):
         service.ensure_repository("demo")
         info = service.repository_info("demo")
         self.assertEqual(info["ssh_clone_url"], "ssh://msg@example.test/demo.git")
+
+    def test_git_ssh_command_enforces_repository_scopes(self) -> None:
+        service = RepoService(self.cfg)
+        if not service.available:
+            self.skipTest("git executable unavailable")
+        service.ensure_repository("demo")
+        item = {"owner_id": self.owner, "scopes": ("repo-read",)}
+        with patch("msgd.sshaccess.subprocess.run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(_run_git_command(self.cfg, item, ["git-upload-pack", "demo.git"]), 0)
+            command = run.call_args.args[0]
+            self.assertEqual(command[1], "upload-pack")
+            self.assertTrue(str(command[2]).endswith("/demo.git"))
+
+        with self.assertRaises(StoreError) as ctx:
+            _run_git_command(self.cfg, item, ["git-receive-pack", "demo.git"])
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_expired_key_does_not_authenticate(self) -> None:
+        key = public_key()
+        item = self.store.add(
+            owner_id=self.owner,
+            public_key=key,
+            name="short-lived",
+            expires=int(__import__("time").time()) + 60,
+        )
+        key_type, key_data = key.split()
+        with self.store._lock, self.store._conn:
+            self.store._conn.execute(
+                "UPDATE ssh_authorized_keys SET expires = ? WHERE id = ?",
+                (1, item["id"]),
+            )
+        self.assertIsNone(self.store.lookup(key_type, key_data))
 
     def test_access_payload_is_deterministic(self) -> None:
         kwargs = {
