@@ -1142,6 +1142,166 @@ class Store:
         except StoreError, SignatureError:
             return False
 
+    def certificate_chain(self, serial: str) -> list[dict[str, Any]]:
+        """Return the currently valid chain from Root to *serial*."""
+        if not self.certificate_active(serial):
+            return []
+        root = self.root_info()
+        if root is None:
+            return []
+
+        chain: list[dict[str, Any]] = []
+        current = serial
+        seen: set[str] = set()
+        while current != "root":
+            if current in seen or len(seen) >= 8:
+                return []
+            seen.add(current)
+            row = self.certificate(current)
+            if row is None:
+                return []
+            try:
+                cert = parse_certificate(str(row["body"]))
+            except SignatureError:
+                return []
+            chain.append(
+                {
+                    "serial": cert.serial,
+                    "subject_id": cert.subject_id,
+                    "issuer_id": cert.issuer_id,
+                    "delegate": cert.delegate,
+                    "not_before": cert.not_before,
+                    "not_after": cert.not_after,
+                }
+            )
+            current = cert.issuer_serial
+
+        chain.append(
+            {
+                "serial": "root",
+                "subject_id": root["root_id"],
+                "issuer_id": None,
+                "delegate": True,
+                "not_before": None,
+                "not_after": None,
+            }
+        )
+        chain.reverse()
+        return chain
+
+    def certification(self, subject_id: str) -> dict[str, Any]:
+        """Return server-derived certificate state for an identity."""
+        root = self.root_info()
+        if root is not None and subject_id == root["root_id"]:
+            return {
+                "status": "root",
+                "certified": True,
+                "role": "root",
+                "active_certificates": 0,
+                "certificate_count": 0,
+                "primary": {
+                    "serial": "root",
+                    "issuer_id": None,
+                    "delegate": True,
+                    "depth": 0,
+                    "chain": [
+                        {
+                            "serial": "root",
+                            "subject_id": root["root_id"],
+                            "issuer_id": None,
+                            "delegate": True,
+                            "not_before": None,
+                            "not_after": None,
+                        }
+                    ],
+                },
+            }
+
+        rows = self.certificates_for(subject_id)
+        if not rows:
+            return {
+                "status": "none",
+                "certified": False,
+                "role": None,
+                "active_certificates": 0,
+                "certificate_count": 0,
+                "primary": None,
+            }
+
+        active: list[dict[str, Any]] = []
+        for row in rows:
+            serial = str(row["serial"])
+            if not self.certificate_active(serial):
+                continue
+            try:
+                cert = parse_certificate(str(row["body"]))
+            except SignatureError:
+                continue
+            chain = self.certificate_chain(serial)
+            if not chain:
+                continue
+            can_issue = cert.delegate and any(
+                "cert.issue" in actions for actions in cert.grants.values()
+            )
+            active.append(
+                {
+                    "serial": serial,
+                    "issuer_id": cert.issuer_id,
+                    "delegate": cert.delegate,
+                    "ca": can_issue,
+                    "not_before": cert.not_before,
+                    "not_after": cert.not_after,
+                    "depth": len(chain) - 1,
+                    "chain": chain,
+                }
+            )
+
+        if not active:
+            return {
+                "status": "inactive",
+                "certified": False,
+                "role": None,
+                "active_certificates": 0,
+                "certificate_count": len(rows),
+                "primary": None,
+            }
+
+        active.sort(key=lambda item: (int(item["depth"]), -int(item["not_after"]), str(item["serial"])))
+        primary = active[0]
+        role = "ca" if any(bool(item["ca"]) for item in active) else "member"
+        return {
+            "status": "active",
+            "certified": True,
+            "role": role,
+            "active_certificates": len(active),
+            "certificate_count": len(rows),
+            "primary": primary,
+        }
+
+    def post_authentication(self, post: Post) -> dict[str, Any]:
+        if not post.signed:
+            return {
+                "type": "unsigned",
+                "signed": False,
+                "certified": False,
+                "status": "unsigned",
+                "author": None,
+                "actor": None,
+            }
+
+        author = self.certification(post.author_id or "")
+        actor = self.certification(post.actor_id or "")
+        certified = bool(actor["certified"])
+        return {
+            "type": "certificate-signed",
+            "signed": True,
+            "certified": certified,
+            "status": "certified" if certified else "signed-inactive",
+            "author": author,
+            "actor": actor,
+            "actor_is_author": post.actor_id == post.author_id,
+        }
+
     def permissions_for(self, subject_id: str, board: str) -> set[str]:
         permissions: set[str] = set()
         for row in self.certificates_for(subject_id):
@@ -1616,18 +1776,59 @@ class Store:
         if not valid_author_id(author_id):
             return None
         certs = self.certificates_for(author_id)
-        posts = self.list_posts(author_id=author_id, limit=self.cfg.max_limit)
-        public_key = certs[0]["subject_key"] if certs else (posts[0].author_key if posts else None)
+        with self._lock:
+            stats = self._conn.execute(
+                """
+                SELECT COUNT(*) AS posts, MIN(created) AS first_seen,
+                       MAX(updated) AS last_seen
+                  FROM posts
+                 WHERE author_id = ?
+                """,
+                (author_id,),
+            ).fetchone()
+            aliases = self._conn.execute(
+                """
+                SELECT name, MAX(id) AS last_id
+                  FROM posts
+                 WHERE author_id = ?
+                 GROUP BY name
+                 ORDER BY last_id DESC
+                 LIMIT 8
+                """,
+                (author_id,),
+            ).fetchall()
+            latest = self._conn.execute(
+                self._select_posts() + " WHERE author_id = ? ORDER BY id DESC LIMIT 1",
+                (author_id,),
+            ).fetchone()
+        latest_post = self._row(latest)
+        public_key = certs[0]["subject_key"] if certs else (
+            latest_post.author_key if latest_post else None
+        )
         if public_key is None:
-            return None
+            root = self.root_info()
+            if root is not None and author_id == root["root_id"]:
+                public_key = root["public_key"]
+            else:
+                return None
         return {
             "author_id": author_id,
             "algorithm": "ed25519",
             "public_key": public_key,
-            "posts": len(posts),
-            "active_certificates": sum(
-                1 for cert in certs if self.certificate_active(str(cert["serial"]))
+            "display_name": latest_post.name if latest_post else None,
+            "aliases": [str(row["name"]) for row in aliases],
+            "posts": int(stats["posts"] or 0),
+            "first_seen": (
+                round(float(stats["first_seen"]), 3)
+                if stats["first_seen"] is not None
+                else None
             ),
+            "last_seen": (
+                round(float(stats["last_seen"]), 3)
+                if stats["last_seen"] is not None
+                else None
+            ),
+            "certification": self.certification(author_id),
         }
 
     def stats(self) -> dict[str, int]:
