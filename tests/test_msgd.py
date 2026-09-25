@@ -217,17 +217,20 @@ class ServerCase(unittest.TestCase):
         text: str,
         *,
         board: str = "main",
+        name: str = "anonymous",
     ) -> int:
         info = self.signing(
             action="post.create",
             key=public_b64(key),
             board=board,
+            name=name,
             text=text,
         )
         signature = sign_b64(key, info["payload_b64"])
         status, body = self.c.post(
             "/publish",
             board=board,
+            name=name,
             text=text,
             key=public_b64(key),
             sig=signature,
@@ -238,20 +241,32 @@ class ServerCase(unittest.TestCase):
         fields = dict(line.split("=", 1) for line in body.splitlines() if "=" in line)
         return int(fields["id"])
 
-    def signed_edit(self, key: Ed25519PrivateKey, post_id: int, text: str) -> tuple[int, str]:
-        info = self.signing(
-            action="post.edit",
-            key=public_b64(key),
-            id=str(post_id),
-            text=text,
-        )
-        return self.c.post(
-            "/publish",
-            edit=str(post_id),
-            text=text,
-            key=public_b64(key),
-            sig=sign_b64(key, info["payload_b64"]),
-        )
+    def signed_edit(
+        self,
+        key: Ed25519PrivateKey,
+        post_id: int,
+        text: str,
+        *,
+        name: str | None = None,
+    ) -> tuple[int, str]:
+        fields = {
+            "action": "post.edit",
+            "key": public_b64(key),
+            "id": str(post_id),
+            "text": text,
+        }
+        if name is not None:
+            fields["name"] = name
+        info = self.signing(**fields)
+        submit = {
+            "edit": str(post_id),
+            "text": text,
+            "key": public_b64(key),
+            "sig": sign_b64(key, info["payload_b64"]),
+        }
+        if name is not None:
+            submit["name"] = name
+        return self.c.post("/publish", **submit)
 
     def signed_revoke(self, key: Ed25519PrivateKey, serial: str) -> tuple[int, str]:
         info = self.signing(
@@ -413,6 +428,120 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(meta["author_id"], meta["actor_id"])
         self.assertEqual(meta["sig_version"], 2)
 
+    def test_certified_post_exposes_chain_and_identity_metadata(self) -> None:
+        member = Ed25519PrivateKey.generate()
+        serial = self.issue(self.root_key, member)
+        pid = self.signed_create(member, "hello", name="Alice")
+
+        meta = json.loads(self.c.get(f"/main/{pid}/meta")[1])
+        auth = meta["authentication"]
+        self.assertEqual(auth["status"], "certified")
+        self.assertTrue(auth["certified"])
+        self.assertEqual(auth["actor"]["role"], "member")
+        self.assertEqual(auth["actor"]["primary"]["serial"], serial)
+        self.assertEqual(auth["actor"]["primary"]["depth"], 1)
+        self.assertEqual(auth["actor"]["primary"]["chain"][0]["serial"], "root")
+        self.assertEqual(auth["actor"]["primary"]["chain"][-1]["serial"], serial)
+
+        listing = self.c.get("/main")[1]
+        self.assertIn(f"#{pid} /main [auth:certified] Alice", listing)
+
+        identity = json.loads(self.c.get(f"/key/{meta['author_id']}")[1])
+        self.assertEqual(identity["display_name"], "Alice")
+        self.assertIn("Alice", [item["name"] for item in identity["aliases"]])
+        self.assertEqual(identity["certification"]["status"], "active")
+        self.assertEqual(identity["certification"]["primary"]["serial"], serial)
+
+    def test_delegated_chain_and_ca_marker(self) -> None:
+        ca = Ed25519PrivateKey.generate()
+        ca_id = public_identity_for_test(ca)
+        ca_serial = self.issue(
+            self.root_key,
+            ca,
+            grants=[
+                {
+                    "topic": "*",
+                    "actions": [
+                        "post.create",
+                        "post.edit.self",
+                        "post.delete.self",
+                        "cert.issue",
+                        "cert.revoke",
+                    ],
+                }
+            ],
+            delegate=True,
+        )
+        ca_post = self.signed_create(ca, "ca-post", name="Light")
+        ca_meta = json.loads(self.c.get(f"/main/{ca_post}/meta")[1])
+        self.assertEqual(ca_meta["authentication"]["actor"]["role"], "ca")
+        self.assertIn("[auth:certified-ca] Light", self.c.get("/main")[1])
+
+        member = Ed25519PrivateKey.generate()
+        child_serial = self.issue(ca, member, issuer_serial=ca_serial)
+        pid = self.signed_create(member, "child")
+        meta = json.loads(self.c.get(f"/main/{pid}/meta")[1])
+        primary = meta["authentication"]["actor"]["primary"]
+        self.assertEqual(primary["issuer_id"], ca_id)
+        self.assertEqual(primary["depth"], 2)
+        self.assertEqual(
+            [item["serial"] for item in primary["chain"]],
+            ["root", ca_serial, child_serial],
+        )
+
+    def test_revoked_parent_downgrades_authentication_marker(self) -> None:
+        ca = Ed25519PrivateKey.generate()
+        ca_serial = self.issue(
+            self.root_key,
+            ca,
+            grants=[
+                {
+                    "topic": "*",
+                    "actions": [
+                        "post.create",
+                        "post.edit.self",
+                        "post.delete.self",
+                        "cert.issue",
+                        "cert.revoke",
+                    ],
+                }
+            ],
+            delegate=True,
+        )
+        member = Ed25519PrivateKey.generate()
+        self.issue(ca, member, issuer_serial=ca_serial)
+        pid = self.signed_create(member, "before")
+
+        status, _ = self.signed_revoke(self.root_key, ca_serial)
+        self.assertEqual(status, 200)
+
+        meta = json.loads(self.c.get(f"/main/{pid}/meta")[1])
+        auth = meta["authentication"]
+        self.assertEqual(auth["status"], "signed-inactive")
+        self.assertFalse(auth["certified"])
+        self.assertEqual(
+            auth["actor"]["inactive_certificates"][0]["reason"],
+            "chain-inactive",
+        )
+        self.assertIn(f"#{pid} /main [auth:signed-inactive]", self.c.get("/main")[1])
+
+    def test_unsigned_name_cannot_forge_authentication_metadata(self) -> None:
+        status, body = self.c.get(
+            "/publish",
+            board="main",
+            name="[auth:certified]",
+            text="fake",
+        )
+        self.assertEqual(status, 201, body)
+        post_id = int(dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"])
+        meta = json.loads(self.c.get(f"/main/{post_id}/meta")[1])
+        self.assertEqual(meta["authentication"]["status"], "unsigned")
+        listing = self.c.get("/main")[1]
+        self.assertIn(
+            f"#{post_id} /main [auth:unsigned] [auth:certified]",
+            listing,
+        )
+
     def test_delegated_admin_can_edit_other_signed_posts(self) -> None:
         light = Ed25519PrivateKey.generate()
         all_actions = sorted(
@@ -436,13 +565,19 @@ class ServerCase(unittest.TestCase):
 
         member = Ed25519PrivateKey.generate()
         self.issue(light, member, issuer_serial=light_serial)
-        pid = self.signed_create(member, "member")
+        pid = self.signed_create(member, "member", name="Member")
 
-        status, _ = self.signed_edit(light, pid, "admin-edit")
+        status, _ = self.signed_edit(light, pid, "admin-edit", name="Impostor")
         self.assertEqual(status, 200)
         meta = json.loads(self.c.get(f"/main/{pid}/meta")[1])
         self.assertNotEqual(meta["author_id"], meta["actor_id"])
         self.assertEqual(meta["body"], "admin-edit")
+        self.assertEqual(meta["authentication"]["author"]["role"], "member")
+        self.assertEqual(meta["authentication"]["actor"]["role"], "ca")
+
+        identity = json.loads(self.c.get(f"/key/{meta['author_id']}")[1])
+        self.assertEqual(identity["display_name"], "Member")
+        self.assertNotIn("Impostor", [item["name"] for item in identity["aliases"]])
 
     def test_child_certificate_cannot_expand_permissions(self) -> None:
         ca = Ed25519PrivateKey.generate()
@@ -602,6 +737,7 @@ class ServerCase(unittest.TestCase):
         self.assertTrue(any(post.system for post in ca_posts))
         self.assertTrue(any("[REQUEST]" in post.title for post in ca_posts))
         self.assertTrue(any("[ISSUED]" in post.title for post in ca_posts))
+        self.assertIn("[auth:system]", self.c.get("/ca")[1])
         audit = next(post for post in ca_posts if post.system)
         self.assertEqual(
             self.c.post("/publish", edit=str(audit.id), text="tamper")[0],
@@ -1370,6 +1506,7 @@ class LegacyMigrationCase(unittest.TestCase):
                 self.assertIn("topic_policies", tables)
                 self.assertIn("inbox_events", tables)
                 self.assertIn("certificate_requests", tables)
+                self.assertIn("identity_names", tables)
             finally:
                 store.close()
 

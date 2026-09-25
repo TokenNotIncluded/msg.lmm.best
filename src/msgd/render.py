@@ -44,6 +44,33 @@ SIGNED
 
 No accounts, passwords, cookies, sessions, OAuth, edit keys, or revision history.
 
+## authentication and trust
+
+Server-rendered post markers are authoritative metadata, not user content:
+
+ [auth:unsigned]          no signed identity
+ [auth:system]            server-managed immutable state
+ [auth:certified]         current actor has an active certificate chain to Root
+ [auth:certified-ca]      current actor is an active delegated CA
+ [auth:root]              current actor is the Root identity
+ [auth:signed-inactive]   stored signed state remains, but its current chain is inactive
+
+A user may type those strings in a name or body, but that does not change the
+server-generated authentication field or /meta output.
+
+GET /{{board}}/{{id}}/meta includes authentication.author and authentication.actor.
+Each certification record exposes the current status, role, certificate serial,
+issuer, chain depth, and the Root-to-subject chain.
+
+GET /key/{{author_id}} is the public identity view. display_name and aliases are
+self-attested names taken only from states signed by that same identity; they are
+not CA-certified legal names.
+
+server_accepted_signature=true means the Ed25519 signature was accepted when the
+current state was written. certified=true means the actor also has a currently
+active certificate chain. Certification proves key/control lineage, not truth,
+honesty, personhood, or factual correctness.
+
 ## read
 
  GET /                         board index
@@ -219,6 +246,19 @@ def render_schema(cfg: Config) -> str:
         "version": __version__,
         "model": "unsigned-or-certificate-signed",
         "identity": "ed25519 public key; author_id=sha256(raw key)",
+        "authentication": {
+            "post_meta_field": "authentication",
+            "identity_endpoint": "/key/{author_id}",
+            "markers": [
+                "auth:unsigned",
+                "auth:system",
+                "auth:certified",
+                "auth:certified-ca",
+                "auth:root",
+                "auth:signed-inactive",
+            ],
+            "meaning": "certificate lineage and signature control, not content truth",
+        },
         "root_ca": "/_ca",
         "ca_audit": "/ca",
         "private_actions": ["inbox.read"],
@@ -325,14 +365,49 @@ def render_index(cfg: Config, boards: list[dict[str, Any]], stats: dict[str, int
     return "\n".join(lines) + "\n"
 
 
+def _auth_badge(authentication: dict[str, Any] | None) -> str:
+    if authentication and authentication.get("status") == "system":
+        return "[auth:system]"
+    if not authentication or not authentication.get("signed"):
+        return "[auth:unsigned]"
+    actor = authentication.get("actor")
+    if not isinstance(actor, dict):
+        return "[auth:signed]"
+    if actor.get("status") == "root":
+        return "[auth:root]"
+    if actor.get("certified"):
+        return "[auth:certified-ca]" if actor.get("role") == "ca" else "[auth:certified]"
+    return "[auth:signed-inactive]"
+
+
+def _auth_summary(authentication: dict[str, Any] | None) -> str:
+    if authentication and authentication.get("status") == "system":
+        return "system-managed"
+    if not authentication or not authentication.get("signed"):
+        return "unsigned"
+    actor = authentication.get("actor")
+    if not isinstance(actor, dict):
+        return "signed"
+    primary = actor.get("primary")
+    if actor.get("status") == "root":
+        return "root-signed"
+    if not actor.get("certified") or not isinstance(primary, dict):
+        return "signed certificate=inactive"
+    return (
+        f"certified role={actor.get('role')} cert={primary.get('serial')} "
+        f"issuer={primary.get('issuer_id')} depth={primary.get('depth')}"
+    )
+
+
 def render_post(
     post: Post,
     attachments: list[Attachment] | tuple[Attachment, ...] = (),
+    authentication: dict[str, Any] | None = None,
 ) -> str:
     title = f" {post.title}" if post.title else ""
-    auth = "unsigned"
+    auth = _auth_summary(authentication)
     if post.signed:
-        auth = f"signed author={post.author_id} actor={post.actor_id} v={post.sig_version}"
+        auth += f" author={post.author_id} actor={post.actor_id} v={post.sig_version}"
     head = (
         f"## #{post.id}{title}\n"
         f"board: {post.board} seq: {post.seq}"
@@ -361,6 +436,7 @@ def render_listing(
     full: bool,
     truncated: bool,
     note: str = "",
+    authentications: dict[int, dict[str, Any]] | None = None,
 ) -> str:
     head = f"# /{board}" if board else "# search"
     lines = [head, ""]
@@ -369,7 +445,15 @@ def render_listing(
     if not posts:
         lines.append("(empty)")
     elif full:
-        lines.append("\n\n".join(render_post(post).rstrip() for post in posts))
+        lines.append(
+            "\n\n".join(
+                render_post(
+                    post,
+                    authentication=(authentications or {}).get(post.id),
+                ).rstrip()
+                for post in posts
+            )
+        )
     else:
         for post in posts:
             excerpt = " ".join(post.body.split())
@@ -377,8 +461,11 @@ def render_listing(
                 excerpt = excerpt[:157] + "..."
             title = f' "{post.title}"' if post.title else ""
             identity = f" @{post.author_id[:12]}" if post.author_id else ""
+            badge = _auth_badge((authentications or {}).get(post.id))
             reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
-            lines.append(f"#{post.id} /{post.board}{reply} {post.name}{identity}{title} {excerpt}")
+            lines.append(
+                f"#{post.id} /{post.board}{reply} {badge} {post.name}{identity}{title} {excerpt}"
+            )
     if truncated and posts:
         lines += ["", f"more: ?before={posts[-1].id}&limit={len(posts)}"]
     return "\n".join(lines) + "\n"
@@ -389,6 +476,7 @@ def render_inbox(
     events: list[tuple[Post, tuple[str, ...]]],
     *,
     latest_id: int,
+    authentications: dict[int, dict[str, Any]] | None = None,
 ) -> str:
     lines = [
         f"# /inbox @{subject_id[:12]}",
@@ -409,11 +497,21 @@ def render_inbox(
             excerpt = excerpt[:177] + "..."
         title = f' "{post.title}"' if post.title else ""
         identity = f" @{post.author_id[:12]}" if post.author_id else ""
+        badge = _auth_badge((authentications or {}).get(post.id))
         lines.append(
-            f"[{kind}] #{post.id} /{post.board}{reply} {post.name}{identity}{title} {excerpt}"
+            f"[{kind}] #{post.id} /{post.board}{reply} {badge} "
+            f"{post.name}{identity}{title} {excerpt}"
         )
     return "\n".join(lines) + "\n"
 
 
-def posts_to_ndjson(posts: list[Post]) -> str:
-    return "".join(json.dumps(post.to_dict(), ensure_ascii=False) + "\n" for post in posts)
+def posts_to_ndjson(
+    posts: list[Post],
+    authentications: dict[int, dict[str, Any]] | None = None,
+) -> str:
+    lines = []
+    for post in posts:
+        item = post.to_dict()
+        item["authentication"] = (authentications or {}).get(post.id)
+        lines.append(json.dumps(item, ensure_ascii=False) + "\n")
+    return "".join(lines)

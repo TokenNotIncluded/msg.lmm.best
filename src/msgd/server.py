@@ -404,7 +404,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         action = segments[2] if len(segments) > 2 else ""
         if not action:
-            self._send(200, render_post(post, self.board.store.attachments(post.id)))
+            self._send(
+                200,
+                render_post(
+                    post,
+                    self.board.store.attachments(post.id),
+                    self.board.store.post_authentication(post),
+                ),
+            )
         elif action == "raw":
             self._send(200, post.body)
         elif action == "meta":
@@ -412,6 +419,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     **post.to_dict(),
+                    "authentication": self.board.store.post_authentication(post),
                     "files": [file.to_dict() for file in self.board.store.attachments(post.id)],
                 },
             )
@@ -927,6 +935,7 @@ class Handler(BaseHTTPRequestHandler):
                         {
                             "kinds": list(kinds),
                             "post": post.to_dict(),
+                            "authentication": self.board.store.post_authentication(post),
                         },
                         ensure_ascii=False,
                     )
@@ -943,6 +952,9 @@ class Handler(BaseHTTPRequestHandler):
                 auth.signer_id,
                 events,
                 latest_id=self.board.store.stats()["latest_id"],
+                authentications={
+                    post.id: self.board.store.post_authentication(post) for post, _ in events
+                },
             ),
         )
 
@@ -971,10 +983,11 @@ class Handler(BaseHTTPRequestHandler):
         )
         truncated = len(posts) > limit
         posts = posts[:limit]
+        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             self._send(
                 200,
-                posts_to_ndjson(posts),
+                posts_to_ndjson(posts, authentications),
                 content_type="application/x-ndjson; charset=utf-8",
             )
             return
@@ -986,6 +999,7 @@ class Handler(BaseHTTPRequestHandler):
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=truncated,
                 note=info["description"],
+                authentications=authentications,
             ),
         )
 
@@ -997,14 +1011,17 @@ class Handler(BaseHTTPRequestHandler):
         limit = _int(params, "limit", self.board.cfg.default_limit, 1, self.board.cfg.max_limit)
         assert limit is not None
         posts = self.board.store.list_posts(search=needle, limit=limit + 1)
+        visible = posts[:limit]
+        authentications = {post.id: self.board.store.post_authentication(post) for post in visible}
         self._send(
             200,
             render_listing(
                 board=None,
-                posts=posts[:limit],
+                posts=visible,
                 full=(_param(params, "view") or "").lower() == "full",
                 truncated=len(posts) > limit,
                 note=f"search: {needle!r}",
+                authentications=authentications,
             ),
         )
 
@@ -1080,6 +1097,8 @@ class Handler(BaseHTTPRequestHandler):
             max_body_bytes=_body_limit(self.board.cfg, method),
             reply_to=reply_to,
         )
+        authentication = store.post_authentication(post)
+        actor_cert = authentication.get("actor") or {}
         self._send(
             201,
             render_ok(
@@ -1088,7 +1107,9 @@ class Handler(BaseHTTPRequestHandler):
                 id=post.id,
                 board=post.board,
                 seq=post.seq,
-                auth="signed" if post.signed else "unsigned",
+                auth=authentication["status"],
+                certified=1 if authentication["certified"] else None,
+                role=actor_cert.get("role") if isinstance(actor_cert, dict) else None,
                 author_id=post.author_id,
                 files=len(files),
                 evicted=evicted or None,
@@ -1174,6 +1195,8 @@ class Handler(BaseHTTPRequestHandler):
             files=file_update,
             max_body_bytes=_body_limit(self.board.cfg, method),
         )
+        authentication = store.post_authentication(updated)
+        actor_cert = authentication.get("actor") or {}
         self._send(
             200,
             render_ok(
@@ -1181,6 +1204,9 @@ class Handler(BaseHTTPRequestHandler):
                 action="edit",
                 id=updated.id,
                 board=updated.board,
+                auth=authentication["status"],
+                certified=1 if authentication["certified"] else None,
+                role=actor_cert.get("role") if isinstance(actor_cert, dict) else None,
                 actor_id=auth.signer_id if auth else None,
                 version=updated.sig_version if updated.signed else None,
                 files=len(manifest),
