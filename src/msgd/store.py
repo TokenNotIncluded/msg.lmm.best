@@ -343,6 +343,10 @@ class Store:
             self._ensure_schema()
             for name, description in DEFAULT_BOARDS.items():
                 self._ensure_board(name, description)
+            self._conn.execute(
+                "UPDATE boards SET description = ? WHERE name = 'ca' AND description = ''",
+                (DEFAULT_BOARDS["ca"],),
+            )
             if not had_inbox:
                 self._rebuild_inbox()
 
@@ -1109,6 +1113,38 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_certificates(
+        self,
+        *,
+        issuer_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        where = ""
+        params: list[Any] = []
+        if issuer_id:
+            if not valid_author_id(issuer_id):
+                raise StoreError("invalid issuer id", 400)
+            where = " WHERE issuer_id = ?"
+            params.append(issuer_id)
+        params.append(max(1, min(limit, self.cfg.max_limit)))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT serial, issuer_serial, issuer_id, subject_id, subject_key,
+                       body, signature, created
+                  FROM certificates
+                """
+                + where
+                + " ORDER BY created DESC LIMIT ?",
+                params,
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["active"] = self.certificate_active(str(row["serial"]))
+            result.append(item)
+        return result
+
     def certificate_active(self, serial: str, *, now: int | None = None) -> bool:
         now = int(time.time()) if now is None else now
         try:
@@ -1216,7 +1252,7 @@ class Store:
             raise StoreError("signed request requires nonce and issued", 400)
         now = int(time.time())
         if abs(now - auth.issued) > 300:
-            raise StoreError("signed create timestamp is outside the 5 minute window", 400)
+            raise StoreError("signed request timestamp is outside the 5 minute window", 400)
         with self._lock, self._conn:
             self._conn.execute(
                 "DELETE FROM signature_nonces WHERE issued < ?",
@@ -1228,7 +1264,7 @@ class Store:
                     (auth.signer_id, auth.nonce, auth.issued),
                 )
             except sqlite3.IntegrityError as exc:
-                raise StoreError("signed create nonce already used", 409) from exc
+                raise StoreError("signed request nonce already used", 409) from exc
 
     def create_post(
         self,
