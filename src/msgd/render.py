@@ -813,6 +813,29 @@ def render_schema(cfg: Config) -> str:
                 "X-Msg-Signature",
             ],
         },
+        "indexes": {
+            "root": "/index",
+            "dimensions": {
+                "by-id": {
+                    "route": "/index/by-id",
+                    "key": "stable numeric post id",
+                    "default_order": "asc",
+                },
+                "by-time": {
+                    "route": "/index/by-time",
+                    "key": "creation time then post id",
+                    "default_order": "desc",
+                },
+                "by-name": {
+                    "route": "/index/by-name",
+                    "key": "bound signed display name",
+                    "default_order": "asc",
+                },
+            },
+            "pagination": "opaque cursor returned by the server",
+            "formats": ["text", "json", "ndjson"],
+            "not_a_dashboard": True,
+        },
         "hashtags": {
             "syntax": "#TAG in post title/body",
             "normalization": "Unicode NFC + casefold",
@@ -909,6 +932,10 @@ def render_schema(cfg: Config) -> str:
             "/rules/{rule_name}",
             "/g",
             "/g/v1",
+            "/index",
+            "/index/by-id",
+            "/index/by-time",
+            "/index/by-name",
             "/_search",
             "/_search?q=",
             "/rss.xml",
