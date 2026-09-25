@@ -145,7 +145,7 @@ class WebSubCase(unittest.TestCase):
         secret = "shared-secret"
         self.subscribe(secret=secret)
 
-        status, body = self.c.post("/publish", text="websub hello")
+        status, body = self.c.post("/publish", board="main", text="websub hello")
         self.assertEqual(status, 201, body)
 
         captured: dict[str, object] = {}
