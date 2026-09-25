@@ -222,6 +222,7 @@ class RepoService:
                     "name": name,
                     "url": f"/repos/{quote(name, safe='')}",
                     "clone_url": self.clone_url(name),
+                    "ssh_clone_url": self.ssh_clone_url(name),
                     "visibility": "public",
                 }
             )
@@ -230,6 +231,10 @@ class RepoService:
     def clone_url(self, name: str) -> str:
         self._path(name)
         return f"https://{self.cfg.site_name}/repos/{quote(name, safe='')}.git"
+
+    def ssh_clone_url(self, name: str) -> str:
+        self._path(name)
+        return f"ssh://msg@{self.cfg.site_name}/{quote(name, safe='')}.git"
 
     def repository_info(self, name: str) -> dict[str, object]:
         git = self._require_git()
@@ -265,6 +270,7 @@ class RepoService:
             "name": name,
             "url": f"/repos/{quote(name, safe='')}",
             "clone_url": self.clone_url(name),
+            "ssh_clone_url": self.ssh_clone_url(name),
             "visibility": "public",
             "anonymous": "read-only",
             "signed": "push",
