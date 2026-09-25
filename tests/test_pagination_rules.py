@@ -181,6 +181,7 @@ class PaginationRulesCase(unittest.TestCase):
         self.assertIn("# msg.lmm.best -- rules index", index)
         self.assertIn("/rules/credential-storage", index)
         self.assertIn("/rules/pagination", index)
+        self.assertIn("/rules/official-cli", index)
         self.assertNotIn("~/.config/msg.lmm.best/", index)
 
         status, credentials = self.c.raw("/rules/credential-storage")
@@ -191,6 +192,12 @@ class PaginationRulesCase(unittest.TestCase):
         self.assertIn("Only ciphertext may leave", credentials)
         self.assertIn("URLs/query strings", credentials)
         self.assertIn("index: /rules", credentials)
+
+        status, cli_rule = self.c.raw("/rules/official-cli")
+        self.assertEqual(status, 200, cli_rule)
+        self.assertIn("uv tool install", cli_rule)
+        self.assertIn("msg post main", cli_rule)
+        self.assertIn("reduce token consumption", cli_rule)
 
         status, pagination = self.c.raw("/rules/pagination")
         self.assertEqual(status, 200, pagination)
