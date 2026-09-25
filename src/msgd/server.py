@@ -87,6 +87,7 @@ from msgd.store import (
     valid_author_id,
     valid_board_name,
 )
+from msgd.templates import TopicTemplateService
 from msgd.webhooks import WebhookService, normalize_events, validate_webhook_url
 from msgd.websites import WebSiteService
 from msgd.websub import WebSubService
@@ -153,6 +154,7 @@ class Board:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.store = Store(cfg)
+        self.templates = TopicTemplateService(cfg)
         self.exchange = ExchangeService(cfg, self.store)
         self.repos = RepoService(cfg)
         self.web = WebSiteService(cfg, self.store)
@@ -200,6 +202,7 @@ class MsgServer(ThreadingHTTPServer):
         self.board.engagement.close()
         self.board.exchange.close()
         self.board.ssh_keys.close()
+        self.board.templates.close()
         super().server_close()
 
 
@@ -314,6 +317,47 @@ class Handler(BaseHTTPRequestHandler):
             json.dumps(value, ensure_ascii=False, indent=2) + "\n",
             content_type="application/json; charset=utf-8",
         )
+
+    def _topic_post_content(
+        self,
+        board: str,
+        reply_to: int | None,
+        params: Params,
+    ) -> tuple[str, str, int | None]:
+        template = self.board.templates.active_for(board, reply_to=reply_to)
+        raw_fields = _param(params, "fields")
+        if template is None:
+            if raw_fields is not None:
+                raise StoreError(f"/{board} has no active template for this post", 400)
+            return _required(params, "text"), "", None
+        if raw_fields is None:
+            raise StoreError(
+                f"/{board} requires structured fields",
+                400,
+                f"/{board}/template",
+            )
+        try:
+            values = json.loads(raw_fields)
+        except json.JSONDecodeError as exc:
+            raise StoreError("fields must be a JSON object", 400) from exc
+        normalized = self.board.templates.normalize_fields(
+            board,
+            values,
+            reply_to=reply_to,
+        )
+        assert normalized is not None
+        body, _values, template_version, derived_title = normalized
+        requested_version = _optional_positive_int(params, "template_version")
+        if requested_version is not None and requested_version != template_version:
+            raise StoreError(
+                f"template changed: current version is {template_version}",
+                409,
+                f"/{board}/template",
+            )
+        explicit_title = _param(params, "title")
+        if derived_title and explicit_title is not None and explicit_title != derived_title:
+            raise StoreError("title is derived from the topic template", 400)
+        return body, derived_title, template_version
 
     def _write_client_metadata(self, params: Params) -> dict[str, str]:
         """Return advisory transport metadata; never use it for authorization."""
@@ -799,6 +843,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if head == "_policy":
             self._policy(params)
+            return
+        if head == "_template":
+            self._template(params, method)
             return
         if head == "key":
             if len(segments) != 2 or not valid_author_id(segments[1]):
@@ -1286,6 +1333,20 @@ class Handler(BaseHTTPRequestHandler):
                 extra_headers={"Link": self._feed_link_header(feed_path)},
             )
             return
+        if len(segments) == 2 and segments[1] == "template":
+            if method not in {"GET", "HEAD"}:
+                self._send(
+                    405,
+                    render_error(405, "topic template is read-only here; use signed POST /_template"),
+                    extra_headers={"Allow": "GET, HEAD"},
+                )
+                return
+            template = self.board.templates.get(head)
+            if template is None:
+                self._error(404, f"/{head} has no topic template")
+            else:
+                self._json(200, template)
+            return
         if len(segments) == 2 and segments[1] == "post":
             if self._limited(True):
                 return
@@ -1677,9 +1738,14 @@ class Handler(BaseHTTPRequestHandler):
                 raise StoreError("/ca is a system-managed audit topic; use /_csr", 403)
             if board == "custody":
                 raise StoreError("/custody writes use /custody/post", 403)
+            raw_body, derived_title, template_version = self._topic_post_content(
+                board,
+                reply_to,
+                params,
+            )
             body, title, name, _ = store.prepare_post(
-                body=_required(params, "text"),
-                title=_param(params, "title") or "",
+                body=raw_body,
+                title=derived_title or _param(params, "title") or "",
                 name=_signed_identity_name(_param(params, "name"), signer_id),
                 max_body_bytes=_body_limit(self.board.cfg, method),
             )
@@ -1703,6 +1769,7 @@ class Handler(BaseHTTPRequestHandler):
                 body=body,
                 files=manifest,
                 reply_to=reply_to,
+                template_version=template_version,
             )
             self._json(
                 200,
@@ -1710,6 +1777,7 @@ class Handler(BaseHTTPRequestHandler):
                     "signer_id": signer_id,
                     "nonce": nonce,
                     "issued": issued,
+                    "template_version": template_version,
                     "files": list(manifest),
                     **payload_info(payload),
                 },
@@ -1729,11 +1797,19 @@ class Handler(BaseHTTPRequestHandler):
                 raise StoreError("/ca is a system-managed audit topic", 403)
             version = post.sig_version + 1 if post.signed else 1
             if action == "post.edit":
+                raw_body, derived_title, template_version = self._topic_post_content(
+                    post.board,
+                    post.reply_to,
+                    params,
+                )
                 body, title, name, _ = store.prepare_post(
-                    body=_required(params, "text"),
-                    title=post.title
-                    if _param(params, "title") is None
-                    else _param(params, "title") or "",
+                    body=raw_body,
+                    title=(
+                        derived_title
+                        or post.title
+                        if _param(params, "title") is None
+                        else _param(params, "title") or ""
+                    ),
                     name=post.name
                     if signer_id != post.author_id or _param(params, "name") is None
                     else _param(params, "name") or "",
@@ -1757,6 +1833,7 @@ class Handler(BaseHTTPRequestHandler):
                     body=body,
                     files=manifest,
                     reply_to=post.reply_to,
+                    template_version=template_version,
                 )
             else:
                 reason = ""
@@ -2144,6 +2221,37 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"signer_id": signer_id, "version": version, **payload_info(payload)})
             return
 
+        if action == "topic.template":
+            board = _required(params, "board")
+            if board != board.lower() or not valid_board_name(board):
+                raise StoreError("invalid lowercase topic name", 400)
+            raw = _required(params, "template")
+            try:
+                normalized = self.board.templates.normalize_schema(json.loads(raw))
+            except json.JSONDecodeError as exc:
+                raise StoreError("template must be JSON", 400) from exc
+            current = self.board.templates.get(board)
+            version = 1 if current is None else int(current["version"]) + 1
+            encoded = canonical_json(normalized)
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=version,
+                board=board,
+                topic_template=encoded,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "version": version,
+                    "board": board,
+                    "template": normalized,
+                    **payload_info(payload),
+                },
+            )
+            return
+
         if action == "cert.revoke":
             serial = _required(params, "serial")
             reason = _param(params, "reason") or ""
@@ -2466,6 +2574,58 @@ class Handler(BaseHTTPRequestHandler):
         if not self.board.store.signed_allowed(auth.signer_id, board, "topic.policy"):
             raise StoreError("certificate does not grant topic.policy", 403)
         self._json(200, self.board.store.set_policy(board, anonymous, signed, version))
+
+    def _template(self, params: Params, method: str) -> None:
+        board = _required(params, "board")
+        if board != board.lower() or not valid_board_name(board):
+            raise StoreError("invalid lowercase topic name", 400)
+        if method in {"GET", "HEAD"} and _param(params, "sig") is None:
+            template = self.board.templates.get(board)
+            if template is None:
+                self._error(404, f"/{board} has no topic template")
+            else:
+                self._json(200, template)
+            return
+        if method != "POST":
+            self._send(
+                405,
+                render_error(405, "template updates require signed POST"),
+                extra_headers={"Allow": "GET, HEAD, POST"},
+            )
+            return
+        if self._limited(True):
+            return
+        raw = _required(params, "template")
+        try:
+            normalized = self.board.templates.normalize_schema(json.loads(raw))
+        except json.JSONDecodeError as exc:
+            raise StoreError("template must be JSON", 400) from exc
+        current = self.board.templates.get(board)
+        version = 1 if current is None else int(current["version"]) + 1
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        canonical_key, signer_id = public_identity(key)
+        encoded = canonical_json(normalized)
+        payload = request_payload(
+            action="topic.template",
+            signer_id=signer_id,
+            version=version,
+            board=board,
+            topic_template=encoded,
+        )
+        auth = signed_request(canonical_key, sig, payload, version=version)
+        if not self.board.store.signed_allowed(auth.signer_id, board, "topic.template"):
+            raise StoreError("certificate does not grant topic.template", 403)
+        self.board.store.ensure_board(board)
+        self._json(
+            200,
+            self.board.templates.set(
+                board,
+                normalized,
+                version=version,
+                updated_by=auth.signer_id,
+            ),
+        )
 
     def _like(self, params: Params) -> None:
         requested = (_param(params, "action") or "like").lower()
@@ -5076,9 +5236,14 @@ class Handler(BaseHTTPRequestHandler):
             if signer_id is not None
             else (_param(params, "name") or "anonymous")
         )
+        raw_body, derived_title, template_version = self._topic_post_content(
+            board,
+            reply_to,
+            params,
+        )
         body, title, name, _ = store.prepare_post(
-            body=_required(params, "text"),
-            title=_param(params, "title") or "",
+            body=raw_body,
+            title=derived_title or _param(params, "title") or "",
             name=requested_name,
             max_body_bytes=_body_limit(self.board.cfg, method),
         )
@@ -5100,6 +5265,7 @@ class Handler(BaseHTTPRequestHandler):
                 body=body,
                 files=manifest,
                 reply_to=reply_to,
+                template_version=template_version,
             )
             auth = signed_request(
                 canonical_key,
@@ -5170,9 +5336,19 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("/custody posts use /custody/edit", 403)
         if _param(params, "reply_to") is not None:
             raise StoreError("reply_to is immutable after creation", 400)
+        raw_body, derived_title, template_version = self._topic_post_content(
+            post.board,
+            post.reply_to,
+            params,
+        )
         body, title, name, _ = store.prepare_post(
-            body=_required(params, "text"),
-            title=post.title if _param(params, "title") is None else _param(params, "title") or "",
+            body=raw_body,
+            title=(
+                derived_title
+                or post.title
+                if _param(params, "title") is None
+                else _param(params, "title") or ""
+            ),
             name=post.name if _param(params, "name") is None else _param(params, "name") or "",
             max_body_bytes=_body_limit(self.board.cfg, method),
         )
@@ -5210,6 +5386,7 @@ class Handler(BaseHTTPRequestHandler):
                 body=body,
                 files=manifest,
                 reply_to=post.reply_to,
+                template_version=template_version,
             )
             auth = signed_request(canonical_key, sig or "", payload, version=version)
             if not store.signed_allowed(
