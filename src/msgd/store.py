@@ -313,6 +313,18 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 );
 CREATE INDEX IF NOT EXISTS webhook_due
     ON webhook_deliveries(delivered, next_attempt, created);
+
+
+CREATE TABLE IF NOT EXISTS path_get_receipts (
+    request_id     TEXT PRIMARY KEY,
+    payload_sha256 TEXT NOT NULL,
+    operation      TEXT NOT NULL,
+    status         INTEGER NOT NULL,
+    content_type   TEXT NOT NULL,
+    body           BLOB NOT NULL,
+    headers        TEXT NOT NULL DEFAULT '{}',
+    created        REAL NOT NULL
+);
 """
 
 
@@ -676,6 +688,17 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS webhook_due
                 ON webhook_deliveries(delivered, next_attempt, created);
+
+            CREATE TABLE IF NOT EXISTS path_get_receipts (
+                request_id TEXT PRIMARY KEY,
+                payload_sha256 TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                status INTEGER NOT NULL,
+                content_type TEXT NOT NULL,
+                body BLOB NOT NULL,
+                headers TEXT NOT NULL DEFAULT '{}',
+                created REAL NOT NULL
+            );
             """
         )
         self._conn.execute(
@@ -3295,6 +3318,62 @@ class Store:
                     "UPDATE webhooks SET last_error = ? WHERE id = ?",
                     (error[:500], str(row["webhook_id"])),
                 )
+
+    def path_get_receipt(self, request_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT request_id, payload_sha256, operation, status,
+                       content_type, body, headers, created
+                  FROM path_get_receipts
+                 WHERE request_id = ?
+                """,
+                (request_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["body"] = bytes(row["body"])
+        item["headers"] = json.loads(str(row["headers"]))
+        return item
+
+    def save_path_get_receipt(
+        self,
+        *,
+        request_id: str,
+        payload_sha256: str,
+        operation: str,
+        status: int,
+        content_type: str,
+        body: bytes,
+        headers: dict[str, str],
+    ) -> None:
+        if len(body) > 4096:
+            raise StoreError("path GET response is too large to cache safely", 500)
+        with self._lock, self._conn:
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO path_get_receipts(
+                        request_id, payload_sha256, operation, status,
+                        content_type, body, headers, created
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        request_id,
+                        payload_sha256,
+                        operation,
+                        status,
+                        content_type,
+                        body,
+                        json.dumps(headers, separators=(",", ":")),
+                        time.time(),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                existing = self.path_get_receipt(request_id)
+                if existing is None or existing["payload_sha256"] != payload_sha256:
+                    raise StoreError("path GET request id was reused with different payload", 409) from exc
 
     def key_info(self, author_id: str) -> dict[str, Any] | None:
         if not valid_author_id(author_id):
