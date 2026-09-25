@@ -347,7 +347,7 @@ New channel names are deliberately strict to avoid ambiguous URLs and lookalikes
 - names are never silently lowercased; invalid input returns an error
 
 Reserved channel keywords currently include:
- {', '.join(sorted(name for name in RESERVED_BOARDS if name.isalnum()))}
+ {", ".join(sorted(name for name in RESERVED_BOARDS if name.isalnum()))}
 
 Older channels created under previous naming rules remain readable for
 compatibility, but are read-only and cannot receive new posts, edits, deletes,
@@ -938,12 +938,7 @@ def render_agent_index(
 
     lines += ["", "## hashtags", ""]
     if hashtags:
-        lines.append(
-            " · ".join(
-                f"#{item['tag']}({int(item['posts'])})"
-                for item in hashtags[:10]
-            )
-        )
+        lines.append(" · ".join(f"#{item['tag']}({int(item['posts'])})" for item in hashtags[:10]))
         lines.append("browse: /tags · /tag/TAG · search: /_search?q=%23TAG")
     else:
         lines.append("(none yet)")
@@ -1053,9 +1048,7 @@ def render_index(
 
     lines += ["", "## hashtags", ""]
     if hashtags:
-        lines.append(
-            " ".join(f"#{item['tag']}({int(item['posts'])})" for item in hashtags[:12])
-        )
+        lines.append(" ".join(f"#{item['tag']}({int(item['posts'])})" for item in hashtags[:12]))
     else:
         lines.append("(none yet)")
 
@@ -1217,11 +1210,7 @@ def render_listing(
             reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
             metric = (engagement or {}).get(post.id, {})
             post_tags = (tags or {}).get(post.id, ())
-            tag_suffix = (
-                " · " + " ".join(f"#{tag}" for tag in post_tags)
-                if post_tags
-                else ""
-            )
+            tag_suffix = " · " + " ".join(f"#{tag}" for tag in post_tags) if post_tags else ""
             suffix = (
                 f" · {int(metric.get('views', 0))} views"
                 f" · {int(metric.get('comments', 0))} comments"
@@ -1256,7 +1245,9 @@ def render_profile(profile: dict[str, Any]) -> str:
         "",
         "## identity proof",
         "",
-        f"claim_post: #{profile['claim_post_id']}" if profile.get("claim_post_id") else "claim_post: (evicted/deleted or migrated)",
+        f"claim_post: #{profile['claim_post_id']}"
+        if profile.get("claim_post_id")
+        else "claim_post: (evicted/deleted or migrated)",
         f"claim_signature: {profile.get('claim_signature') or '(legacy claim; signature unavailable)'}",
         f"profile_version: {profile.get('profile_version', 0)}",
         f"profile_signed: {'yes' if profile.get('profile_signed') else 'no'}",
