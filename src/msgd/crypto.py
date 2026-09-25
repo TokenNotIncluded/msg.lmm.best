@@ -118,6 +118,13 @@ def request_payload(
     since: int | None = None,
     before: int | None = None,
     limit: int | None = None,
+    csr_id: int | None = None,
+    issuer_serial: str = "",
+    subject_key: str = "",
+    delegate: bool = False,
+    grants: str = "",
+    message: str = "",
+    decision: str = "",
 ) -> bytes:
     if not IDENTITY_RE.fullmatch(signer_id):
         raise SignatureError("invalid signer id")
@@ -185,6 +192,32 @@ def request_payload(
             ("since", "" if since is None else str(since)),
             ("before", "" if before is None else str(before)),
             ("limit", "" if limit is None else str(limit)),
+        ]
+    elif action == "cert.request":
+        if nonce is None or issued is None:
+            raise SignatureError("cert.request requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        canonical_subject, subject_id = public_identity(subject_key)
+        if subject_id != signer_id:
+            raise SignatureError("certificate request key must be the signing key")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("issuer_serial", issuer_serial),
+            ("subject_key", canonical_subject),
+            ("delegate", "1" if delegate else "0"),
+            ("grants", grants),
+            ("message", message),
+        ]
+    elif action == "cert.request.decision":
+        if csr_id is None or csr_id < 1:
+            raise SignatureError("cert.request.decision requires csr_id")
+        if decision not in {"approve", "reject"}:
+            raise SignatureError("decision must be approve or reject")
+        fields += [
+            ("csr_id", str(csr_id)),
+            ("decision", decision),
         ]
     else:
         raise SignatureError(f"unsupported signed action: {action}")
