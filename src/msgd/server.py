@@ -14,7 +14,7 @@ from email.parser import BytesParser
 from email.policy import default as email_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from msgd import __version__
 from msgd.analytics import Engagement
@@ -43,6 +43,7 @@ from msgd.render import (
     render_post,
     render_profile,
     render_rss,
+    render_rule,
     render_rules,
     render_schema,
     render_sitemap,
@@ -230,17 +231,18 @@ class Handler(BaseHTTPRequestHandler):
         *,
         board: str | None,
         limit: int,
+        offset: int = 0,
     ) -> list[Any]:
         if not self.board.engagement.available:
             raise StoreError("Valkey analytics is unavailable", 503)
         scan = min(max(limit * 5, 100), 5000)
-        ids = self.board.engagement.rank(metric, board=board, limit=scan)
+        ids = self.board.engagement.rank(metric, board=board, limit=scan, offset=offset)
         posts = self.board.store.posts_by_ids(ids)
         live_ids = {post.id for post in posts}
         stale = [post_id for post_id in ids if post_id not in live_ids]
         if stale:
             self.board.engagement.remove_ids(stale)
-            ids = self.board.engagement.rank(metric, board=board, limit=scan)
+            ids = self.board.engagement.rank(metric, board=board, limit=scan, offset=offset)
             posts = self.board.store.posts_by_ids(ids)
         if board is not None:
             posts = [post for post in posts if post.board == board]
@@ -370,6 +372,16 @@ class Handler(BaseHTTPRequestHandler):
         head = segments[0] if segments else ""
 
         if head in {"rules", "_rules", "_help", "llms.txt"}:
+            if head == "rules" and len(segments) == 2:
+                rule = render_rule(self.board.cfg, segments[1])
+                if rule is None:
+                    self._error(404, f"unknown rule: {segments[1]}", "see /rules")
+                else:
+                    self._send(200, rule)
+                return
+            if len(segments) > 1:
+                self._error(404, "invalid rules path", "see /rules")
+                return
             self._send(200, render_rules(self.board.cfg))
             return
         if head == "g":
@@ -2685,6 +2697,114 @@ def _parse_multipart(
         )
 
     return fields, tuple(files)
+
+
+def _pagination_scope(path: str, params: Params, *, exclude: set[str] | None = None) -> str:
+    skipped = {"cursor", "before", "since", "limit"} | (exclude or set())
+    normalized = {
+        key: list(values)
+        for key, values in sorted(params.items())
+        if key not in skipped
+    }
+    raw = json.dumps(
+        {"path": path, "params": normalized},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:20]
+
+
+def _encode_cursor(kind: str, scope: str, **values: int | str) -> str:
+    raw = json.dumps(
+        {"v": 1, "kind": kind, "scope": scope, **values},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(
+    value: str | None,
+    *,
+    kind: str,
+    scope: str,
+) -> dict[str, Any]:
+    if not value:
+        return {}
+    if "=" in value or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise StoreError("invalid pagination cursor", 400)
+    padded = value + "=" * ((4 - len(value) % 4) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded)
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error) as exc:
+        raise StoreError("invalid pagination cursor", 400) from exc
+    if (
+        not isinstance(data, dict)
+        or data.get("v") != 1
+        or data.get("kind") != kind
+        or data.get("scope") != scope
+    ):
+        raise StoreError("pagination cursor does not match this listing", 400)
+    return data
+
+
+def _next_time_url(
+    path: str,
+    params: Params,
+    posts: list[Any],
+    *,
+    limit: int,
+    order: str,
+    has_more: bool,
+) -> str | None:
+    if not has_more or not posts:
+        return None
+    pairs: list[tuple[str, str]] = []
+    for key, values in params.items():
+        if key in {"before", "since", "cursor", "limit"}:
+            continue
+        pairs.extend((key, value) for value in values)
+    boundary = "before" if order != "asc" else "since"
+    pairs.append((boundary, str(posts[-1].id)))
+    pairs.append(("limit", str(limit)))
+    return path + "?" + urlencode(pairs)
+
+
+def _next_cursor_url(
+    path: str,
+    params: Params,
+    *,
+    cursor: str | None,
+    limit: int,
+    has_more: bool,
+) -> str | None:
+    if not has_more or not cursor:
+        return None
+    pairs: list[tuple[str, str]] = []
+    for key, values in params.items():
+        if key in {"cursor", "before", "since", "limit"}:
+            continue
+        pairs.extend((key, value) for value in values)
+    pairs.append(("cursor", cursor))
+    pairs.append(("limit", str(limit)))
+    return path + "?" + urlencode(pairs)
+
+
+def _page_meta(
+    posts: list[Any],
+    *,
+    next_url: str | None,
+    direction: str,
+) -> dict[str, Any]:
+    return {
+        "has_more": next_url is not None,
+        "next": next_url,
+        "direction": direction,
+        "newest_id": max((post.id for post in posts), default=None),
+        "oldest_id": min((post.id for post in posts), default=None),
+    }
 
 
 def _path_get_help() -> str:
