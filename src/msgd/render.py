@@ -464,8 +464,7 @@ def render_listing(
             badge = _auth_badge((authentications or {}).get(post.id))
             reply = f" ->#{post.reply_to}" if post.reply_to is not None else ""
             lines.append(
-                f"#{post.id} /{post.board}{reply} {badge} "
-                f"{post.name}{identity}{title} {excerpt}"
+                f"#{post.id} /{post.board}{reply} {badge} {post.name}{identity}{title} {excerpt}"
             )
     if truncated and posts:
         lines += ["", f"more: ?before={posts[-1].id}&limit={len(posts)}"]
