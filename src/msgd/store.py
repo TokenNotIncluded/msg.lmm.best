@@ -2455,7 +2455,7 @@ class Store:
                 SELECT w.id, w.owner_id, w.url, w.events, w.enabled,
                        w.created, w.updated, w.last_error,
                        SUM(CASE WHEN d.id IS NOT NULL AND d.delivered IS NULL
-                                THEN 1 ELSE 0 END) AS pending,
+                                      AND d.attempts < 6 THEN 1 ELSE 0 END) AS pending,
                        SUM(CASE WHEN d.id IS NOT NULL AND d.delivered IS NULL
                                       AND d.attempts >= 6 THEN 1 ELSE 0 END)
                            AS failed
@@ -2612,6 +2612,18 @@ class Store:
                 (now, max(1, min(limit, 100))),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def prune_webhook_deliveries(self) -> None:
+        now = time.time()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                DELETE FROM webhook_deliveries
+                 WHERE (delivered IS NOT NULL AND delivered < ?)
+                    OR (delivered IS NULL AND attempts >= 6 AND created < ?)
+                """,
+                (now - 7 * 86400, now - 30 * 86400),
+            )
 
     def finish_webhook_delivery(
         self,
