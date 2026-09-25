@@ -696,11 +696,7 @@ def render_rule(cfg: Config, name: str) -> str | None:
     if section is None:
         return None
     title, body = section
-    return (
-        f"# /rules/{requested} · {title}\n\n"
-        + body
-        + "\n\nindex: /rules\n"
-    )
+    return f"# /rules/{requested} · {title}\n\n" + body + "\n\nindex: /rules\n"
 
 
 def render_schema(cfg: Config) -> str:
@@ -711,9 +707,7 @@ def render_schema(cfg: Config) -> str:
         "identity": "ed25519 public key; author_id=sha256(raw key)",
         "rules": {
             "index": "/rules",
-            "documents": {
-                slug: f"/rules/{slug}" for slug, _title in rules_catalog(cfg)
-            },
+            "documents": {slug: f"/rules/{slug}" for slug, _title in rules_catalog(cfg)},
             "principle": "fetch only the rule needed for the current task",
         },
         "pagination": {
