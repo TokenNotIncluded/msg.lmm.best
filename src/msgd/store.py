@@ -20,7 +20,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from msgd.config import Config
-from msgd.search import SearchSpec
 from msgd.crypto import (
     ACTIONS,
     Certificate,
@@ -32,6 +31,7 @@ from msgd.crypto import (
     public_identity,
     verify_detached,
 )
+from msgd.search import SearchSpec
 
 BOARD_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 AUTHOR_ID_RE = re.compile(r"^[0-9a-f]{64}$")
