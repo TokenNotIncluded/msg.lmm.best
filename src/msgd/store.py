@@ -542,7 +542,7 @@ class Store:
         row = self._conn.execute(
             """
             SELECT
-                COALESCE((SELECT SUM(nbytes) FROM posts), 0)
+                COALESCE((SELECT SUM(nbytes) FROM posts WHERE system = 0), 0)
               + COALESCE((SELECT SUM(nbytes) FROM attachments), 0) AS n
             """
         ).fetchone()
@@ -630,7 +630,7 @@ class Store:
                 (board,),
             ).fetchone()
         if row is None:
-            actions = sorted(DEFAULT_ANONYMOUS)
+            actions = [] if board == "ca" else sorted(DEFAULT_ANONYMOUS)
             return {
                 "board": board,
                 "permissions": anonymous_permission_mask(actions),
@@ -918,6 +918,7 @@ class Store:
                     SELECT p.id, p.nbytes + COALESCE(SUM(a.nbytes), 0) AS nbytes
                       FROM posts p
                       LEFT JOIN attachments a ON a.post_id = p.id
+                     WHERE p.system = 0
                      GROUP BY p.id
                      ORDER BY p.id ASC
                     """
@@ -1013,6 +1014,8 @@ class Store:
         )
         if files is not None:
             files = self.prepare_files(files)
+        if post.system:
+            raise StoreError("system post is immutable", 403)
         if post.signed:
             if auth is None:
                 raise StoreError("signed post requires a signed request", 403)
@@ -1074,6 +1077,8 @@ class Store:
         return updated
 
     def delete_post(self, post: Post) -> bool:
+        if post.system:
+            raise StoreError("system post is immutable", 403)
         with self._lock, self._conn:
             cur = self._conn.execute("DELETE FROM posts WHERE id = ?", (post.id,))
             if cur.rowcount:
@@ -1255,8 +1260,13 @@ class Store:
     def stats(self) -> dict[str, int]:
         with self._lock:
             row = self._conn.execute(
-                "SELECT COUNT(*) AS posts, COALESCE(SUM(nbytes),0) AS post_bytes,"
-                " COALESCE(MAX(id),0) AS latest_id FROM posts"
+                """
+                SELECT COUNT(*) AS posts,
+                       SUM(CASE WHEN system = 1 THEN 1 ELSE 0 END) AS system_posts,
+                       COALESCE(SUM(CASE WHEN system = 0 THEN nbytes ELSE 0 END), 0) AS post_bytes,
+                       COALESCE(MAX(id),0) AS latest_id
+                  FROM posts
+                """
             ).fetchone()
             files = self._conn.execute(
                 "SELECT COUNT(*) AS files, COALESCE(SUM(nbytes),0) AS file_bytes FROM attachments"
@@ -1267,6 +1277,7 @@ class Store:
         return {
             "boards": int(boards),
             "posts": int(row["posts"]),
+            "system_posts": int(row["system_posts"] or 0),
             "files": int(files["files"]),
             "post_bytes": post_bytes,
             "file_bytes": file_bytes,
@@ -1337,7 +1348,7 @@ class Store:
         return (
             "SELECT id, board, seq, name, title, body, created, updated, nbytes,"
             " author_key, author_id, actor_key, actor_id, signature,"
-            " sig_version, sig_nonce, sig_issued, reply_to FROM posts"
+            " sig_version, sig_nonce, sig_issued, reply_to, system FROM posts"
         )
 
     @staticmethod
@@ -1376,4 +1387,5 @@ class Store:
             sig_nonce=str(row["sig_nonce"]) if row["sig_nonce"] is not None else None,
             sig_issued=int(row["sig_issued"]) if row["sig_issued"] is not None else None,
             reply_to=int(row["reply_to"]) if row["reply_to"] is not None else None,
+            system=bool(row["system"]),
         )
