@@ -452,8 +452,7 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("mode must be markdown or html", 400)
         target = safe_return_path(_param(params, "next"))
         cookie = (
-            f"{VIEW_COOKIE}={mode}; Path=/; Max-Age={VIEW_COOKIE_MAX_AGE}; "
-            "HttpOnly; SameSite=Lax"
+            f"{VIEW_COOKIE}={mode}; Path=/; Max-Age={VIEW_COOKIE_MAX_AGE}; HttpOnly; SameSite=Lax"
         )
         self._send(
             303,
@@ -1510,7 +1509,9 @@ class Handler(BaseHTTPRequestHandler):
             if method not in {"GET", "HEAD"}:
                 self._send(
                     405,
-                    render_error(405, "topic template is read-only here; use signed POST /_template"),
+                    render_error(
+                        405, "topic template is read-only here; use signed POST /_template"
+                    ),
                     extra_headers={"Allow": "GET, HEAD"},
                 )
                 return
@@ -1978,8 +1979,7 @@ class Handler(BaseHTTPRequestHandler):
                 body, title, name, _ = store.prepare_post(
                     body=raw_body,
                     title=(
-                        derived_title
-                        or post.title
+                        derived_title or post.title
                         if _param(params, "title") is None
                         else _param(params, "title") or ""
                     ),
@@ -2259,10 +2259,7 @@ class Handler(BaseHTTPRequestHandler):
             requested_name = _param(params, "name")
             if requested_name:
                 requested_claim = store.name_claim(requested_name)
-                if (
-                    requested_claim is not None
-                    and str(requested_claim["author_id"]) != owner_id
-                ):
+                if requested_claim is not None and str(requested_claim["author_id"]) != owner_id:
                     raise StoreError(
                         f"name {requested_name!r} is already bound to public key "
                         f"{requested_claim['public_key']} "
@@ -6662,11 +6659,7 @@ def _grants(value: str) -> dict[str, tuple[str, ...]]:
         if invalid:
             raise StoreError(f"unknown grant actions: {sorted(invalid)}", 400)
         try:
-            scope = (
-                str(item["topic"])
-                if has_topic
-                else normalize_grant_scope(str(item["scope"]))
-            )
+            scope = str(item["topic"]) if has_topic else normalize_grant_scope(str(item["scope"]))
             if has_topic:
                 normalize_grant_scope(scope, legacy_topic=True)
         except SignatureError as exc:

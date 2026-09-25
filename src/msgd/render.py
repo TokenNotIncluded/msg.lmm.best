@@ -37,12 +37,7 @@ def md_link(label: str, target: str) -> str:
         .replace("\r", " ")
         .replace("\n", " ")
     )
-    safe_target = (
-        str(target)
-        .replace(" ", "%20")
-        .replace("(", "%28")
-        .replace(")", "%29")
-    )
+    safe_target = str(target).replace(" ", "%20").replace("(", "%28").replace(")", "%29")
     return f"[{safe_label}]({safe_target})"
 
 
@@ -2036,9 +2031,13 @@ def render_latest_root() -> str:
         ("file", "/latest/file", "newest active attachment"),
     ]
     lines = ["# /latest", "", "stable pointers to the newest current objects", ""]
-    lines.extend(f"{kind:<7} {md_link(path, path):<36} {description}" for kind, path, description in rows)
+    lines.extend(
+        f"{kind:<7} {md_link(path, path):<36} {description}" for kind, path, description in rows
+    )
     lines += ["", "machine: ?format=json", "follow: ?redirect=1 (307 Temporary Redirect)"]
     return "\n".join(lines) + "\n"
+
+
 def render_latest_pointer(item: dict[str, Any]) -> str:
     kind = str(item.get("type") or "object")
     target = str(item["target"])
@@ -2049,6 +2048,8 @@ def render_latest_pointer(item: dict[str, Any]) -> str:
             continue
         lines.append(f"{key}: {value}")
     return "\n".join(lines) + "\n"
+
+
 def render_post_index(
     kind: str,
     posts: list[Post] | tuple[Post, ...],
@@ -2078,6 +2079,8 @@ def render_post_index(
     if next_url:
         lines += ["", f"next: {md_link(next_url, next_url)}"]
     return "\n".join(lines) + "\n"
+
+
 def render_name_index(
     names: list[dict[str, Any]] | tuple[dict[str, Any], ...],
     *,
@@ -2097,6 +2100,8 @@ def render_name_index(
     if next_url:
         lines += ["", f"next: {md_link(next_url, next_url)}"]
     return "\n".join(lines) + "\n"
+
+
 def render_dimension_index(
     kind: str,
     entries: list[dict[str, Any]] | tuple[dict[str, Any], ...],
@@ -2141,7 +2146,9 @@ def render_dimension_index(
                 target = f"/{item['parent_board']}/{parent_id}"
                 parent = md_link(f"#{parent_id}", target)
             else:
-                parent = md_link(f"#{parent_id}", f"/ref/post/{parent_id}") + " (parent unavailable)"
+                parent = (
+                    md_link(f"#{parent_id}", f"/ref/post/{parent_id}") + " (parent unavailable)"
+                )
             latest_reply_id = int(item["latest_reply_id"])
             lines.append(
                 f"{parent} · replies={int(item['replies'])} · "
@@ -2153,6 +2160,8 @@ def render_dimension_index(
     if next_url:
         lines += ["", f"next: {md_link(next_url, next_url)}"]
     return "\n".join(lines) + "\n"
+
+
 def render_index(
     cfg: Config,
     boards: list[dict[str, Any]],
@@ -2187,7 +2196,17 @@ def render_index(
         "start: "
         + " · ".join(
             md_link(path, path)
-            for path in ["/index", "/repos", "/users", "/diff", "/_search", "/rules", "/guest", "/custody", "/g"]
+            for path in [
+                "/index",
+                "/repos",
+                "/users",
+                "/diff",
+                "/_search",
+                "/rules",
+                "/guest",
+                "/custody",
+                "/g",
+            ]
         ),
         f"machine: {md_link('/_schema', '/_schema')} · {md_link('/_search?format=ndjson', '/_search?format=ndjson')}",
         (
@@ -2293,6 +2312,8 @@ def render_index(
         f"rules: {md_link('/rules', '/rules')}",
     ]
     return "\n".join(lines) + "\n"
+
+
 def _auth_badge(authentication: dict[str, Any] | None) -> str:
     blue = " [badge:blue]" if authentication and authentication.get("blue_verified") else ""
     if authentication and authentication.get("status") == "system":
@@ -2361,13 +2382,15 @@ def render_post(
     )
     head = (
         f"## #{post.id}{title}\n"
-        f"board: {board_link} seq: {post.seq}"
-        + reply
-        + "\n"
+        f"board: {board_link} seq: {post.seq}" + reply + "\n"
         f"from: {author} at: {iso(post.created)}"
         + (f" updated: {iso(post.updated)}" if post.updated != post.created else "")
         + f"\nauth: {auth}\n"
-        + ("badge: blue-verified\n" if authentication and authentication.get("blue_verified") else "")
+        + (
+            "badge: blue-verified\n"
+            if authentication and authentication.get("blue_verified")
+            else ""
+        )
         + f"bytes: {post.nbytes}\n"
     )
     if tags:
@@ -2399,6 +2422,8 @@ def render_post(
             + "\n"
         )
     return head + f"\n{post.body}\n"
+
+
 def render_listing(
     *,
     board: str | None,
@@ -2456,9 +2481,7 @@ def render_listing(
             post_tags = (tags or {}).get(post.id, ())
             tag_suffix = (
                 " · "
-                + " ".join(
-                    md_link(f"#{tag}", f"/tag/{quote(tag, safe='')}") for tag in post_tags
-                )
+                + " ".join(md_link(f"#{tag}", f"/tag/{quote(tag, safe='')}") for tag in post_tags)
                 if post_tags
                 else ""
             )
@@ -2483,6 +2506,8 @@ def render_listing(
     lines.append(f"direction={page_direction}")
     lines.append(f"next={md_link(next_url, next_url) if next_url else ''}")
     return "\n".join(lines) + "\n"
+
+
 def render_users(users: list[dict[str, Any]]) -> str:
     lines = [
         "# /users",
@@ -2510,6 +2535,8 @@ def render_users(users: list[dict[str, Any]]) -> str:
         f"profile: {md_link('/@USERNAME', '/@USERNAME')}",
     ]
     return "\n".join(lines) + "\n"
+
+
 def render_profile(profile: dict[str, Any]) -> str:
     certification = profile.get("certification")
     role = ""
@@ -2595,6 +2622,8 @@ def render_profile(profile: dict[str, Any]) -> str:
     lines += ["", "## stable resources", ""]
     lines.extend(f"{label}: {md_link(path, path)}" for label, path in resources)
     return "\n".join(lines) + "\n"
+
+
 def render_tags(tags: list[dict[str, Any]]) -> str:
     lines = [
         "# /tags",
@@ -2622,6 +2651,8 @@ def render_tags(tags: list[dict[str, Any]]) -> str:
                 f"{md_link('#' + str(latest_id), '/ref/post/' + str(latest_id))} |"
             )
     return "\n".join(lines) + "\n"
+
+
 def render_inbox(
     subject_id: str,
     events: list[tuple[Post, tuple[str, ...]]],
@@ -2667,6 +2698,8 @@ def render_inbox(
             f"{author}{identity}{title} {excerpt}"
         )
     return "\n".join(lines) + "\n"
+
+
 def posts_to_ndjson(
     posts: list[Post],
     authentications: dict[int, dict[str, Any]] | None = None,

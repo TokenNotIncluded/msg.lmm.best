@@ -156,9 +156,7 @@ def normalize_grant_scope(value: str, *, legacy_topic: bool = False) -> str:
         if target != "*" and not _valid_topic(target):
             raise SignatureError(f"invalid topic scope: {value!r}")
     elif target not in {"self", "*"} and not IDENTITY_RE.fullmatch(target):
-        raise SignatureError(
-            f"{resource} scope target must be self, *, or a 64-hex identity"
-        )
+        raise SignatureError(f"{resource} scope target must be self, *, or a 64-hex identity")
     return f"{resource}:{target}"
 
 

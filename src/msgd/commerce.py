@@ -547,7 +547,7 @@ class CommerceService:
                 key.verify(signature, signed, padding.PKCS1v15(), hashes.SHA256())
                 verified = True
                 break
-            except (ValueError, TypeError, InvalidSignature):
+            except ValueError, TypeError, InvalidSignature:
                 continue
         if not verified:
             raise StoreError("invalid Waffo webhook signature", 401)

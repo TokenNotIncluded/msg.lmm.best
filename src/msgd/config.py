@@ -133,9 +133,7 @@ class Config:
     @property
     def certificate_only_topic_set(self) -> frozenset[str]:
         return frozenset(
-            part.strip().lower()
-            for part in self.certificate_only_topics.split(",")
-            if part.strip()
+            part.strip().lower() for part in self.certificate_only_topics.split(",") if part.strip()
         )
 
     @property
@@ -150,9 +148,7 @@ class Config:
     @property
     def commerce_allowed_grant_action_set(self) -> frozenset[str]:
         return frozenset(
-            part.strip()
-            for part in self.commerce_allowed_grant_actions.split(",")
-            if part.strip()
+            part.strip() for part in self.commerce_allowed_grant_actions.split(",") if part.strip()
         )
 
     @classmethod
@@ -217,9 +213,7 @@ class Config:
             web_root=get("web", "root", base.web_root),
             web_max_site_bytes=get("web", "max_site_bytes", base.web_max_site_bytes),
             topic_template_dir=get("topics", "template_dir", base.topic_template_dir),
-            certificate_only_topics=get(
-                "topics", "certificate_only", base.certificate_only_topics
-            ),
+            certificate_only_topics=get("topics", "certificate_only", base.certificate_only_topics),
             commerce_enabled=get("commerce", "enabled", base.commerce_enabled),
             waffo_base_url=get("commerce", "waffo_base_url", base.waffo_base_url),
             waffo_merchant_id=get("commerce", "waffo_merchant_id", base.waffo_merchant_id),
@@ -287,16 +281,12 @@ class Config:
             commerce_allowed_grant_actions=get(
                 "commerce", "allowed_grant_actions", base.commerce_allowed_grant_actions
             ),
-            privacy_policy_file=get(
-                "commerce", "privacy_policy_file", base.privacy_policy_file
-            ),
+            privacy_policy_file=get("commerce", "privacy_policy_file", base.privacy_policy_file),
             terms_file=get("commerce", "terms_file", base.terms_file),
             commerce_issuer_private_key=get(
                 "commerce", "issuer_private_key", base.commerce_issuer_private_key
             ),
-            commerce_issuer_serial=get(
-                "commerce", "issuer_serial", base.commerce_issuer_serial
-            ),
+            commerce_issuer_serial=get("commerce", "issuer_serial", base.commerce_issuer_serial),
             ssh_shell_command=get("ssh", "shell_command", base.ssh_shell_command),
             ssh_max_keys_per_identity=get(
                 "ssh", "max_keys_per_identity", base.ssh_max_keys_per_identity
