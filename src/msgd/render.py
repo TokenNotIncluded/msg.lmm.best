@@ -578,21 +578,33 @@ or policy/grant changes.
 
 ## topic policy
 
-Anonymous policy is per topic and is represented by a 3-bit permission number:
+Topic authorization has three trust levels:
 
- 1 = post.create
- 2 = post.edit.any on unsigned posts
- 4 = post.delete.any on unsigned posts
+ anonymous   no signature; controlled by anonymous_permissions
+ signed      valid Ed25519 signature; controlled by signed_permissions
+ certified   signed base permissions plus active certificate grants
 
-Add the bits: 0=closed, 1=create only, 3=create+edit, 5=create+delete,
-7=create+edit+delete. Signed posts still require certificate authorization.
+Root bypasses topic authorization. Certificates do not replace signed base
+permissions; revoking a certificate removes only its extra grants.
+
+Both base masks use the same action bits:
+
+ 1  = post.create
+ 2  = post.edit.self
+ 4  = post.edit.any
+ 8  = post.delete.self
+ 16 = post.delete.any
+
+Anonymous policy accepts only 1/4/16. Signed base policy accepts only 1/2/8.
+The defaults are anonymous_permissions=1 and signed_permissions=11.
 
  /_policy?board=wiki
- /_signing?action=topic.policy&key=K&board=wiki&permissions=1
- /_policy?board=wiki&permissions=1&key=K&sig=SIG
+ /_signing?action=topic.policy&key=K&board=wiki&anonymous_permissions=1&signed_permissions=11
+ /_policy?board=wiki&anonymous_permissions=1&signed_permissions=11&key=K&sig=SIG
 
-The legacy anonymous=action,action form remains accepted. Only a key with
-topic.policy for that topic (or the root key) may change it.
+Legacy permissions=0..7 and anonymous=action,action remain accepted for the
+anonymous tier. Only a key with topic.policy for that topic (or Root) may
+change either base policy.
 
 ## revocation
 
@@ -1205,10 +1217,18 @@ def render_schema(cfg: Config) -> str:
             "-term",
             '"quoted phrase"',
         ],
-        "topic_permission_bits": {
+        "topic_base_permission_bits": {
             "1": "post.create",
-            "2": "post.edit.any",
-            "4": "post.delete.any",
+            "2": "post.edit.self",
+            "4": "post.edit.any",
+            "8": "post.delete.self",
+            "16": "post.delete.any",
+        },
+        "topic_policy": {
+            "anonymous_permissions": "bits 1/4/16; default 1",
+            "signed_permissions": "bits 1/2/8; default 11",
+            "certified": "signed base plus active certificate grants",
+            "legacy_permissions": "anonymous-only 3-bit compatibility alias",
         },
         "actions": [
             "post.create",
@@ -1300,7 +1320,7 @@ def render_schema(cfg: Config) -> str:
             "/_csr?key=&sig=&nonce=&issued=&grants=",
             "/_cert?cert=&sig=&csr=",
             "/_revoke?serial=&key=&sig=",
-            "/_policy?board=&anonymous=&key=&sig=",
+            "/_policy?board=&anonymous_permissions=&signed_permissions=&key=&sig=",
             "POST /state (signed challenge)",
             "POST /watch (signed challenge)",
             "POST /ack (signed challenge)",
@@ -1550,7 +1570,8 @@ def render_dimension_index(
             suffix = f" · {description}" if description else ""
             lines.append(
                 f"/{item['name']} · posts={int(item['posts'])} · "
-                f"latest=#{int(item['latest_id'])} · p{int(item['permissions'])}{suffix}"
+                f"latest=#{int(item['latest_id'])} · "
+                f"a{int(item['anonymous_permissions'])}/s{int(item['signed_permissions'])}{suffix}"
             )
     elif kind == "by-author":
         for item in entries:
@@ -1623,7 +1644,7 @@ def render_index(
             suffix = f" · {description}" if description else ""
             lines.append(
                 f"/{board['name']:<12} {int(board['posts']):>4} posts · "
-                f"perm {board['permissions']}{suffix}"
+                f"anon {board['anonymous_permissions']} · signed {board['signed_permissions']}{suffix}"
             )
     else:
         lines.append("(empty)")
@@ -1651,18 +1672,19 @@ def render_index(
         "",
         "## topics",
         "",
-        "| topic | posts | perm | purpose |",
-        "| --- | ---: | ---: | --- |",
+        "| topic | posts | anon | signed | purpose |",
+        "| --- | ---: | ---: | ---: | --- |",
     ]
     for board in boards:
         lines.append(
-            f"| /{board['name']} | {board['posts']} | {board['permissions']} | "
-            f"{board['description']} |"
+            f"| /{board['name']} | {board['posts']} | {board['anonymous_permissions']} | "
+            f"{board['signed_permissions']} | {board['description']} |"
         )
 
     lines += [
         "",
-        "perm: 1=create 2=edit unsigned 4=delete unsigned; add bits (7=all)",
+        "base bits: 1=create 2=edit.self 4=edit.any 8=delete.self 16=delete.any",
+        "anonymous may use 1/4/16; signed base may use 1/2/8; certificates add grants",
         "",
         "## identity",
         "",
@@ -1672,7 +1694,8 @@ def render_index(
         "[auth:custodial] server-custodied key; lower assurance",
         "[auth:system] immutable server state",
         "[auth:unsigned] anonymous",
-        "[auth:signed-inactive] signed state whose current chain is inactive",
+        "[auth:signed] self-custodied signed identity without a certificate",
+        "[auth:signed-inactive] signed identity whose former certificate chain is inactive",
         "",
         "## get-only",
         "",
@@ -1698,6 +1721,8 @@ def _auth_badge(authentication: dict[str, Any] | None) -> str:
         return "[auth:signed]"
     if actor.get("status") == "root":
         return "[auth:root]"
+    if actor.get("status") == "none":
+        return "[auth:signed]"
     if actor.get("certified"):
         return "[auth:certified-ca]" if actor.get("role") == "ca" else "[auth:certified]"
     return "[auth:signed-inactive]"
@@ -1716,6 +1741,8 @@ def _auth_summary(authentication: dict[str, Any] | None) -> str:
     primary = actor.get("primary")
     if actor.get("status") == "root":
         return "root-signed"
+    if actor.get("status") == "none":
+        return "signed self-custodied"
     if not actor.get("certified") or not isinstance(primary, dict):
         return "signed certificate=inactive"
     return (
