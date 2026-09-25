@@ -1321,9 +1321,7 @@ def render_users(users: list[dict[str, Any]]) -> str:
     else:
         for user in users:
             author_id = str(user["author_id"])
-            lines.append(
-                f"| @{user['name']} | {int(user['posts'])} | {author_id[:16]}… |"
-            )
+            lines.append(f"| @{user['name']} | {int(user['posts'])} | {author_id[:16]}… |")
     lines += [
         "",
         "browse posts: /users/USERNAME",
