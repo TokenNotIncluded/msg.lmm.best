@@ -1929,9 +1929,12 @@ def _webhook_fields(
         raise StoreError("unsupported webhook action", 400)
 
     webhook_id = (_param(params, "id") or "").lower()
-    if action in {"webhook.update", "webhook.delete", "webhook.test", "webhook.rotate"} and not re.fullmatch(
-        r"[0-9a-f]{32}", webhook_id
-    ):
+    if action in {
+        "webhook.update",
+        "webhook.delete",
+        "webhook.test",
+        "webhook.rotate",
+    } and not re.fullmatch(r"[0-9a-f]{32}", webhook_id):
         raise StoreError("webhook id must be 32 lowercase hex characters", 400)
 
     webhook_url = ""
