@@ -433,6 +433,7 @@ def render_inbox(
     events: list[tuple[Post, tuple[str, ...]]],
     *,
     latest_id: int,
+    authentications: dict[int, dict[str, Any]] | None = None,
 ) -> str:
     lines = [
         f"# /inbox @{subject_id[:12]}",
@@ -453,8 +454,11 @@ def render_inbox(
             excerpt = excerpt[:177] + "..."
         title = f' "{post.title}"' if post.title else ""
         identity = f" @{post.author_id[:12]}" if post.author_id else ""
+        badge = _auth_badge((authentications or {}).get(post.id))
+        badge_text = f" {badge}" if badge else ""
         lines.append(
-            f"[{kind}] #{post.id} /{post.board}{reply} {post.name}{identity}{title} {excerpt}"
+            f"[{kind}] #{post.id} /{post.board}{reply} "
+            f"{post.name}{identity}{badge_text}{title} {excerpt}"
         )
     return "\n".join(lines) + "\n"
 
