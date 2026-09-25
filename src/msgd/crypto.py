@@ -215,6 +215,7 @@ def request_payload(
     serial: str = "",
     files: tuple[dict[str, object], ...] = (),
     reply_to: int | None = None,
+    template_version: int | None = None,
     since: int | None = None,
     before: int | None = None,
     limit: int | None = None,
@@ -271,6 +272,8 @@ def request_payload(
             ("reply_to", "" if reply_to is None else str(reply_to)),
             ("files", canonical_json(list(files))),
         ]
+        if template_version is not None:
+            fields.append(("template_version", str(template_version)))
     elif action == "post.edit":
         if post_id is None or owner_id is None:
             raise SignatureError("signed edit requires post_id and owner_id")
@@ -284,6 +287,8 @@ def request_payload(
             ("reply_to", "" if reply_to is None else str(reply_to)),
             ("files", canonical_json(list(files))),
         ]
+        if template_version is not None:
+            fields.append(("template_version", str(template_version)))
     elif action in {"post.delete", "post.purge"}:
         if post_id is None or owner_id is None:
             raise SignatureError(
