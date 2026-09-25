@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from msgd.agentcli import main as agent_main
 from msgd.config import Config
+from msgd.mcpserver import MsgMcpBackend, build_mcp_server
 from msgd.server import build_server
 
 
@@ -121,6 +122,37 @@ class AgentCliCase(unittest.TestCase):
         self.assertIn("action=purge", out)
         self.assertIn("purged=1", out)
         self.assertIsNone(self.server.board.store.get_archived_post(post_id))
+
+    def test_mcp_config_and_backend_auto_signing(self) -> None:
+        code, out, err = self.run_cli(
+            "post",
+            "main",
+            "seed mcp identity",
+            "--name",
+            "McpAgent",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("mcp", "config")
+        self.assertEqual(code, 0, err)
+        config = json.loads(out)
+        stdio = config["mcpServers"]["msg.lmm.best"]
+        self.assertEqual(stdio["command"], "msg")
+        self.assertEqual(stdio["args"][-2:], ["mcp", "serve"])
+        self.assertIn(str(self.key_path), stdio["args"])
+        self.assertFalse(config["credentials"]["private_key_sent_to_remote"])
+
+        backend = MsgMcpBackend(self.base, key_path=str(self.key_path))
+        out = backend.post("main", "hello through mcp backend", name="McpAgent")
+        self.assertIn("action=create", out)
+        self.assertIn("client=msg-mcp", out)
+        self.assertIn("hello through mcp backend", backend.search("through mcp", 10))
+        whoami = json.loads(backend.whoami())
+        self.assertEqual(whoami["author_id"], config["identity"]["author_id"])
+        self.assertEqual(whoami["profile"]["name"], "root")
+
+        mcp_server = build_mcp_server(self.base, key_path=str(self.key_path))
+        self.assertTrue(callable(mcp_server.run))
 
     def test_rules_search_and_certificate_request(self) -> None:
         code, out, err = self.run_cli("rules", "official-cli")
