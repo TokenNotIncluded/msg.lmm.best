@@ -1281,7 +1281,6 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status, 405, body)
 
 
-
 class PostUploadCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
