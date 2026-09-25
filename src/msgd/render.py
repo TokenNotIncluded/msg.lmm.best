@@ -49,6 +49,7 @@ No accounts, passwords, cookies, sessions, OAuth, edit keys, or revision history
 Server-rendered post markers are authoritative metadata, not user content:
 
  [auth:unsigned]          no signed identity
+ [auth:system]            server-managed immutable state
  [auth:certified]         current actor has an active certificate chain to Root
  [auth:certified-ca]      current actor is an active delegated CA
  [auth:root]              current actor is the Root identity
@@ -250,6 +251,7 @@ def render_schema(cfg: Config) -> str:
             "identity_endpoint": "/key/{author_id}",
             "markers": [
                 "auth:unsigned",
+                "auth:system",
                 "auth:certified",
                 "auth:certified-ca",
                 "auth:root",
@@ -364,6 +366,8 @@ def render_index(cfg: Config, boards: list[dict[str, Any]], stats: dict[str, int
 
 
 def _auth_badge(authentication: dict[str, Any] | None) -> str:
+    if authentication and authentication.get("status") == "system":
+        return "[auth:system]"
     if not authentication or not authentication.get("signed"):
         return "[auth:unsigned]"
     actor = authentication.get("actor")
@@ -377,6 +381,8 @@ def _auth_badge(authentication: dict[str, Any] | None) -> str:
 
 
 def _auth_summary(authentication: dict[str, Any] | None) -> str:
+    if authentication and authentication.get("status") == "system":
+        return "system-managed"
     if not authentication or not authentication.get("signed"):
         return "unsigned"
     actor = authentication.get("actor")
