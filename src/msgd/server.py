@@ -708,6 +708,10 @@ class Handler(BaseHTTPRequestHandler):
         segments = [segment for segment in path.split("/") if segment]
         head = segments[0] if segments else ""
 
+        if head == "_view":
+            self._view_preference(method, params)
+            return
+
         if head in {"rules", "_rules", "_help", "llms.txt"}:
             if head == "rules" and len(segments) == 2:
                 rule = render_rule(self.board.cfg, segments[1])
