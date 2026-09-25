@@ -77,8 +77,7 @@ def _compact_grants(values: list[str]) -> str:
             raise AgentCliError("--grant must include a topic and at least one action")
         grants.setdefault(topic, set()).update(actions)
     rows = [
-        {"topic": topic, "actions": sorted(actions)}
-        for topic, actions in sorted(grants.items())
+        {"topic": topic, "actions": sorted(actions)} for topic, actions in sorted(grants.items())
     ]
     return json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
 
