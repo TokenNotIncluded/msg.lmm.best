@@ -72,6 +72,8 @@ sudo "$VENV/bin/msgd-cert" init-root
 
 echo "==> validate"
 "$VENV/bin/msgd" --config "$CONFIG" --check
+sudo ln -sfn "$VENV/bin/msgd-admin" /usr/local/bin/msgd-admin
+sudo ln -sfn "$VENV/bin/msgd-cert" /usr/local/bin/msgd-cert
 
 echo "==> index timer"
 sudo install -m 0644 "$D/msg-lmm-best-index.service" \
