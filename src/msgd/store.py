@@ -472,6 +472,19 @@ CREATE TABLE IF NOT EXISTS websub_deliveries (
 CREATE INDEX IF NOT EXISTS websub_deliveries_due
     ON websub_deliveries(delivered, next_attempt, created);
 
+CREATE TABLE IF NOT EXISTS websub_hub_pings (
+    id           TEXT PRIMARY KEY,
+    hub          TEXT NOT NULL,
+    topic        TEXT NOT NULL,
+    created      REAL NOT NULL,
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    next_attempt REAL NOT NULL,
+    delivered    REAL,
+    last_error   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS websub_hub_pings_due
+    ON websub_hub_pings(delivered, next_attempt, created);
+
 
 CREATE TABLE IF NOT EXISTS path_get_receipts (
     request_id     TEXT PRIMARY KEY,
@@ -4553,6 +4566,73 @@ class Store:
                     (attempts, now + retry_after, error[:500], delivery_id),
                 )
 
+    def queue_websub_hub_ping(self, hub: str, topic: str) -> str:
+        now = time.time()
+        ping_id = secrets.token_hex(16)
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO websub_hub_pings(
+                    id, hub, topic, created, next_attempt
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (ping_id, hub, topic, now, now),
+            )
+        return ping_id
+
+    def due_websub_hub_pings(self, limit: int = 20) -> list[dict[str, Any]]:
+        now = time.time()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, hub, topic, created, attempts, next_attempt
+                  FROM websub_hub_pings
+                 WHERE delivered IS NULL
+                   AND attempts < 6
+                   AND next_attempt <= ?
+                 ORDER BY next_attempt, created
+                 LIMIT ?
+                """,
+                (now, max(1, min(limit, 100))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def finish_websub_hub_ping(
+        self,
+        ping_id: str,
+        *,
+        success: bool,
+        error: str = "",
+        retry_after: float = 0,
+    ) -> None:
+        now = time.time()
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT attempts FROM websub_hub_pings WHERE id = ?",
+                (ping_id,),
+            ).fetchone()
+            if row is None:
+                return
+            attempts = int(row["attempts"]) + 1
+            if success:
+                self._conn.execute(
+                    """
+                    UPDATE websub_hub_pings
+                       SET attempts = ?, delivered = ?, last_error = ''
+                     WHERE id = ?
+                    """,
+                    (attempts, now, ping_id),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE websub_hub_pings
+                       SET attempts = ?, next_attempt = ?, last_error = ?
+                     WHERE id = ?
+                    """,
+                    (attempts, now + retry_after, error[:500], ping_id),
+                )
+
     def prune_websub(self) -> None:
         now = time.time()
         with self._lock, self._conn:
@@ -4575,6 +4655,14 @@ class Store:
                     OR (delivered IS NULL AND attempts >= 6 AND created < ?)
                 """,
                 (now - 7 * 86400, now - 30 * 86400),
+            )
+            self._conn.execute(
+                """
+                DELETE FROM websub_hub_pings
+                 WHERE (delivered IS NOT NULL AND delivered < ?)
+                    OR (delivered IS NULL AND attempts >= 6 AND created < ?)
+                """,
+                (now - 86400, now - 7 * 86400),
             )
 
     def path_get_receipt(self, request_id: str) -> dict[str, Any] | None:
