@@ -68,7 +68,7 @@ class TopicTemplateService:
             try:
                 raw = path.read_text(encoding="utf-8")
                 schema = self.normalize_schema(json.loads(raw))
-            except (OSError, ValueError, json.JSONDecodeError, StoreError):
+            except OSError, ValueError, json.JSONDecodeError, StoreError:
                 continue
             with self._lock, self._conn:
                 row = self._conn.execute(

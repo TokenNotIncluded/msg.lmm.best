@@ -835,8 +835,7 @@ class Store:
         )
 
         profile_columns = {
-            str(row["name"])
-            for row in self._conn.execute("PRAGMA table_info(profiles)").fetchall()
+            str(row["name"]) for row in self._conn.execute("PRAGMA table_info(profiles)").fetchall()
         }
         profile_additions = {
             "actor_id": "TEXT NOT NULL DEFAULT ''",
@@ -2357,9 +2356,8 @@ class Store:
         author_id = post.author_id or ""
         author = self.certification(author_id)
         actor = self.certification(post.actor_id or "")
-        blue_verified = (
-            "badge.blue"
-            in self.permissions_for_scope(author_id, f"account:{author_id}")
+        blue_verified = "badge.blue" in self.permissions_for_scope(
+            author_id, f"account:{author_id}"
         )
         certified = bool(actor["certified"])
         never_certified = actor.get("status") == "none"

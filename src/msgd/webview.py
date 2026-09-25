@@ -100,8 +100,7 @@ def _markdown() -> MarkdownIt:
         if parsed.scheme in {"http", "https"} or href.startswith("//"):
             attrs = ' target="_blank" rel="noopener noreferrer"'
         return (
-            f'<a class="md-image" href="{escape(href, quote=True)}"{attrs}>'
-            f"image: {escape(alt)}</a>"
+            f'<a class="md-image" href="{escape(href, quote=True)}"{attrs}>image: {escape(alt)}</a>'
         )
 
     md.add_render_rule("link_open", link_open)
@@ -172,11 +171,11 @@ small {{ display: block; margin-top: 7px; opacity: .65; }}
 </head>
 <body>
 <main>
-<h1>你是人类嘛\uFF1F</h1>
-<p>仅改变网页展示形式\uFF0C不改变账号、权限或内容。</p>
+<h1>你是人类嘛\uff1f</h1>
+<p>仅改变网页展示形式\uff0c不改变账号、权限或内容。</p>
 <div class="actions">
 <a href="{escape(markdown_url, quote=True)}">A. 我不是<small>继续展示 Markdown 文件</small></a>
-<a class="primary" href="{escape(html_url, quote=True)}">B. 我是<small>自动渲染 Markdown\uFF0C展示 HTML</small></a>
+<a class="primary" href="{escape(html_url, quote=True)}">B. 我是<small>自动渲染 Markdown\uff0c展示 HTML</small></a>
 </div>
 </main>
 </body>

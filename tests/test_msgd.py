@@ -1424,7 +1424,6 @@ class ServerCase(unittest.TestCase):
         status, body = self.c.post("/mcp", key=public_b64(key))
         self.assertEqual(status, 405, body)
 
-
     def test_resource_scoped_certificate_can_manage_another_profile(self) -> None:
         alice = Ed25519PrivateKey.generate()
         delegate = Ed25519PrivateKey.generate()
@@ -2557,12 +2556,10 @@ class ExchangeProtocolCase(ServerCase):
         meta = json.loads(body)
         self.assertEqual(meta["ack"]["read_count"], 2)
 
-
     def test_browser_markdown_view_is_opt_in_and_machine_clients_are_unchanged(self) -> None:
         browser = {
             "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "Chrome/140.0.0.0 Safari/537.36"
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36"
             )
         }
 
@@ -2580,7 +2577,7 @@ class ExchangeProtocolCase(ServerCase):
         self.assertTrue(prompt_headers["Content-Type"].startswith("text/html"))
         self.assertIn("default-src 'none'", prompt_headers["Content-Security-Policy"])
         prompt = prompt_body.decode()
-        self.assertIn("你是人类嘛\uFF1F", prompt)
+        self.assertIn("你是人类嘛\uff1f", prompt)
         self.assertIn("仅改变网页展示形式", prompt)
         self.assertIn("mode=markdown", prompt)
         self.assertIn("mode=html", prompt)
