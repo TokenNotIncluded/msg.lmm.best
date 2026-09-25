@@ -1050,7 +1050,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(
                     404,
                     "invalid profile path",
-                    "try /@NAME, /@NAME/pubkey, /@NAME/w/, or /@NAME/keystore/ENTRY",
+                    "try /@NAME, /@NAME/pubkey, /@NAME/profile-actor-key, "
+                    "/@NAME/w/, or /@NAME/keystore/ENTRY",
                 )
                 return
             if len(segments) == 3 and resource != "keystore":
@@ -1102,6 +1103,8 @@ class Handler(BaseHTTPRequestHandler):
                 "bio": "bio",
                 "claim-signature": "claim_signature",
                 "profile-signature": "profile_signature",
+                "profile-actor-id": "profile_actor_id",
+                "profile-actor-key": "profile_actor_key",
             }
             if resource in scalar_fields:
                 value = profile.get(scalar_fields[resource])
@@ -1540,6 +1543,7 @@ class Handler(BaseHTTPRequestHandler):
         action = _required(params, "action").strip().lower()
         identity_key = _required(params, "key")
         canonical_key, signer_id = public_identity(identity_key)
+        owner_id = _management_owner(self.board.store, signer_id, _param(params, "owner"))
         nonce = _required(params, "nonce").strip().lower()
         issued = _int_required(params, "issued")
         key_id = (_param(params, "id") or "").strip().lower()
@@ -1603,6 +1607,7 @@ class Handler(BaseHTTPRequestHandler):
             name=name,
             scopes=scopes,
             expires=expires,
+            owner_id=_owner_payload_id(signer_id, owner_id),
         )
         auth = signed_request(
             canonical_key,
@@ -1613,16 +1618,24 @@ class Handler(BaseHTTPRequestHandler):
             issued=issued,
         )
         self.board.store.consume_nonce(auth)
-        profile = self.board.store.profile_by_author(auth.signer_id)
+        capability = "ssh.list" if action == "ssh.list" else "ssh.manage"
+        _require_owner_capability(
+            self.board.store,
+            auth.signer_id,
+            owner_id,
+            "ssh",
+            capability,
+        )
+        profile = self.board.store.profile_by_author(owner_id)
         if profile is None:
             raise StoreError("SSH access requires a registered signed profile", 403)
 
         service = self.board.ssh_keys
         if action == "ssh.list":
-            result: object = service.list(auth.signer_id)
+            result: object = service.list(owner_id)
         elif action == "ssh.add":
             result = service.add(
-                owner_id=auth.signer_id,
+                owner_id=owner_id,
                 public_key=ssh_public_key,
                 name=name,
                 scopes=scopes or ("read",),
@@ -1630,13 +1643,13 @@ class Handler(BaseHTTPRequestHandler):
                 created_by=auth.signer_id,
             )
         elif action == "ssh.scopes":
-            result = service.set_scopes(auth.signer_id, key_id, scopes)
+            result = service.set_scopes(owner_id, key_id, scopes)
         elif action == "ssh.rename":
-            result = service.rename(auth.signer_id, key_id, name)
+            result = service.rename(owner_id, key_id, name)
         elif action == "ssh.expiry":
-            result = service.set_expiry(auth.signer_id, key_id, expires)
+            result = service.set_expiry(owner_id, key_id, expires)
         else:
-            result = service.revoke(auth.signer_id, key_id)
+            result = service.revoke(owner_id, key_id)
 
         self._json(
             200,
@@ -1644,7 +1657,8 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": 1,
                 "action": action,
                 "account": profile["name"],
-                "owner_id": auth.signer_id,
+                "owner_id": owner_id,
+                "actor_id": auth.signer_id,
                 "result": result,
             },
         )
