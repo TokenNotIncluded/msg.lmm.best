@@ -42,24 +42,72 @@ MENTION_RE = re.compile(r"(?<![A-Za-z0-9._-])@([A-Za-z0-9][A-Za-z0-9._-]{0,63})(
 HASHTAG_RE = re.compile(r"(?<![\w/#])#([\w][\w-]{0,31})(?![\w-])", re.UNICODE)
 MAX_TAGS_PER_POST = 16
 
-ANONYMOUS_PERMISSION_BITS = {
+LEGACY_ANONYMOUS_PERMISSION_BITS = {
     "post.create": 1,
     "post.edit.any": 2,
     "post.delete.any": 4,
 }
-ANONYMOUS_PERMISSION_MASK = sum(ANONYMOUS_PERMISSION_BITS.values())
-DEFAULT_ANONYMOUS = frozenset(ANONYMOUS_PERMISSION_BITS)
+LEGACY_ANONYMOUS_PERMISSION_MASK = sum(LEGACY_ANONYMOUS_PERMISSION_BITS.values())
+
+BASE_PERMISSION_BITS = {
+    "post.create": 1,
+    "post.edit.self": 2,
+    "post.edit.any": 4,
+    "post.delete.self": 8,
+    "post.delete.any": 16,
+}
+BASE_PERMISSION_MASK = sum(BASE_PERMISSION_BITS.values())
+ANONYMOUS_BASE_ACTIONS = frozenset({"post.create", "post.edit.any", "post.delete.any"})
+SIGNED_BASE_ACTIONS = frozenset({"post.create", "post.edit.self", "post.delete.self"})
+ANONYMOUS_BASE_PERMISSION_MASK = sum(BASE_PERMISSION_BITS[action] for action in ANONYMOUS_BASE_ACTIONS)
+SIGNED_BASE_PERMISSION_MASK = sum(BASE_PERMISSION_BITS[action] for action in SIGNED_BASE_ACTIONS)
+
+DEFAULT_ANONYMOUS = frozenset({"post.create"})
+DEFAULT_SIGNED = SIGNED_BASE_ACTIONS
+GUEST_ANONYMOUS = ANONYMOUS_BASE_ACTIONS
 
 
 def anonymous_permission_mask(actions: Iterable[str]) -> int:
+    """Legacy 3-bit anonymous mask kept for API compatibility."""
     current = set(actions)
-    return sum(bit for action, bit in ANONYMOUS_PERMISSION_BITS.items() if action in current)
+    return sum(
+        bit for action, bit in LEGACY_ANONYMOUS_PERMISSION_BITS.items() if action in current
+    )
 
 
 def anonymous_actions(mask: int) -> tuple[str, ...]:
-    if mask < 0 or mask & ~ANONYMOUS_PERMISSION_MASK:
-        raise ValueError(f"anonymous permission mask must be 0..{ANONYMOUS_PERMISSION_MASK}")
-    return tuple(action for action, bit in ANONYMOUS_PERMISSION_BITS.items() if mask & bit)
+    """Decode the legacy 3-bit anonymous mask."""
+    if mask < 0 or mask & ~LEGACY_ANONYMOUS_PERMISSION_MASK:
+        raise ValueError(
+            f"anonymous permission mask must be 0..{LEGACY_ANONYMOUS_PERMISSION_MASK}"
+        )
+    return tuple(
+        action for action, bit in LEGACY_ANONYMOUS_PERMISSION_BITS.items() if mask & bit
+    )
+
+
+def base_permission_mask(actions: Iterable[str]) -> int:
+    current = set(actions)
+    return sum(bit for action, bit in BASE_PERMISSION_BITS.items() if action in current)
+
+
+def _base_actions(mask: int, allowed: frozenset[str], label: str) -> tuple[str, ...]:
+    allowed_mask = sum(BASE_PERMISSION_BITS[action] for action in allowed)
+    if mask < 0 or mask & ~allowed_mask:
+        raise ValueError(f"{label} permission mask contains unsupported bits")
+    return tuple(
+        action
+        for action, bit in BASE_PERMISSION_BITS.items()
+        if action in allowed and mask & bit
+    )
+
+
+def anonymous_base_actions(mask: int) -> tuple[str, ...]:
+    return _base_actions(mask, ANONYMOUS_BASE_ACTIONS, "anonymous")
+
+
+def signed_base_actions(mask: int) -> tuple[str, ...]:
+    return _base_actions(mask, SIGNED_BASE_ACTIONS, "signed")
 
 
 RESERVED_BOARDS = {
@@ -327,6 +375,7 @@ CREATE INDEX IF NOT EXISTS csr_subject_id
 CREATE TABLE IF NOT EXISTS topic_policies (
     board     TEXT PRIMARY KEY,
     anonymous TEXT NOT NULL,
+    signed    TEXT NOT NULL,
     version   INTEGER NOT NULL,
     updated   REAL NOT NULL
 );
@@ -627,6 +676,17 @@ class Store:
         }
         if revocation_columns and "reason" not in revocation_columns:
             self._conn.execute("ALTER TABLE revocations ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
+
+        policy_columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(topic_policies)").fetchall()
+        }
+        if policy_columns and "signed" not in policy_columns:
+            default_signed = json.dumps(sorted(DEFAULT_SIGNED), separators=(",", ":"))
+            self._conn.execute(
+                "ALTER TABLE topic_policies ADD COLUMN signed TEXT NOT NULL DEFAULT "
+                + repr(default_signed)
+            )
 
         self._conn.executescript(
             """
@@ -1135,7 +1195,10 @@ class Store:
         result: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
-            item["permissions"] = self.policy(str(row["name"]))["permissions"]
+            policy = self.policy(str(row["name"]))
+            item["permissions"] = policy["permissions"]
+            item["anonymous_permissions"] = policy["anonymous_permissions"]
+            item["signed_permissions"] = policy["signed_permissions"]
             result.append(item)
         return result
 
@@ -1147,75 +1210,91 @@ class Store:
         return dict(row) if row else None
 
     def policy(self, board: str) -> dict[str, Any]:
-        if board in {"ca", "custody"}:
+        def result(
+            anonymous: Iterable[str],
+            signed: Iterable[str],
+            *,
+            version: int,
+            updated: float | None,
+            locked: bool,
+        ) -> dict[str, Any]:
+            anonymous_values = sorted(set(anonymous))
+            signed_values = sorted(set(signed))
             return {
                 "board": board,
-                "permissions": 0,
-                "anonymous": [],
-                "version": 0,
-                "updated": None,
-                "locked": True,
+                "permissions": anonymous_permission_mask(anonymous_values),
+                "anonymous_permissions": base_permission_mask(anonymous_values),
+                "signed_permissions": base_permission_mask(signed_values),
+                "anonymous": anonymous_values,
+                "signed": signed_values,
+                "version": version,
+                "updated": updated,
+                "locked": locked,
             }
+
+        if board in {"ca", "custody"}:
+            return result((), (), version=0, updated=None, locked=True)
         if board == "guest":
-            actions = sorted(DEFAULT_ANONYMOUS)
-            return {
-                "board": "guest",
-                "permissions": anonymous_permission_mask(actions),
-                "anonymous": actions,
-                "version": 0,
-                "updated": None,
-                "locked": True,
-            }
+            return result(GUEST_ANONYMOUS, (), version=0, updated=None, locked=True)
         with self._lock:
             row = self._conn.execute(
-                "SELECT anonymous, version, updated FROM topic_policies WHERE board = ?",
+                "SELECT anonymous, signed, version, updated FROM topic_policies WHERE board = ?",
                 (board,),
             ).fetchone()
         if row is None:
-            actions = [] if board == "ca" else sorted(DEFAULT_ANONYMOUS)
-            return {
-                "board": board,
-                "permissions": anonymous_permission_mask(actions),
-                "anonymous": actions,
-                "version": 0,
-                "updated": None,
-                "locked": False,
-            }
-        actions = json.loads(str(row["anonymous"]))
-        return {
-            "board": board,
-            "permissions": anonymous_permission_mask(actions),
-            "anonymous": actions,
-            "version": int(row["version"]),
-            "updated": float(row["updated"]),
-            "locked": False,
-        }
+            return result(DEFAULT_ANONYMOUS, DEFAULT_SIGNED, version=0, updated=None, locked=False)
+        return result(
+            json.loads(str(row["anonymous"])),
+            json.loads(str(row["signed"])),
+            version=int(row["version"]),
+            updated=float(row["updated"]),
+            locked=False,
+        )
 
-    def set_policy(self, board: str, anonymous: tuple[str, ...], version: int) -> dict[str, Any]:
+    def set_policy(
+        self,
+        board: str,
+        anonymous: tuple[str, ...] | None,
+        signed: tuple[str, ...] | None,
+        version: int,
+    ) -> dict[str, Any]:
         if board in {"ca", "custody", "guest"}:
             raise StoreError(f"/{board} policy is system-managed", 403)
         if not valid_board_name(board):
             raise StoreError(f"invalid board name: {board!r}", 400)
-        invalid = set(anonymous) - DEFAULT_ANONYMOUS
-        if invalid:
-            raise StoreError(f"invalid anonymous actions: {sorted(invalid)}", 400)
         current = self.policy(board)
+        anonymous_values = (
+            set(current["anonymous"]) if anonymous is None else set(anonymous)
+        )
+        signed_values = set(current["signed"]) if signed is None else set(signed)
+        invalid_anonymous = anonymous_values - ANONYMOUS_BASE_ACTIONS
+        if invalid_anonymous:
+            raise StoreError(f"invalid anonymous actions: {sorted(invalid_anonymous)}", 400)
+        invalid_signed = signed_values - SIGNED_BASE_ACTIONS
+        if invalid_signed:
+            raise StoreError(f"invalid signed base actions: {sorted(invalid_signed)}", 400)
         if version != int(current["version"]) + 1:
             raise StoreError("stale policy version", 409)
         self.ensure_board(board)
-        values = sorted(set(anonymous))
         now = time.time()
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO topic_policies(board, anonymous, version, updated)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO topic_policies(board, anonymous, signed, version, updated)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(board) DO UPDATE SET
                     anonymous = excluded.anonymous,
+                    signed = excluded.signed,
                     version = excluded.version,
                     updated = excluded.updated
                 """,
-                (board, json.dumps(values, separators=(",", ":")), version, now),
+                (
+                    board,
+                    json.dumps(sorted(anonymous_values), separators=(",", ":")),
+                    json.dumps(sorted(signed_values), separators=(",", ":")),
+                    version,
+                    now,
+                ),
             )
         return self.policy(board)
 
@@ -1893,16 +1972,21 @@ class Store:
         author = self.certification(post.author_id or "")
         actor = self.certification(post.actor_id or "")
         certified = bool(actor["certified"])
+        never_certified = actor.get("status") == "none"
         return {
-            "type": "certificate-signed",
+            "type": "certificate-signed" if certified else "signed",
             "signed": True,
             "certified": certified,
-            "status": "certified" if certified else "signed-inactive",
+            "status": "certified" if certified else ("signed" if never_certified else "signed-inactive"),
             "server_accepted_signature": True,
             "basis": (
                 "current-active-certificate-chain"
                 if certified
-                else "stored-signature-current-chain-inactive"
+                else (
+                    "self-custodied-ed25519-signature"
+                    if never_certified
+                    else "stored-signature-current-chain-inactive"
+                )
             ),
             "author": author,
             "actor": actor,
@@ -2139,7 +2223,8 @@ class Store:
         root = self.root_info()
         if root is not None and signer_id == root["root_id"]:
             return True
-        permissions = self.permissions_for(signer_id, board)
+        permissions = set(self.policy(board)["signed"])
+        permissions.update(self.permissions_for(signer_id, board))
         if action == "post.edit":
             return "post.edit.any" in permissions or (
                 owner_id == signer_id and "post.edit.self" in permissions
@@ -3330,7 +3415,10 @@ class Store:
         result: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
-            item["permissions"] = self.policy(str(row["name"]))["permissions"]
+            policy = self.policy(str(row["name"]))
+            item["permissions"] = policy["permissions"]
+            item["anonymous_permissions"] = policy["anonymous_permissions"]
+            item["signed_permissions"] = policy["signed_permissions"]
             result.append(item)
         return result
 
