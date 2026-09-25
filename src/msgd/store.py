@@ -64,6 +64,7 @@ RESERVED_BOARDS = {
     "_schema",
     "_health",
     "_search",
+    "hot",
     "_signing",
     "_ca",
     "_cert",
