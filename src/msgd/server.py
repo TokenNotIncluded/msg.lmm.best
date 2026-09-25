@@ -2035,6 +2035,39 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _send_index_page(
+        self,
+        *,
+        fmt: str,
+        kind: str,
+        order: str,
+        next_url: str | None,
+        items: list[dict[str, Any]],
+        text_body: str,
+    ) -> None:
+        meta = {
+            "type": "index-page",
+            "index": kind,
+            "order": order,
+            "next": next_url,
+        }
+        if fmt == "json":
+            self._json(200, {**meta, "items": items})
+            return
+        if fmt == "ndjson":
+            body = json.dumps(meta, ensure_ascii=False) + "\n"
+            body += "".join(
+                json.dumps({"type": "entry", **item}, ensure_ascii=False) + "\n"
+                for item in items
+            )
+            self._send(
+                200,
+                body,
+                content_type="application/x-ndjson; charset=utf-8",
+            )
+            return
+        self._send(200, text_body)
+
     def _index(self, segments: list[str], params: Params) -> None:
         store = self.board.store
         fmt = (_param(params, "format") or "").lower()
@@ -2123,106 +2156,42 @@ class Handler(BaseHTTPRequestHandler):
             scope=scope,
         )
 
-        if kind == "by-id":
-            boundary = cursor.get("id")
-            if boundary is not None and (not isinstance(boundary, int) or boundary < 1):
-                raise StoreError("invalid by-id cursor", 400)
-            posts = store.list_posts(
-                since=boundary if order == "asc" else None,
-                before=boundary if order == "desc" else None,
-                limit=limit + 1,
-                order=order,
-            )
-            truncated = len(posts) > limit
-            posts = posts[:limit]
-            next_cursor = (
-                _encode_cursor(f"index-{kind}", scope, id=posts[-1].id)
-                if truncated and posts
-                else None
-            )
-            next_url = _next_cursor_url(
-                path,
-                params,
-                cursor=next_cursor,
-                limit=limit,
-                has_more=truncated,
-            )
-            items = [
-                {
-                    "id": post.id,
-                    "path": f"/{post.board}/{post.id}",
-                    "board": post.board,
-                    "name": post.name,
-                    "title": post.title,
-                    "created": round(post.created, 3),
-                    "updated": round(post.updated, 3),
-                }
-                for post in posts
-            ]
-            if fmt == "json":
-                self._json(
-                    200,
-                    {
-                        "type": "index-page",
-                        "index": kind,
-                        "order": order,
-                        "next": next_url,
-                        "items": items,
-                    },
+        if kind in {"by-id", "by-time"}:
+            if kind == "by-id":
+                boundary = cursor.get("id")
+                if boundary is not None and (
+                    not isinstance(boundary, int) or boundary < 1
+                ):
+                    raise StoreError("invalid by-id cursor", 400)
+                posts = store.list_posts(
+                    since=boundary if order == "asc" else None,
+                    before=boundary if order == "desc" else None,
+                    limit=limit + 1,
+                    order=order,
                 )
-                return
-            if fmt == "ndjson":
-                body = json.dumps(
-                    {
-                        "type": "index-page",
-                        "index": kind,
-                        "order": order,
-                        "next": next_url,
-                    },
-                    ensure_ascii=False,
-                ) + "\n"
-                body += "".join(
-                    json.dumps({"type": "entry", **item}, ensure_ascii=False) + "\n"
-                    for item in items
+            else:
+                time_cursor: tuple[float, int] | None = None
+                if cursor:
+                    try:
+                        time_cursor = (float(cursor["created"]), int(cursor["id"]))
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise StoreError("invalid by-time cursor", 400) from exc
+                    if time_cursor[1] < 1:
+                        raise StoreError("invalid by-time cursor", 400)
+                posts = store.list_posts_by_time(
+                    cursor=time_cursor,
+                    limit=limit + 1,
+                    order=order,
                 )
-                self._send(
-                    200,
-                    body,
-                    content_type="application/x-ndjson; charset=utf-8",
-                )
-                return
-            self._send(
-                200,
-                render_post_index(kind, posts, order=order, next_url=next_url),
-            )
-            return
 
-        if kind == "by-time":
-            time_cursor: tuple[float, int] | None = None
-            if cursor:
-                try:
-                    time_cursor = (float(cursor["created"]), int(cursor["id"]))
-                except (KeyError, TypeError, ValueError) as exc:
-                    raise StoreError("invalid by-time cursor", 400) from exc
-                if time_cursor[1] < 1:
-                    raise StoreError("invalid by-time cursor", 400)
-            posts = store.list_posts_by_time(
-                cursor=time_cursor,
-                limit=limit + 1,
-                order=order,
-            )
             truncated = len(posts) > limit
             posts = posts[:limit]
-            next_cursor = (
-                _encode_cursor(
-                    f"index-{kind}",
-                    scope,
-                    created=repr(posts[-1].created),
-                    id=posts[-1].id,
-                )
-                if truncated and posts
-                else None
-            )
+            next_cursor = None
+            if truncated and posts:
+                values = {"id": posts[-1].id}
+                if kind == "by-time":
+                    values["created"] = repr(posts[-1].created)
+                next_cursor = _encode_cursor(f"index-{kind}", scope, **values)
             next_url = _next_cursor_url(
                 path,
                 params,
@@ -2242,41 +2211,18 @@ class Handler(BaseHTTPRequestHandler):
                 }
                 for post in posts
             ]
-            if fmt == "json":
-                self._json(
-                    200,
-                    {
-                        "type": "index-page",
-                        "index": kind,
-                        "order": order,
-                        "next": next_url,
-                        "items": items,
-                    },
-                )
-                return
-            if fmt == "ndjson":
-                body = json.dumps(
-                    {
-                        "type": "index-page",
-                        "index": kind,
-                        "order": order,
-                        "next": next_url,
-                    },
-                    ensure_ascii=False,
-                ) + "\n"
-                body += "".join(
-                    json.dumps({"type": "entry", **item}, ensure_ascii=False) + "\n"
-                    for item in items
-                )
-                self._send(
-                    200,
-                    body,
-                    content_type="application/x-ndjson; charset=utf-8",
-                )
-                return
-            self._send(
-                200,
-                render_post_index(kind, posts, order=order, next_url=next_url),
+            self._send_index_page(
+                fmt=fmt,
+                kind=kind,
+                order=order,
+                next_url=next_url,
+                items=items,
+                text_body=render_post_index(
+                    kind,
+                    posts,
+                    order=order,
+                    next_url=next_url,
+                ),
             )
             return
 
@@ -2313,41 +2259,13 @@ class Handler(BaseHTTPRequestHandler):
             }
             for item in names
         ]
-        if fmt == "json":
-            self._json(
-                200,
-                {
-                    "type": "index-page",
-                    "index": kind,
-                    "order": order,
-                    "next": next_url,
-                    "items": items,
-                },
-            )
-            return
-        if fmt == "ndjson":
-            body = json.dumps(
-                {
-                    "type": "index-page",
-                    "index": kind,
-                    "order": order,
-                    "next": next_url,
-                },
-                ensure_ascii=False,
-            ) + "\n"
-            body += "".join(
-                json.dumps({"type": "entry", **item}, ensure_ascii=False) + "\n"
-                for item in items
-            )
-            self._send(
-                200,
-                body,
-                content_type="application/x-ndjson; charset=utf-8",
-            )
-            return
-        self._send(
-            200,
-            render_name_index(names, order=order, next_url=next_url),
+        self._send_index_page(
+            fmt=fmt,
+            kind=kind,
+            order=order,
+            next_url=next_url,
+            items=items,
+            text_body=render_name_index(names, order=order, next_url=next_url),
         )
 
     def _hot(self, params: Params) -> None:
