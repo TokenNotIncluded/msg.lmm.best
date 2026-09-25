@@ -1755,6 +1755,10 @@ class Handler(BaseHTTPRequestHandler):
             before=before,
             limit=limit,
         )
+        receipts = self.board.exchange.receipts_for(
+            auth.signer_id,
+            [post.id for post, _kinds in events],
+        )
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
             lines = []
             for post, kinds in events:
@@ -1762,6 +1766,8 @@ class Handler(BaseHTTPRequestHandler):
                     json.dumps(
                         {
                             "kinds": list(kinds),
+                            "ack": receipts.get(post.id, "delivered"),
+                            "ref": f"post:{post.id}",
                             "post": post.to_dict(),
                             "authentication": self.board.store.post_authentication(post),
                         },
@@ -1783,6 +1789,7 @@ class Handler(BaseHTTPRequestHandler):
                 authentications={
                     post.id: self.board.store.post_authentication(post) for post, _ in events
                 },
+                receipts=receipts,
             ),
         )
 
