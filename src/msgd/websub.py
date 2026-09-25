@@ -174,11 +174,30 @@ def _post_feed(callback: str, body: bytes, headers: dict[str, str]) -> int:
     return status
 
 
+def _post_publish_ping(hub: str, topic: str) -> int:
+    body = urlencode(
+        [
+            ("hub.mode", "publish"),
+            ("hub.url", topic),
+        ]
+    ).encode("ascii")
+    status, _ = _request_https(
+        "POST",
+        hub,
+        body=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    return status
+
+
 class WebSubService:
     def __init__(self, cfg: Config, store: Store) -> None:
         self.cfg = cfg
         self.store = store
         self.secrets = SecretBox(cfg.webhook_secret_key)
+        self.external_hubs = tuple(
+            validate_webhook_url(hub) for hub in cfg.websub_hubs[1:]
+        )
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -270,6 +289,8 @@ class WebSubService:
         queued: list[str] = []
         for topic in topics:
             queued.extend(self.store.queue_websub_topic(topic))
+            for hub in self.external_hubs:
+                queued.append(self.store.queue_websub_hub_ping(hub, topic))
         if queued:
             self._wake.set()
         return queued
@@ -352,6 +373,11 @@ class WebSubService:
         if not 200 <= status < 300:
             raise OSError(f"WebSub subscriber returned HTTP {status}")
 
+    def _ping_external_hub(self, row: dict[str, object]) -> None:
+        status = _post_publish_ping(str(row["hub"]), str(row["topic"]))
+        if not 200 <= status < 300:
+            raise OSError(f"external WebSub hub returned HTTP {status}")
+
     def _run_once(self) -> int:
         processed = 0
         for row in self.store.due_websub_verifications(20):
@@ -383,6 +409,22 @@ class WebSubService:
                 )
             else:
                 self.store.finish_websub_delivery(str(row["id"]), success=True)
+
+        for row in self.store.due_websub_hub_pings(20):
+            processed += 1
+            try:
+                self._ping_external_hub(row)
+            except Exception as exc:
+                attempts = int(row["attempts"])
+                retry_after = RETRY_DELAYS[min(attempts, len(RETRY_DELAYS) - 1)]
+                self.store.finish_websub_hub_ping(
+                    str(row["id"]),
+                    success=False,
+                    error=str(exc),
+                    retry_after=retry_after,
+                )
+            else:
+                self.store.finish_websub_hub_ping(str(row["id"]), success=True)
         return processed
 
     def _worker(self) -> None:
