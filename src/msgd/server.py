@@ -881,7 +881,9 @@ class Handler(BaseHTTPRequestHandler):
             }
             if resource in scalar_fields:
                 value = profile.get(scalar_fields[resource])
-                if value is None or value == "":
+                if value is None or (
+                    value == "" and resource in {"claim-signature", "profile-signature"}
+                ):
                     self._error(404, f"profile resource is not available: {resource}")
                 else:
                     self._send(200, str(value) + "\n")
