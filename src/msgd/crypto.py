@@ -223,6 +223,18 @@ def request_payload(
             ("csr_id", str(csr_id)),
             ("reason", reason),
         ]
+    elif action in {"post.like", "post.unlike"}:
+        if post_id is None or post_id < 1:
+            raise SignatureError(f"{action} requires post_id")
+        if nonce is None or issued is None:
+            raise SignatureError(f"{action} requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("post_id", str(post_id)),
+        ]
     elif action in {"inbox.read", "outbox.read"}:
         if nonce is None or issued is None:
             raise SignatureError(f"{action} requires nonce and issued")
