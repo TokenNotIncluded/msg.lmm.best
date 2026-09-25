@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from msgd.config import Config
+from msgd.exchange import ExchangeService
 from msgd.server import build_server
 from msgd.store import Store
 
@@ -1678,6 +1679,46 @@ class InboxCase(unittest.TestCase):
 
 
 class LegacyMigrationCase(unittest.TestCase):
+    def test_legacy_ack_receipts_gain_read_at_without_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "ack-legacy.db"
+            conn = sqlite3.connect(db)
+            conn.executescript(
+                """
+                CREATE TABLE inbox_receipts (
+                    subject_id TEXT NOT NULL,
+                    post_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    updated REAL NOT NULL,
+                    PRIMARY KEY(subject_id, post_id)
+                );
+                INSERT INTO inbox_receipts(subject_id, post_id, status, updated)
+                VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        7, 'completed', 123.5);
+                """
+            )
+            conn.close()
+
+            root = Ed25519PrivateKey.generate()
+            root_public = Path(tmp) / "root.pub"
+            root_public.write_text(public_b64(root) + "\n")
+            cfg = Config(database=str(db), root_public_key=str(root_public))
+            store = Store(cfg)
+            exchange = ExchangeService(cfg, store)
+            try:
+                check = sqlite3.connect(db)
+                columns = {row[1] for row in check.execute("PRAGMA table_info(inbox_receipts)")}
+                row = check.execute(
+                    "SELECT read_at, public_key FROM inbox_receipts WHERE post_id = 7"
+                ).fetchone()
+                check.close()
+                self.assertIn("read_at", columns)
+                self.assertIn("public_key", columns)
+                self.assertEqual(row, (123.5, ""))
+            finally:
+                exchange.close()
+                store.close()
+
     def test_existing_mentions_are_indexed_on_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "v05.db"
@@ -2007,6 +2048,79 @@ class ExchangeProtocolCase(ServerCase):
         )
         self.assertEqual(status, 200, body)
         self.assertTrue(json.loads(body)["deleted"])
+
+    def test_public_ack_receipts_are_unique_signed_reads(self) -> None:
+        post_id = self.signed_create(self.root_key, "receipt", name="Root")
+        reader = Ed25519PrivateKey.generate()
+
+        self.assertEqual(self.c.get(f"/main/{post_id}")[0], 200)
+        self.assertEqual(self.c.get(f"/main/{post_id}")[0], 200)
+
+        status, body = self.exchange(
+            reader,
+            "/ack",
+            "post.ack",
+            id=str(post_id),
+            status="read",
+        )
+        self.assertEqual(status, 200, body)
+        first = json.loads(body)
+        self.assertEqual(first["status"], "read")
+        self.assertTrue(first["changed"])
+        first_read_at = first["read_at"]
+
+        status, body = self.exchange(
+            reader,
+            "/ack",
+            "post.ack",
+            id=str(post_id),
+            status="accepted",
+        )
+        self.assertEqual(status, 200, body)
+        accepted = json.loads(body)
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertEqual(accepted["read_at"], first_read_at)
+
+        status, body = self.exchange(
+            reader,
+            "/ack",
+            "post.ack",
+            id=str(post_id),
+            status="read",
+        )
+        self.assertEqual(status, 200, body)
+        repeated_read = json.loads(body)
+        self.assertEqual(repeated_read["status"], "accepted")
+        self.assertFalse(repeated_read["changed"])
+        self.assertEqual(repeated_read["read_at"], first_read_at)
+
+        status, body = self.exchange(
+            self.root_key,
+            "/ack",
+            "post.ack",
+            id=str(post_id),
+            status="read",
+        )
+        self.assertEqual(status, 200, body)
+
+        status, body = self.c.get(f"/ack/{post_id}")
+        self.assertEqual(status, 200, body)
+        receipts = json.loads(body)
+        self.assertEqual(receipts["read_count"], 2)
+        self.assertEqual(receipts["status_counts"]["read"], 1)
+        self.assertEqual(receipts["status_counts"]["accepted"], 1)
+        self.assertEqual(
+            {item["subject_id"] for item in receipts["readers"]},
+            {
+                public_identity_for_test(reader),
+                public_identity_for_test(self.root_key),
+            },
+        )
+
+        status, body = self.c.get(f"/main/{post_id}/meta")
+        self.assertEqual(status, 200, body)
+        meta = json.loads(body)
+        self.assertEqual(meta["ack"]["read_count"], 2)
 
 
 if __name__ == "__main__":

@@ -52,7 +52,9 @@ CREATE TABLE IF NOT EXISTS inbox_receipts (
     subject_id TEXT NOT NULL,
     post_id    INTEGER NOT NULL,
     status     TEXT NOT NULL,
+    read_at    REAL NOT NULL,
     updated    REAL NOT NULL,
+    public_key TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(subject_id, post_id)
 );
 CREATE INDEX IF NOT EXISTS inbox_receipts_subject
@@ -89,6 +91,28 @@ class ExchangeService:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._migrate_receipts()
+
+    def _migrate_receipts(self) -> None:
+        columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(inbox_receipts)").fetchall()
+        }
+        if "read_at" not in columns:
+            self._conn.execute(
+                "ALTER TABLE inbox_receipts ADD COLUMN read_at REAL NOT NULL DEFAULT 0"
+            )
+        if "public_key" not in columns:
+            self._conn.execute(
+                "ALTER TABLE inbox_receipts ADD COLUMN public_key TEXT NOT NULL DEFAULT ''"
+            )
+        self._conn.execute("UPDATE inbox_receipts SET read_at = updated WHERE read_at <= 0")
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS inbox_receipts_post
+                ON inbox_receipts(post_id, read_at, subject_id)
+            """
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -408,38 +432,157 @@ class ExchangeService:
             )
         return matches
 
-    def ack(self, subject_id: str, post_id: int, status: str) -> dict[str, Any]:
+    def ack(
+        self,
+        subject_id: str,
+        post_id: int,
+        status: str,
+        *,
+        public_key: str = "",
+    ) -> dict[str, Any]:
         normalized = status.lower().strip()
         if normalized not in ACK_STATUSES:
             raise StoreError(f"ack status must be one of {sorted(ACK_STATUSES)}", 400)
+        if not valid_author_id(subject_id):
+            raise StoreError("invalid ack identity", 400)
+        if self.store.get_post_or_archived(post_id) is None:
+            raise StoreError("post not found", 404)
+
+        now = time.time()
         with self._lock, self._conn:
-            event = self._conn.execute(
+            existing = self._conn.execute(
                 """
-                SELECT 1 FROM inbox_events
+                SELECT status, read_at, updated, public_key
+                  FROM inbox_receipts
                  WHERE subject_id = ? AND post_id = ?
-                 LIMIT 1
                 """,
                 (subject_id, post_id),
             ).fetchone()
-            if event is None:
-                raise StoreError("post is not in this identity inbox", 404)
-            now = time.time()
-            self._conn.execute(
-                """
-                INSERT INTO inbox_receipts(subject_id, post_id, status, updated)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(subject_id, post_id) DO UPDATE SET
-                    status = excluded.status,
-                    updated = excluded.updated
-                """,
-                (subject_id, post_id, normalized, now),
-            )
+            if existing is None:
+                current_status = normalized
+                read_at = now
+                updated = now
+                changed = True
+                self._conn.execute(
+                    """
+                    INSERT INTO inbox_receipts(
+                        subject_id, post_id, status, read_at, updated, public_key
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (subject_id, post_id, current_status, read_at, updated, public_key),
+                )
+            else:
+                previous = str(existing["status"])
+                read_at = float(existing["read_at"] or existing["updated"])
+                current_key = public_key or str(existing["public_key"] or "")
+                current_status = (
+                    previous if normalized == "read" and previous != "read" else normalized
+                )
+                changed = current_status != previous
+                updated = now if changed else float(existing["updated"])
+                if changed or current_key != str(existing["public_key"] or ""):
+                    self._conn.execute(
+                        """
+                        UPDATE inbox_receipts
+                           SET status = ?, read_at = ?, updated = ?, public_key = ?
+                         WHERE subject_id = ? AND post_id = ?
+                        """,
+                        (
+                            current_status,
+                            read_at,
+                            updated,
+                            current_key,
+                            subject_id,
+                            post_id,
+                        ),
+                    )
+
         return {
             "post_id": post_id,
             "post_ref": f"post:{post_id}",
             "subject_id": subject_id,
-            "status": normalized,
-            "updated": round(now, 3),
+            "status": current_status,
+            "requested_status": normalized,
+            "changed": changed,
+            "read_at": round(read_at, 3),
+            "updated": round(updated, 3),
+        }
+
+    def receipt_counts(self, post_id: int) -> dict[str, Any]:
+        if self.store.get_post_or_archived(post_id) is None:
+            raise StoreError("post not found", 404)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS read_count,
+                       SUM(CASE WHEN status = 'read' THEN 1 ELSE 0 END) AS read_only,
+                       SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END) AS accepted,
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                       SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected
+                  FROM inbox_receipts
+                 WHERE post_id = ?
+                """,
+                (post_id,),
+            ).fetchone()
+        return {
+            "post_id": post_id,
+            "post_ref": f"post:{post_id}",
+            "read_count": int(row["read_count"] or 0),
+            "status_counts": {
+                "read": int(row["read_only"] or 0),
+                "accepted": int(row["accepted"] or 0),
+                "completed": int(row["completed"] or 0),
+                "rejected": int(row["rejected"] or 0),
+            },
+        }
+
+    def receipt_summary(
+        self,
+        post_id: int,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        counts = self.receipt_counts(post_id)
+        bounded = max(1, min(limit, self.cfg.max_limit))
+        start = max(0, offset)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT subject_id, status, read_at, updated, public_key
+                  FROM inbox_receipts
+                 WHERE post_id = ?
+                 ORDER BY read_at ASC, subject_id ASC
+                 LIMIT ? OFFSET ?
+                """,
+                (post_id, bounded, start),
+            ).fetchall()
+
+        readers: list[dict[str, Any]] = []
+        for row in rows:
+            subject_id = str(row["subject_id"])
+            profile = self.store.profile_by_author(subject_id)
+            readers.append(
+                {
+                    "subject_id": subject_id,
+                    "name": str(profile["name"]) if profile is not None else None,
+                    "profile": str(profile["profile_url"]) if profile is not None else None,
+                    "public_key": str(row["public_key"] or "") or None,
+                    "status": str(row["status"]),
+                    "read_at": round(float(row["read_at"]), 3),
+                    "updated": round(float(row["updated"]), 3),
+                }
+            )
+
+        total = int(counts["read_count"])
+        next_offset = start + len(readers)
+        return {
+            **counts,
+            "readers": readers,
+            "offset": start,
+            "limit": bounded,
+            "has_more": next_offset < total,
+            "next_offset": next_offset if next_offset < total else None,
         }
 
     def receipts_for(self, subject_id: str, post_ids: list[int]) -> dict[int, str]:

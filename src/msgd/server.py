@@ -769,6 +769,12 @@ class Handler(BaseHTTPRequestHandler):
             self._inbox(params)
             return
 
+        if head == "ack" and method in {"GET", "HEAD"}:
+            if self._limited(False):
+                return
+            self._ack_receipts(segments, params)
+            return
+
         if head in {"outbox", "state", "watch", "ack", "task"}:
             if method != "POST":
                 self._send(
@@ -790,6 +796,7 @@ class Handler(BaseHTTPRequestHandler):
                 "watch.add",
                 "watch.delete",
                 "inbox.ack",
+                "post.ack",
                 "task.open",
                 "task.claim",
                 "task.release",
@@ -1096,6 +1103,7 @@ class Handler(BaseHTTPRequestHandler):
                     **post.to_dict(),
                     "authentication": self.board.store.post_authentication(post),
                     "engagement": engagement,
+                    "ack": self.board.exchange.receipt_counts(post.id),
                     "tags": list(self.board.store.post_tags(post.id)),
                     "files": [file.to_dict() for file in self.board.store.attachments(post.id)],
                 },
@@ -2041,6 +2049,38 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _ack_receipts(self, segments: list[str], params: Params) -> None:
+        if len(segments) != 2:
+            raise StoreError("ack receipt list requires /ack/POST_ID", 404)
+        try:
+            post_id = int(segments[1])
+        except ValueError as exc:
+            raise StoreError("ack post id must be an integer", 400) from exc
+        if post_id < 1:
+            raise StoreError("ack post id must be positive", 400)
+
+        limit = int(
+            _int(
+                params,
+                "limit",
+                min(100, self.board.cfg.max_limit),
+                1,
+                self.board.cfg.max_limit,
+            )
+            or 1
+        )
+        offset = int(_int(params, "offset", 0, 0, 1_000_000_000) or 0)
+        result = self.board.exchange.receipt_summary(post_id, limit=limit, offset=offset)
+        if self.board.engagement.available:
+            result["views"] = self.board.engagement.metrics([post_id])[post_id].views
+        else:
+            result["views"] = None
+        if result["has_more"]:
+            result["next"] = f"/ack/{post_id}?limit={limit}&offset={result['next_offset']}"
+        else:
+            result["next"] = None
+        self._json(200, result)
+
     def _exchange(self, head: str, params: Params) -> None:
         action = _required(params, "action")
         if not _exchange_action_for_head(head, action):
@@ -2140,13 +2180,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, service.watch_list(auth.signer_id))
             return
 
-        if action == "inbox.ack":
+        if action in {"inbox.ack", "post.ack"}:
             self._json(
                 200,
                 service.ack(
                     auth.signer_id,
                     int(meta["id"]),
                     str(meta["status"]),
+                    public_key=auth.public_key,
                 ),
             )
             return
@@ -4293,6 +4334,7 @@ EXCHANGE_ACTIONS = frozenset(
         "watch.delete",
         "watch.list",
         "inbox.ack",
+        "post.ack",
         "task.open",
         "task.claim",
         "task.release",
@@ -4307,7 +4349,7 @@ def _exchange_action_for_head(head: str, action: str) -> bool:
         "outbox": {"outbox.read"},
         "state": {"state.read", "state.write", "state.delete"},
         "watch": {"watch.add", "watch.delete", "watch.list"},
-        "ack": {"inbox.ack"},
+        "ack": {"inbox.ack", "post.ack"},
         "task": {
             "task.open",
             "task.claim",
@@ -4408,7 +4450,7 @@ def _exchange_signing_spec(
             "target": watch_target or None,
         }
 
-    if action == "inbox.ack":
+    if action in {"inbox.ack", "post.ack"}:
         post_id = _int_required(params, "id")
         ack_status = _required(params, "status").lower().strip()
         if ack_status not in ACK_STATUSES:
