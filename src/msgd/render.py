@@ -638,10 +638,11 @@ Replacing a file counts only the replacement size; the sum of all current files
 for that identity must remain within the quota.
 
 Reading is public. Creating or replacing files requires an active certificate
-grant with action web.write. Deleting files requires web.delete. These web
-actions are global identity capabilities, so they are valid only in a certificate
-grant whose topic is "*"; they are never inherited from ordinary signed-post
-permissions.
+grant with action web.write. Deleting files requires web.delete. New
+certificates should put these actions under scope="web:self", or target one
+specific author ID for delegated site management. Legacy topic="*" web grants
+remain valid for the holder's own site; web permissions are never inherited
+from ordinary signed-post permissions.
 
 Recommended CLI flow:
  msg web put index.html ./index.html
@@ -649,7 +650,7 @@ Recommended CLI flow:
  msg web delete assets/app.js
 
 Request the capability with:
- msg request --grant '*=web.write,web.delete'
+ msg request --grant 'web:self=web.write,web.delete'
 
 Raw clients first fetch the exact signing payload from /_signing with
 action=web.write or action=web.delete, then submit the signed mutation to /_web.
@@ -1381,7 +1382,7 @@ def render_schema(cfg: Config) -> str:
             "delete": "signed POST /_web after /_signing?action=web.delete",
             "certificate_required": True,
             "certificate_grants": ["web.write", "web.delete"],
-            "grant_scope": "topic=* only",
+            "grant_scope": "web:self or web:AUTHOR_ID; legacy topic=* remains self-only",
             "max_site_bytes": cfg.web_max_site_bytes,
             "csp_sandbox": True,
         },
