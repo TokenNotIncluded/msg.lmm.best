@@ -81,14 +81,35 @@ class Engagement:
         return views + comments * 4.0 + min(post_id, 999_999_999) * 1e-12
 
     def sync_comments(self, rows: list[tuple[int, str, int]]) -> None:
-        """Rebuild comment and hot rankings from SQLite without touching views."""
+        """Rebuild comment/hot rankings and reconcile them with live SQLite posts."""
         client = self.client
-        if client is None or not rows:
+        if client is None:
             return
         try:
+            live = {self._member(post_id) for post_id, _, _ in rows}
+            live_by_board: dict[str, set[str]] = {}
+            for post_id, board, _ in rows:
+                live_by_board.setdefault(board, set()).add(self._member(post_id))
+
+            prune = client.pipeline(transaction=False)
+            for metric in self.SORTS:
+                existing = set(client.zrange(self._key(metric), 0, -1))
+                stale = existing - live
+                if stale:
+                    prune.zrem(self._key(metric), *stale)
+            for key in client.scan_iter(match=f"{self.prefix}:engagement:*:board:*"):
+                board = key.rsplit(":board:", 1)[-1]
+                existing = set(client.zrange(key, 0, -1))
+                stale = existing - live_by_board.get(board, set())
+                if stale:
+                    prune.zrem(key, *stale)
+            prune.execute()
+
             pipe = client.pipeline(transaction=False)
             for post_id, board, count in rows:
                 member = self._member(post_id)
+                pipe.zadd(self._key("views"), {member: 0}, nx=True)
+                pipe.zadd(self._key("views", board), {member: 0}, nx=True)
                 pipe.zadd(self._key("comments"), {member: count})
                 pipe.zadd(self._key("comments", board), {member: count})
                 pipe.zscore(self._key("views"), member)
@@ -96,7 +117,7 @@ class Engagement:
 
             hot_pipe = client.pipeline(transaction=False)
             for index, (post_id, board, count) in enumerate(rows):
-                raw_views = results[index * 3 + 2]
+                raw_views = results[index * 5 + 4]
                 views = float(raw_views or 0)
                 score = self._hot_score(post_id, views, float(count))
                 member = self._member(post_id)
@@ -133,10 +154,12 @@ class Engagement:
         member = self._member(post_id)
         try:
             pipe = client.pipeline(transaction=False)
+            pipe.zadd(self._key("views"), {member: 0}, nx=True)
+            pipe.zadd(self._key("views", board), {member: 0}, nx=True)
             pipe.zadd(self._key("comments"), {member: comments})
             pipe.zadd(self._key("comments", board), {member: comments})
             pipe.zscore(self._key("views"), member)
-            _, _, raw_views = pipe.execute()
+            _, _, _, _, raw_views = pipe.execute()
             views = float(raw_views or 0)
             hot = self._hot_score(post_id, views, float(comments))
             client.zadd(self._key("hot"), {member: hot})
@@ -150,11 +173,25 @@ class Engagement:
             return
         member = self._member(post_id)
         try:
-            client.delete(f"{self.prefix}:unused:{member}")
             pipe = client.pipeline(transaction=False)
             for metric in self.SORTS:
                 pipe.zrem(self._key(metric), member)
                 pipe.zrem(self._key(metric, board), member)
+            pipe.execute()
+        except (ValkeyError, OSError) as exc:
+            self.error = str(exc)
+
+    def remove_ids(self, post_ids: list[int] | tuple[int, ...]) -> None:
+        client = self.client
+        if client is None or not post_ids:
+            return
+        members = [self._member(post_id) for post_id in post_ids]
+        try:
+            pipe = client.pipeline(transaction=False)
+            for metric in self.SORTS:
+                pipe.zrem(self._key(metric), *members)
+            for key in client.scan_iter(match=f"{self.prefix}:engagement:*:board:*"):
+                pipe.zrem(key, *members)
             pipe.execute()
         except (ValkeyError, OSError) as exc:
             self.error = str(exc)
