@@ -1321,7 +1321,7 @@ class Store:
             "type": str(row["content_type"]),
             "bytes": int(row["nbytes"]),
             "sha256": str(row["sha256"]),
-            "uploaded_at": round(float(row["created"]), 6),
+            "uploaded_at": float(row["created"]),
             "downloads": int(row["downloads"]),
             "uploader": {
                 "name": uploader_name,
