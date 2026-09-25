@@ -4,6 +4,7 @@ import contextlib
 import io
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -135,19 +136,16 @@ class SSHAccessTests(unittest.TestCase):
 
     def test_expired_key_does_not_authenticate(self) -> None:
         key = public_key()
-        item = self.store.add(
+        expires = int(time.time()) + 60
+        self.store.add(
             owner_id=self.owner,
             public_key=key,
             name="short-lived",
-            expires=int(__import__("time").time()) + 60,
+            expires=expires,
         )
         key_type, key_data = key.split()
-        with self.store._lock, self.store._conn:
-            self.store._conn.execute(
-                "UPDATE ssh_authorized_keys SET expires = ? WHERE id = ?",
-                (1, item["id"]),
-            )
-        self.assertIsNone(self.store.lookup(key_type, key_data))
+        with patch("msgd.sshaccess.time.time", return_value=expires + 1):
+            self.assertIsNone(self.store.lookup(key_type, key_data))
 
     def test_access_payload_is_deterministic(self) -> None:
         kwargs = {
