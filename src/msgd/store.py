@@ -4015,19 +4015,43 @@ class Store:
         if author_id:
             where.append("author_id = ?")
             params.append(author_id)
+        scan_search = False
         if search:
-            where.append("(title LIKE ? OR body LIKE ?)")
-            params.extend((f"%{search}%", f"%{search}%"))
+            if self._fts_available and len(search) >= 3:
+                where.append(
+                    "(title LIKE ? OR EXISTS "
+                    "(SELECT 1 FROM post_fts f WHERE f.rowid = posts.id AND post_fts MATCH ?))"
+                )
+                params.extend((f"%{search}%", self._fts_query(search)))
+            elif self._fts_available:
+                scan_search = True
+            else:
+                where.append("(title LIKE ? OR body LIKE ?)")
+                params.extend((f"%{search}%", f"%{search}%"))
 
         sql = self._select_posts()
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY id " + ("ASC" if order == "asc" else "DESC") + " LIMIT ?"
-        params.append(max(1, min(limit, self.cfg.max_limit + 1)))
+        sql_limit = (
+            self.cfg.max_limit + 1
+            if scan_search
+            else max(1, min(limit, self.cfg.max_limit + 1))
+        )
+        params.append(sql_limit)
 
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
-        return [post for row in rows if (post := self._row(row)) is not None]
+        posts = [post for row in rows if (post := self._row(row)) is not None]
+        if scan_search and search:
+            needle = search.casefold()
+            posts = [
+                post
+                for post in posts
+                if needle in post.title.casefold() or needle in post.body.casefold()
+            ]
+            posts = posts[: max(1, min(limit, self.cfg.max_limit + 1))]
+        return posts
 
     def _list_posts_by_timestamp(
         self,
@@ -4522,14 +4546,35 @@ class Store:
         elif spec.has_files is False:
             where.append("NOT EXISTS (SELECT 1 FROM attachments a WHERE a.post_id = p.id)")
 
+        needs_text_scan = False
         for term in spec.terms:
-            where.append("(p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')")
             needle = self._like_pattern(term)
-            params.extend((needle, needle))
+            if self._fts_available and len(term) >= 3:
+                where.append(
+                    "(p.title LIKE ? ESCAPE '\\' OR EXISTS "
+                    "(SELECT 1 FROM post_fts f WHERE f.rowid = p.id AND post_fts MATCH ?))"
+                )
+                params.extend((needle, self._fts_query(term)))
+            elif self._fts_available:
+                needs_text_scan = True
+            else:
+                where.append("(p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')")
+                params.extend((needle, needle))
         for term in spec.excluded_terms:
-            where.append("NOT (p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')")
             needle = self._like_pattern(term)
-            params.extend((needle, needle))
+            if self._fts_available and len(term) >= 3:
+                where.append(
+                    "NOT (p.title LIKE ? ESCAPE '\\' OR EXISTS "
+                    "(SELECT 1 FROM post_fts f WHERE f.rowid = p.id AND post_fts MATCH ?))"
+                )
+                params.extend((needle, self._fts_query(term)))
+            elif self._fts_available:
+                needs_text_scan = True
+            else:
+                where.append(
+                    "NOT (p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')"
+                )
+                params.extend((needle, needle))
         for term in spec.title_terms:
             where.append("p.title LIKE ? ESCAPE '\\'")
             params.append(self._like_pattern(term))
@@ -4551,8 +4596,9 @@ class Store:
             params.append(root["root_id"])
 
         base = (
-            "SELECT p.id, p.board, p.seq, p.name, p.title, p.body, p.created, p.updated, "
-            "p.nbytes, p.author_key, p.author_id, p.actor_key, p.actor_id, p.signature, "
+            "SELECT p.id, p.board, p.seq, p.name, p.title, p.body, p.body_oid, "
+            "p.content_commit, p.created, p.updated, p.nbytes, p.author_key, p.author_id, "
+            "p.actor_key, p.actor_id, p.signature, "
             "p.sig_version, p.sig_nonce, p.sig_issued, p.reply_to, p.system, p.custody_id "
             "FROM posts p"
         )
@@ -4560,7 +4606,7 @@ class Store:
             base += " WHERE " + " AND ".join(where)
         base += " ORDER BY p.id " + ("ASC" if spec.order == "asc" else "DESC")
 
-        if not dynamic_auth:
+        if not dynamic_auth and not needs_text_scan:
             with self._lock:
                 rows = self._conn.execute(base + " LIMIT ?", [*params, limit + 1]).fetchall()
             posts = [post for row in rows if (post := self._row(row)) is not None]
@@ -4584,6 +4630,17 @@ class Store:
             for row in rows:
                 post = self._row(row)
                 if post is None:
+                    continue
+                if needs_text_scan:
+                    haystack = (post.title + "\n" + post.body).casefold()
+                    if any(term.casefold() not in haystack for term in spec.terms):
+                        continue
+                    if any(term.casefold() in haystack for term in spec.excluded_terms):
+                        continue
+                if not dynamic_auth:
+                    collected.append(post)
+                    if len(collected) > limit:
+                        break
                     continue
                 status = self.post_authentication(post)["status"]
                 if spec.auth == "certified" and status == "certified":
