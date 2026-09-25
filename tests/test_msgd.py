@@ -771,6 +771,121 @@ class ServerCase(unittest.TestCase):
             ["root", ca_serial, child_serial],
         )
 
+    def test_subject_can_hold_certificates_from_multiple_cas(self) -> None:
+        ca_posts = Ed25519PrivateKey.generate()
+        ca_web = Ed25519PrivateKey.generate()
+        ca_posts_id = public_identity_for_test(ca_posts)
+        ca_web_id = public_identity_for_test(ca_web)
+
+        ca_posts_serial = self.issue(
+            self.root_key,
+            ca_posts,
+            grants=[
+                {
+                    "topic": "main",
+                    "actions": ["post.create", "cert.issue", "cert.revoke"],
+                }
+            ],
+            delegate=True,
+        )
+        ca_web_serial = self.issue(
+            self.root_key,
+            ca_web,
+            grants=[
+                {
+                    "topic": "*",
+                    "actions": ["web.write", "cert.issue", "cert.revoke"],
+                }
+            ],
+            delegate=True,
+        )
+
+        member = Ed25519PrivateKey.generate()
+        member_id = public_identity_for_test(member)
+        posts_serial = self.issue(
+            ca_posts,
+            member,
+            issuer_serial=ca_posts_serial,
+            grants=[{"topic": "main", "actions": ["post.create"]}],
+        )
+        web_serial = self.issue(
+            ca_web,
+            member,
+            issuer_serial=ca_web_serial,
+            grants=[{"topic": "*", "actions": ["web.write"]}],
+        )
+
+        certification = self.server.board.store.certification(member_id)
+        self.assertTrue(certification["certified"])
+        self.assertEqual(certification["active_certificates"], 2)
+        self.assertEqual(certification["active_issuer_count"], 2)
+        self.assertEqual(
+            set(certification["active_issuers"]),
+            {ca_posts_id, ca_web_id},
+        )
+        self.assertEqual(
+            {item["serial"] for item in certification["certificates"]},
+            {posts_serial, web_serial},
+        )
+        self.assertEqual(
+            self.server.board.store.permissions_for(member_id, "main"),
+            {"post.create", "web.write"},
+        )
+
+        status, body = self.c.get("/_cert", subject=member_id)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            {item["serial"] for item in json.loads(body)},
+            {posts_serial, web_serial},
+        )
+
+        status, body = self.signed_revoke(self.root_key, posts_serial)
+        self.assertEqual(status, 200, body)
+        certification = self.server.board.store.certification(member_id)
+        self.assertTrue(certification["certified"])
+        self.assertEqual(certification["active_certificates"], 1)
+        self.assertEqual(certification["active_issuer_count"], 1)
+        self.assertEqual(certification["active_issuers"], [ca_web_id])
+        self.assertEqual(
+            self.server.board.store.permissions_for(member_id, "main"),
+            {"web.write"},
+        )
+
+    def test_ca_revoke_authority_is_bound_to_the_issuing_certificate(self) -> None:
+        ca = Ed25519PrivateKey.generate()
+        issue_serial = self.issue(
+            self.root_key,
+            ca,
+            grants=[
+                {
+                    "topic": "main",
+                    "actions": ["post.create", "cert.issue"],
+                }
+            ],
+            delegate=True,
+        )
+        self.issue(
+            self.root_key,
+            ca,
+            grants=[{"topic": "main", "actions": ["cert.revoke"]}],
+        )
+
+        member = Ed25519PrivateKey.generate()
+        child_serial = self.issue(
+            ca,
+            member,
+            issuer_serial=issue_serial,
+            grants=[{"topic": "main", "actions": ["post.create"]}],
+        )
+
+        self.assertIn(
+            "cert.revoke",
+            self.server.board.store.permissions_for(public_identity_for_test(ca), "main"),
+        )
+        status, body = self.signed_revoke(ca, child_serial)
+        self.assertEqual(status, 403, body)
+        self.assertTrue(self.server.board.store.certificate_active(child_serial))
+
     def test_revoked_parent_downgrades_authentication_marker(self) -> None:
         ca = Ed25519PrivateKey.generate()
         ca_serial = self.issue(
