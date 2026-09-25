@@ -1423,6 +1423,7 @@ def render_rss(
         f"    <description>{_xml_text(channel_description)}</description>",
         f"    <lastBuildDate>{formatdate(last_ts, usegmt=True)}</lastBuildDate>",
         f'    <atom:link href="{_xml_text(feed_link)}" rel="self" type="application/rss+xml"/>',
+        f'    <atom:link href="{_xml_text(base + "/hub")}" rel="hub"/>',
         "    <generator>msgd</generator>",
     ]
 
