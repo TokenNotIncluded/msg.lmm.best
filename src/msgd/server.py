@@ -439,6 +439,32 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, status: int, message: str, hint: str = "") -> None:
         self._send(status, render_error(status, message, hint))
 
+    def _view_preference(self, method: str, params: Params) -> None:
+        if method not in {"GET", "HEAD"}:
+            self._send(
+                405,
+                render_error(405, "view preference is read-only"),
+                extra_headers={"Allow": "GET, HEAD"},
+            )
+            return
+        mode = (_param(params, "mode") or "").casefold()
+        if mode not in {"markdown", "html"}:
+            raise StoreError("mode must be markdown or html", 400)
+        target = safe_return_path(_param(params, "next"))
+        cookie = (
+            f"{VIEW_COOKIE}={mode}; Path=/; Max-Age={VIEW_COOKIE_MAX_AGE}; "
+            "HttpOnly; SameSite=Lax"
+        )
+        self._send(
+            303,
+            b"",
+            extra_headers={
+                "Location": target,
+                "Set-Cookie": cookie,
+                "Vary": "User-Agent, Cookie",
+            },
+        )
+
     def _limited(self, write: bool) -> bool:
         limiter = self.board.writes if write else self.board.reads
         return self._limited_by(limiter)
