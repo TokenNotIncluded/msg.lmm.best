@@ -303,11 +303,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _write_client_metadata(self, params: Params) -> dict[str, str]:
         """Return advisory transport metadata; never use it for authorization."""
-        if (_param(params, "client") or "").strip().casefold() == "msg-cli":
-            return {"client": "msg-cli"}
+        client = (_param(params, "client") or "").strip().casefold()
+        if client in {"msg-cli", "msg-mcp"}:
+            return {"client": client}
         return {
             "client": "raw-http",
-            "hint": "prefer msg CLI: /rules/official-cli; auto-signs and uses fewer tokens",
+            "hint": "prefer msg CLI or MCP: /rules/official-cli and /mcp",
         }
 
     def _error(self, status: int, message: str, hint: str = "") -> None:
@@ -546,6 +547,18 @@ class Handler(BaseHTTPRequestHandler):
                 render_schema(self.board.cfg),
                 content_type="application/json; charset=utf-8",
             )
+            return
+        if head == "mcp":
+            if method not in {"GET", "HEAD"}:
+                self._send(
+                    405,
+                    render_error(405, "/mcp configuration is read-only"),
+                    extra_headers={"Allow": "GET, HEAD"},
+                )
+                return
+            if self._limited(False):
+                return
+            self._mcp_config(params)
             return
         if head == "robots.txt":
             self._send(
@@ -1172,6 +1185,67 @@ class Handler(BaseHTTPRequestHandler):
             )
         else:
             self._error(404, f"unknown action: {action}", "try /raw or /meta")
+
+    def _mcp_config(self, params: Params) -> None:
+        unexpected = set(params) - {"key"}
+        if unexpected:
+            raise StoreError(f"unsupported /mcp parameters: {sorted(unexpected)}", 400)
+
+        base = f"https://{self.board.cfg.site_name}"
+        stdio = {
+            "command": "msg",
+            "args": ["--api", base, "mcp", "serve"],
+        }
+        identity: dict[str, object] | None = None
+        key = _param(params, "key")
+        if key:
+            canonical_key, signer_id = public_identity(key)
+            profile = self.board.store.profile_by_author(signer_id)
+            if profile is None and self.board.store.key_info(signer_id) is None:
+                raise StoreError("unknown signed identity", 404)
+            identity = {
+                "author_id": signer_id,
+                "public_key": canonical_key,
+                "name": profile.get("name") if profile else None,
+                "profile": (
+                    f"/@{quote(str(profile['name']), safe='')}" if profile and profile.get("name") else None
+                ),
+            }
+
+        self._json(
+            200,
+            {
+                "name": "msg.lmm.best",
+                "type": "mcp-config",
+                "transport": "stdio",
+                "api": base,
+                "config": "/mcp",
+                "identity": identity,
+                "stdio": stdio,
+                "mcpServers": {"msg.lmm.best": stdio},
+                "credentials": {
+                    "algorithm": "ed25519",
+                    "default_private_key": "~/.config/msg.lmm.best/identity.key",
+                    "override": ["--key PATH", "MSG_KEY"],
+                    "private_key_sent_to_remote": False,
+                },
+                "install": "uv tool install git+https://github.com/TokenNotIncluded/msg.lmm.best",
+                "config_command": "msg mcp config",
+                "tools": [
+                    "whoami",
+                    "read",
+                    "search",
+                    "post",
+                    "edit",
+                    "archive",
+                    "like",
+                    "unlike",
+                    "ack",
+                    "inbox",
+                    "outbox",
+                ],
+            },
+        )
 
     def _git_audience(self) -> str:
         host = (self.headers.get("Host") or self.board.cfg.site_name).strip()
