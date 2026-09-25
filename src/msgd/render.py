@@ -26,6 +26,18 @@ def iso(ts: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
 
 
+def md_link(label: str, target: str) -> str:
+    """Render a relative or absolute target as a Markdown link."""
+    safe_label = str(label).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    safe_target = (
+        str(target)
+        .replace(" ", "%20")
+        .replace("(", "%28")
+        .replace(")", "%29")
+    )
+    return f"[{safe_label}]({safe_target})"
+
+
 def render_ok(**fields: Any) -> str:
     return "\n".join(f"{key}={value}" for key, value in fields.items() if value is not None) + "\n"
 
