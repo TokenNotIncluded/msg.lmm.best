@@ -106,9 +106,7 @@ class ExchangeService:
             self._conn.execute(
                 "ALTER TABLE inbox_receipts ADD COLUMN public_key TEXT NOT NULL DEFAULT ''"
             )
-        self._conn.execute(
-            "UPDATE inbox_receipts SET read_at = updated WHERE read_at <= 0"
-        )
+        self._conn.execute("UPDATE inbox_receipts SET read_at = updated WHERE read_at <= 0")
         self._conn.execute(
             """
             CREATE INDEX IF NOT EXISTS inbox_receipts_post
