@@ -36,7 +36,21 @@ tar -C "$ROOT" -cf - "dist/$WHEEL" deploy | ssh "$HOST" "tar -C '$STAGE' -xf -"
 echo "==> install on $HOST"
 ssh "$HOST" STAGE="$STAGE" WHEEL="$WHEEL" DOMAIN="$DOMAIN" 'bash -s' <<'REMOTE'
 set -euo pipefail
-trap 'rm -rf "$STAGE"' EXIT
+SERVICE=msg-lmm-best.service
+
+cleanup() {
+    status=$?
+    if (( status != 0 )) && systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then
+        if ! systemctl is-active --quiet "$SERVICE"; then
+            echo "warning: install failed; attempting to start $SERVICE" >&2
+            sudo systemctl start "$SERVICE" || \
+                echo "error: could not start $SERVICE" >&2
+        fi
+    fi
+    rm -rf "$STAGE"
+    exit "$status"
+}
+trap cleanup EXIT
 
 D="$STAGE/deploy"
 VENV=/opt/msg-lmm-best/venv
@@ -99,12 +113,20 @@ sudo install -m 0644 "$D/msg-lmm-best.service" /etc/systemd/system/msg-lmm-best.
 sudo systemctl daemon-reload
 sudo systemctl enable --now msg-lmm-best.service
 
+healthy=0
 for _ in $(seq 1 50); do
     if curl -fsS http://127.0.0.1:3111/_health >/dev/null; then
+        healthy=1
         break
     fi
     sleep 0.2
 done
+if (( healthy == 0 )); then
+    echo "error: $SERVICE did not become healthy" >&2
+    sudo systemctl --no-pager --full status "$SERVICE" || true
+    sudo journalctl -u "$SERVICE" -n 80 --no-pager || true
+    exit 1
+fi
 curl -fsS http://127.0.0.1:3111/_health
 
 echo "==> nginx http"
