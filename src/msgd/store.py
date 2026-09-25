@@ -50,6 +50,8 @@ KEYSTORE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 KEYSTORE_FORMAT = "libsodium-sealed-box-v1"
 KEYSTORE_MAX_ENTRY_BYTES = 64 * 1024
 KEYSTORE_MAX_TOTAL_BYTES = 1024 * 1024
+SYSTEM_LOCKED_TOPICS = frozenset({"ca", "custody", "guest"})
+PERSISTENT_TOPICS = frozenset({"main", "meta"}) | SYSTEM_LOCKED_TOPICS
 
 LEGACY_ANONYMOUS_PERMISSION_BITS = {
     "post.create": 1,
@@ -1564,7 +1566,7 @@ class Store:
                 "locked": locked,
             }
 
-        if board in {"ca", "custody"}:
+        if board in SYSTEM_LOCKED_TOPICS - {"guest"}:
             return result((), (), version=0, updated=None, locked=True)
         if board == "guest":
             return result(GUEST_ANONYMOUS, (), version=0, updated=None, locked=True)
@@ -1592,7 +1594,7 @@ class Store:
         signed: tuple[str, ...] | None,
         version: int,
     ) -> dict[str, Any]:
-        if board in {"ca", "custody", "guest"}:
+        if board in SYSTEM_LOCKED_TOPICS:
             raise StoreError(f"/{board} policy is system-managed", 403)
         if not valid_board_name(board):
             raise StoreError(f"invalid board name: {board!r}", 400)
@@ -3756,9 +3758,12 @@ class Store:
         return post
 
     def _prune_empty_boards(self) -> None:
+        protected = sorted(PERSISTENT_TOPICS | self.cfg.certificate_only_topic_set)
+        placeholders = ",".join("?" for _ in protected)
         self._conn.execute(
-            "DELETE FROM boards WHERE name NOT IN ('main', 'meta', 'guest', 'custody', 'ca', 'store', 'ads')"
-            " AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.board = boards.name)"
+            f"DELETE FROM boards WHERE name NOT IN ({placeholders})"
+            " AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.board = boards.name)",
+            protected,
         )
 
     def comment_count(self, post_id: int) -> int:

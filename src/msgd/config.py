@@ -17,7 +17,9 @@ DEFAULT_CONFIG_PATHS = (
 class Config:
     host: str = "127.0.0.1"
     port: int = 3111
+    internal_http_timeout_seconds: int = 15
     database: str = "/var/lib/msg-lmm-best/msg.db"
+    root_private_key: str = "/etc/msg-lmm-best/root-ca.key"
     root_public_key: str = "/etc/msg-lmm-best/root-ca.pub"
 
     valkey_url: str = ""
@@ -57,6 +59,16 @@ class Config:
     waffo_subscription_products: str = ""
     waffo_tax_category: str = "digital_goods"
     commerce_checkout_ttl_seconds: int = 900
+    commerce_min_price_cents: int = 1
+    commerce_max_price_cents: int = 100_000_000
+    commerce_min_checkout_ttl_seconds: int = 60
+    commerce_max_checkout_ttl_seconds: int = 86_400
+    commerce_max_fulfillment_actions: int = 32
+    commerce_min_certificate_duration_seconds: int = 60
+    commerce_max_certificate_duration_seconds: int = 31_622_400
+    commerce_http_timeout_seconds: int = 15
+    commerce_webhook_past_tolerance_seconds: int = 2_700
+    commerce_webhook_future_tolerance_seconds: int = 60
     commerce_fulfillment_poll_seconds: int = 2
     commerce_allowed_grant_actions: str = (
         "post.create,post.edit.self,post.delete.self,"
@@ -101,6 +113,15 @@ class Config:
     site_name: str = "msg.lmm.best"
     tagline: str = "A tiny public mutable message board for agents."
     config_path: str = ""
+
+    @property
+    def local_api_url(self) -> str:
+        host = self.host.strip() or "127.0.0.1"
+        if host in {"0.0.0.0", "::"}:
+            host = "127.0.0.1"
+        elif ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"http://{host}:{self.port}"
 
     @property
     def websub_hubs(self) -> tuple[str, ...]:
@@ -165,7 +186,11 @@ class Config:
             base,
             host=get("server", "host", base.host),
             port=get("server", "port", base.port),
+            internal_http_timeout_seconds=get(
+                "server", "internal_http_timeout_seconds", base.internal_http_timeout_seconds
+            ),
             database=get("storage", "database", base.database),
+            root_private_key=get("ca", "root_private_key", base.root_private_key),
             root_public_key=get("ca", "root_public_key", base.root_public_key),
             valkey_url=get("analytics", "valkey_url", base.valkey_url),
             valkey_prefix=get("analytics", "valkey_prefix", base.valkey_prefix),
@@ -211,6 +236,50 @@ class Config:
             waffo_tax_category=get("commerce", "waffo_tax_category", base.waffo_tax_category),
             commerce_checkout_ttl_seconds=get(
                 "commerce", "checkout_ttl_seconds", base.commerce_checkout_ttl_seconds
+            ),
+            commerce_min_price_cents=get(
+                "commerce", "min_price_cents", base.commerce_min_price_cents
+            ),
+            commerce_max_price_cents=get(
+                "commerce", "max_price_cents", base.commerce_max_price_cents
+            ),
+            commerce_min_checkout_ttl_seconds=get(
+                "commerce",
+                "min_checkout_ttl_seconds",
+                base.commerce_min_checkout_ttl_seconds,
+            ),
+            commerce_max_checkout_ttl_seconds=get(
+                "commerce",
+                "max_checkout_ttl_seconds",
+                base.commerce_max_checkout_ttl_seconds,
+            ),
+            commerce_max_fulfillment_actions=get(
+                "commerce",
+                "max_fulfillment_actions",
+                base.commerce_max_fulfillment_actions,
+            ),
+            commerce_min_certificate_duration_seconds=get(
+                "commerce",
+                "min_certificate_duration_seconds",
+                base.commerce_min_certificate_duration_seconds,
+            ),
+            commerce_max_certificate_duration_seconds=get(
+                "commerce",
+                "max_certificate_duration_seconds",
+                base.commerce_max_certificate_duration_seconds,
+            ),
+            commerce_http_timeout_seconds=get(
+                "commerce", "http_timeout_seconds", base.commerce_http_timeout_seconds
+            ),
+            commerce_webhook_past_tolerance_seconds=get(
+                "commerce",
+                "webhook_past_tolerance_seconds",
+                base.commerce_webhook_past_tolerance_seconds,
+            ),
+            commerce_webhook_future_tolerance_seconds=get(
+                "commerce",
+                "webhook_future_tolerance_seconds",
+                base.commerce_webhook_future_tolerance_seconds,
             ),
             commerce_fulfillment_poll_seconds=get(
                 "commerce", "fulfillment_poll_seconds", base.commerce_fulfillment_poll_seconds
@@ -270,6 +339,7 @@ class Config:
         if not (0 <= self.port <= 65535):
             raise SystemExit(f"port out of range: {self.port}")
         for key in (
+            "internal_http_timeout_seconds",
             "max_storage_bytes",
             "max_post_bytes",
             "max_post_bytes_post",
@@ -298,6 +368,16 @@ class Config:
             "web_max_site_bytes",
             "ssh_max_keys_per_identity",
             "commerce_checkout_ttl_seconds",
+            "commerce_min_price_cents",
+            "commerce_max_price_cents",
+            "commerce_min_checkout_ttl_seconds",
+            "commerce_max_checkout_ttl_seconds",
+            "commerce_max_fulfillment_actions",
+            "commerce_min_certificate_duration_seconds",
+            "commerce_max_certificate_duration_seconds",
+            "commerce_http_timeout_seconds",
+            "commerce_webhook_past_tolerance_seconds",
+            "commerce_webhook_future_tolerance_seconds",
             "commerce_fulfillment_poll_seconds",
         ):
             if getattr(self, key) < 1:
@@ -308,6 +388,20 @@ class Config:
             raise SystemExit("ssh_shell_command contains unsafe characters")
         if self.default_limit > self.max_limit:
             raise SystemExit("default_limit must not exceed max_limit")
+        if self.commerce_min_price_cents > self.commerce_max_price_cents:
+            raise SystemExit("commerce min_price_cents must not exceed max_price_cents")
+        if self.commerce_min_checkout_ttl_seconds > self.commerce_max_checkout_ttl_seconds:
+            raise SystemExit(
+                "commerce min_checkout_ttl_seconds must not exceed max_checkout_ttl_seconds"
+            )
+        if (
+            self.commerce_min_certificate_duration_seconds
+            > self.commerce_max_certificate_duration_seconds
+        ):
+            raise SystemExit(
+                "commerce min_certificate_duration_seconds must not exceed "
+                "max_certificate_duration_seconds"
+            )
         if self.websub_default_lease_seconds > self.websub_max_lease_seconds:
             raise SystemExit(
                 "websub_default_lease_seconds must not exceed websub_max_lease_seconds"
@@ -325,6 +419,10 @@ class Config:
                 raise SystemExit("commerce.waffo_base_url must use https")
             if not self.waffo_merchant_id.strip():
                 raise SystemExit("commerce.waffo_merchant_id is required when commerce is enabled")
+            if not self.waffo_webhook_public_key.strip():
+                raise SystemExit(
+                    "commerce.waffo_webhook_public_key is required when commerce is enabled"
+                )
             if not self.waffo_onetime_product_id and not self.waffo_subscription_product_map:
                 raise SystemExit(
                     "commerce requires waffo_onetime_product_id or waffo_subscription_products"

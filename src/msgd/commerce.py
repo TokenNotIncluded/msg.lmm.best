@@ -32,44 +32,26 @@ from msgd.store import Post, Store, StoreError
 from msgd.templates import TopicTemplateService
 
 WAFFO_CHECKOUT_PATH = "/v1/actions/checkout/create-session"
-WAFFO_WEBHOOK_PAST_TOLERANCE_MS = 45 * 60 * 1000
-WAFFO_WEBHOOK_FUTURE_TOLERANCE_MS = 60 * 1000
-
-WAFFO_TEST_WEBHOOK_KEY = """-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxnmRY6yMMA3lVqmAU6ZG
-b1sjL/+r/z6E+ZjkXaDAKiqOhk9rpazni0bNsGXwmftTPk9jy2wn+j6JHODD/WH/
-SCnSfvKkLIjy4Hk7BuCgB174C0ydan7J+KgXLkOwgCAxxB68t2tezldwo74ZpXgn
-F49opzMvQ9prEwIAWOE+kV9iK6gx/AckSMtHIHpUesoPDkldpmFHlB2qpf1vsFTZ
-5kD6DmGl+2GIVK01aChy2lk8pLv0yUMu18v44sLkO5M44TkGPJD9qG09wrvVG2wp
-OTVCn1n5pP8P+HRLcgzbUB3OlZVfdFurn6EZwtyL4ZD9kdkQ4EZE/9inKcp3c1h4
-xwIDAQAB
------END PUBLIC KEY-----
-"""
-
-WAFFO_PROD_WEBHOOK_KEY = """-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAz+xApdTIb4ua+DgZKQ54
-iBsD82ybyhGCLRETONW4Jgbb3A8DUM1LqBk6r/CmTOCHqLalTQHNigvP3R5zkDNX
-iRJz6gA4MJ/+8K0+mnEE2RISQzN+Qu65TNd6svb+INm/kMaftY4uIXr6y6kchtTJ
-dwnQhcKdAL2v7h7IFnkVelQsKxDdb2PqX8xX/qwd01iXvMcpCCaXovUwZsxH2QN5
-ZKBTseJivbhUeyJCco4fdUyxOMHe2ybCVhyvim2uxAl1nkvL5L8RCWMCAV55LLo0
-9OhmLahz/DYNu13YLVP6dvIT09ZFBYU6Owj1NxdinTynlJCFS9VYwBgmftosSE1U
-dwIDAQAB
------END PUBLIC KEY-----
-"""
 
 
-def _money_cents(value: object) -> int:
+def _money_cents(
+    value: object,
+    *,
+    field: str,
+    min_cents: int,
+    max_cents: int,
+) -> int:
     if isinstance(value, bool):
-        raise StoreError("price_usd must be numeric", 400)
+        raise StoreError(f"{field} must be numeric", 400)
     try:
         amount = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     except (InvalidOperation, ValueError) as exc:
-        raise StoreError("price_usd must be a valid decimal amount", 400) from exc
-    if amount < Decimal("0.01"):
-        raise StoreError("price_usd must be at least 0.01", 400)
+        raise StoreError(f"{field} must be a valid decimal amount", 400) from exc
     cents = int(amount * 100)
-    if cents > 100_000_000_00:
-        raise StoreError("price_usd is too large", 400)
+    if cents < min_cents:
+        raise StoreError(f"{field} must be at least {_money_text(min_cents)}", 400)
+    if cents > max_cents:
+        raise StoreError(f"{field} must not exceed {_money_text(max_cents)}", 400)
     return cents
 
 
@@ -235,7 +217,12 @@ class CommerceService:
             raise StoreError("store product does not match the current /store template", 409)
         if not bool(values.get("active", True)):
             raise StoreError("store product is inactive", 409)
-        cents = _money_cents(values.get("price_usd"))
+        cents = _money_cents(
+            values.get("price_usd"),
+            field="price_usd",
+            min_cents=self.cfg.commerce_min_price_cents,
+            max_cents=self.cfg.commerce_max_price_cents,
+        )
         billing = str(values.get("billing") or "one_time").strip().lower()
         if not billing:
             raise StoreError("store product billing alias is empty", 400)
@@ -243,8 +230,21 @@ class CommerceService:
         self._normalize_fulfillment(fulfillment)
         provider_product_id = self._provider_product_id(billing)
         ttl = values.get("checkout_ttl_seconds", self.cfg.commerce_checkout_ttl_seconds)
-        if isinstance(ttl, bool) or not isinstance(ttl, int) or not (60 <= ttl <= 86_400):
-            raise StoreError("checkout_ttl_seconds must be 60..86400", 400)
+        if (
+            isinstance(ttl, bool)
+            or not isinstance(ttl, int)
+            or not (
+                self.cfg.commerce_min_checkout_ttl_seconds
+                <= ttl
+                <= self.cfg.commerce_max_checkout_ttl_seconds
+            )
+        ):
+            raise StoreError(
+                "checkout_ttl_seconds must be "
+                f"{self.cfg.commerce_min_checkout_ttl_seconds}.."
+                f"{self.cfg.commerce_max_checkout_ttl_seconds}",
+                400,
+            )
         return {
             "post": post,
             "fields": values,
@@ -271,8 +271,12 @@ class CommerceService:
     def _normalize_fulfillment(self, raw: object) -> list[dict[str, Any]]:
         if not isinstance(raw, list) or not raw:
             raise StoreError("fulfillment must be a non-empty JSON array", 400)
-        if len(raw) > 32:
-            raise StoreError("fulfillment has too many actions", 400)
+        if len(raw) > self.cfg.commerce_max_fulfillment_actions:
+            raise StoreError(
+                "fulfillment has too many actions; max="
+                f"{self.cfg.commerce_max_fulfillment_actions}",
+                400,
+            )
         result: list[dict[str, Any]] = []
         for index, item in enumerate(raw):
             if not isinstance(item, dict):
@@ -307,10 +311,16 @@ class CommerceService:
                 if duration != "period" and (
                     isinstance(duration, bool)
                     or not isinstance(duration, int)
-                    or not (60 <= duration <= 366 * 86_400)
+                    or not (
+                        self.cfg.commerce_min_certificate_duration_seconds
+                        <= duration
+                        <= self.cfg.commerce_max_certificate_duration_seconds
+                    )
                 ):
                     raise StoreError(
-                        "certificate duration must be 'period' or 60..31622400 seconds",
+                        "certificate duration must be 'period' or "
+                        f"{self.cfg.commerce_min_certificate_duration_seconds}.."
+                        f"{self.cfg.commerce_max_certificate_duration_seconds} seconds",
                         400,
                     )
                 result.append(
@@ -321,7 +331,12 @@ class CommerceService:
                     }
                 )
             elif kind == "balance":
-                cents = _money_cents(item.get("amount_usd"))
+                cents = _money_cents(
+                    item.get("amount_usd"),
+                    field="amount_usd",
+                    min_cents=self.cfg.commerce_min_price_cents,
+                    max_cents=self.cfg.commerce_max_price_cents,
+                )
                 result.append({"type": "balance", "amount_cents": cents})
             else:
                 raise StoreError(f"unsupported fulfillment type: {kind!r}", 400)
@@ -463,7 +478,10 @@ class CommerceService:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=15) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=self.cfg.commerce_http_timeout_seconds,
+            ) as response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
             try:
@@ -507,7 +525,9 @@ class CommerceService:
         except ValueError as exc:
             raise StoreError("invalid Waffo webhook timestamp", 401) from exc
         age = int(time.time() * 1000) - ts
-        if age > WAFFO_WEBHOOK_PAST_TOLERANCE_MS or age < -WAFFO_WEBHOOK_FUTURE_TOLERANCE_MS:
+        past_tolerance_ms = self.cfg.commerce_webhook_past_tolerance_seconds * 1000
+        future_tolerance_ms = self.cfg.commerce_webhook_future_tolerance_seconds * 1000
+        if age > past_tolerance_ms or age < -future_tolerance_ms:
             raise StoreError("Waffo webhook timestamp outside tolerance", 401)
         try:
             signature = base64.b64decode(signature_b64, validate=True)
@@ -515,11 +535,9 @@ class CommerceService:
             raise StoreError("invalid Waffo webhook signature encoding", 401) from exc
         signed = timestamp.encode() + b"." + payload
         configured = self.cfg.waffo_webhook_public_key.strip()
-        candidates = (
-            [_pem_or_file(configured)]
-            if configured
-            else [WAFFO_PROD_WEBHOOK_KEY.encode(), WAFFO_TEST_WEBHOOK_KEY.encode()]
-        )
+        if not configured:
+            raise StoreError("Waffo webhook public key is not configured", 503)
+        candidates = [_pem_or_file(configured)]
         verified = False
         for pem in candidates:
             try:
