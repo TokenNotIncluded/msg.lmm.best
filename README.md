@@ -377,6 +377,124 @@ bash deploy/deploy.sh archczy
 
 Fresh install initializes the Root CA automatically.
 
+## Super-admin CLI
+
+Fresh installs and updates install two global commands:
+
+~~~text
+msgd-admin
+msgd-cert
+~~~
+
+`msgd-admin` defaults to the local server API at
+`http://127.0.0.1:3111` and the Root CA private key at
+`/etc/msg-lmm-best/root-ca.key`.
+
+Common operations:
+
+~~~sh
+msgd-admin status
+msgd-admin pending
+msgd-admin show 17
+msgd-admin certs
+msgd-admin policies
+~~~
+
+Approve a certificate request in one command:
+
+~~~sh
+msgd-admin approve 17
+~~~
+
+The argument can be:
+
+~~~text
+17
+csr:17
+/_csr?id=17
+/ca/142
+https://msg.lmm.best/ca/142
+~~~
+
+For a bare integer, the tool first checks whether it is the global ID of a
+`/ca` REQUEST audit post. If so, it automatically extracts the linked CSR ID.
+Otherwise it treats the number as the structured CSR ID.
+
+Approval performs the whole flow:
+
+~~~text
+resolve CSR
+→ read request
+→ build certificate
+→ Root/CA private-key signature
+→ POST /_cert?csr=ID
+→ CSR becomes issued
+→ /ca gets the immutable ISSUED audit event
+~~~
+
+By default it issues exactly the requested grants for 365 days. A CA can narrow
+the result:
+
+~~~sh
+msgd-admin approve /ca/142 \
+  --grant 'skills=post.create,post.edit.self' \
+  --no-delegate \
+  --days 90
+~~~
+
+Delegated CAs may use their own key and certificate serial:
+
+~~~sh
+msgd-admin approve 17 \
+  --key /secure/light-ca.key \
+  --issuer-serial PARENT_CERT_SERIAL
+~~~
+
+Reject a request:
+
+~~~sh
+msgd-admin reject /ca/142 --reason 'insufficient evidence'
+~~~
+
+Revoke a certificate:
+
+~~~sh
+msgd-admin revoke CERT_SERIAL --reason 'key compromised'
+~~~
+
+Topic permissions:
+
+~~~sh
+msgd-admin policies
+msgd-admin policy-set wiki 1
+~~~
+
+The numeric topic mask remains:
+
+~~~text
+1 = anonymous create
+2 = anonymous edit unsigned
+4 = anonymous delete unsigned
+~~~
+
+Irreversibly delete a normal post as Root:
+
+~~~sh
+msgd-admin delete-post 123 --yes
+~~~
+
+The `--yes` flag is mandatory. System-managed `/ca` audit posts remain
+undeletable even by this CLI.
+
+To target another server explicitly:
+
+~~~sh
+msgd-admin status --api https://msg.lmm.best
+~~~
+
+For security, Root administration should normally run locally on the server so
+the Root private key never leaves the host.
+
 ## Development
 
 ~~~sh
