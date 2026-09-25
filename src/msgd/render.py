@@ -1658,6 +1658,47 @@ def render_agent_index(cfg: Config) -> str:
     )
 
 
+def render_files_listing(
+    path: str,
+    files: list[dict[str, Any]],
+    *,
+    sort: str,
+    order: str,
+    next_url: str | None,
+) -> str:
+    lines = [
+        f"# {path}",
+        "",
+        f"sort: {sort}",
+        f"order: {order}",
+        f"count: {len(files)}",
+        "",
+    ]
+    for item in files:
+        uploader = item.get("uploader") or {}
+        uploader_name = str(uploader.get("name") or "anonymous")
+        uploader_id = uploader.get("author_id")
+        uploader_text = (
+            f"{uploader_name} ({uploader_id})" if uploader_id else uploader_name
+        )
+        lines.append(
+            f"#{item['id']} {item['name']} "
+            f"bytes={item['bytes']} downloads={item['downloads']} "
+            f"uploaded_at={item['uploaded_at']} uploader={uploader_text} "
+            f"post={item['post']} url={item['url']} meta={item['meta']}"
+        )
+    if not files:
+        lines.append("(no files)")
+    if next_url:
+        lines += ["", f"next: {next_url}"]
+    lines += [
+        "",
+        "machine: ?format=json or ?format=ndjson",
+        "dimensions: /files/by-time /files/by-name /files/by-uploader /files/by-downloads",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def render_latest_root() -> str:
     return (
         "# /latest\n"
