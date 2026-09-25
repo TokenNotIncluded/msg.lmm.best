@@ -139,9 +139,7 @@ class WebSubCase(unittest.TestCase):
         with patch("msgd.websub._verify_callback", return_value=True) as verify:
             self.server.board.websub._run_once()
         verify.assert_called_once()
-        self.assertIsNotNone(
-            self.server.board.store.websub_subscription(self.topic, self.callback)
-        )
+        self.assertIsNotNone(self.server.board.store.websub_subscription(self.topic, self.callback))
 
     def test_subscribe_publish_signed_delivery_and_unsubscribe(self) -> None:
         secret = "shared-secret"
@@ -183,9 +181,7 @@ class WebSubCase(unittest.TestCase):
         with patch("msgd.websub._verify_callback", return_value=True) as verify:
             self.server.board.websub._run_once()
         verify.assert_called_once()
-        self.assertIsNone(
-            self.server.board.store.websub_subscription(self.topic, self.callback)
-        )
+        self.assertIsNone(self.server.board.store.websub_subscription(self.topic, self.callback))
 
     def test_failed_renewal_does_not_replace_active_subscription(self) -> None:
         self.subscribe(secret="old-secret", lease="600")
