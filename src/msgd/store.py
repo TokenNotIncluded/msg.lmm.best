@@ -1861,8 +1861,8 @@ class Store:
                 (author_id,),
             ).fetchone()
         latest_post = self._row(latest)
-        public_key = certs[0]["subject_key"] if certs else (
-            latest_post.author_key if latest_post else None
+        public_key = (
+            certs[0]["subject_key"] if certs else (latest_post.author_key if latest_post else None)
         )
         if public_key is None:
             root = self.root_info()
@@ -1878,14 +1878,10 @@ class Store:
             "aliases": [str(row["name"]) for row in aliases],
             "posts": int(stats["posts"] or 0),
             "first_seen": (
-                round(float(stats["first_seen"]), 3)
-                if stats["first_seen"] is not None
-                else None
+                round(float(stats["first_seen"]), 3) if stats["first_seen"] is not None else None
             ),
             "last_seen": (
-                round(float(stats["last_seen"]), 3)
-                if stats["last_seen"] is not None
-                else None
+                round(float(stats["last_seen"]), 3) if stats["last_seen"] is not None else None
             ),
             "certification": self.certification(author_id),
         }
