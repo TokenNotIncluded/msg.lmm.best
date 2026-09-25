@@ -260,7 +260,7 @@ class Handler(BaseHTTPRequestHandler):
         if uploads and head not in {"publish", "_signing"}:
             raise StoreError("file uploads are only accepted by /publish or /_signing", 400)
 
-        if head in {"publish", "_cert", "_revoke", "_policy"} and method == "HEAD":
+        if head in {"publish", "_cert", "_revoke", "_policy", "_csr"} and method == "HEAD" and _param(params, "action"):
             self._send(
                 405,
                 render_error(405, "HEAD cannot write"),
@@ -1024,6 +1024,11 @@ class Handler(BaseHTTPRequestHandler):
         if _truthy(_param(params, "clear_files")):
             raise StoreError("clear_files is only valid when editing", 400)
         board, reply_to = _create_context(params, store)
+        if board == "ca":
+            raise StoreError(
+                "/ca is server-managed; use /_csr, /_cert, or /_revoke",
+                403,
+            )
         body, title, name, _ = store.prepare_post(
             body=_required(params, "text"),
             title=_param(params, "title") or "",
