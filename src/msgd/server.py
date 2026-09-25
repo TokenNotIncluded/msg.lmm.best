@@ -59,14 +59,16 @@ from msgd.render import (
 )
 from msgd.search import SearchSyntaxError, parse_search_query, search_help
 from msgd.store import (
-    ANONYMOUS_PERMISSION_MASK,
+    ANONYMOUS_BASE_ACTIONS,
     RESERVED_BOARDS,
+    SIGNED_BASE_ACTIONS,
     FileInput,
     Store,
     StoreError,
     anonymous_actions,
-    anonymous_permission_mask,
+    anonymous_base_actions,
     board_name_error,
+    signed_base_actions,
     valid_author_id,
     valid_board_name,
 )
@@ -1455,7 +1457,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise StoreError(board_name_error(board), 400)
             if board == "ca":
                 raise StoreError("/ca policy is system-managed", 403)
-            anonymous = _topic_permissions(params)
+            anonymous, signed = _topic_policy_values(params)
+            if anonymous is None and signed is None:
+                raise StoreError("topic policy update requires a permission field", 400)
             version = int(store.policy(board)["version"]) + 1
             payload = request_payload(
                 action=action,
@@ -1463,6 +1467,7 @@ class Handler(BaseHTTPRequestHandler):
                 version=version,
                 board=board,
                 anonymous=anonymous,
+                signed=signed,
             )
             self._json(200, {"signer_id": signer_id, "version": version, **payload_info(payload)})
             return
@@ -1744,15 +1749,25 @@ class Handler(BaseHTTPRequestHandler):
         board = _required(params, "board")
         if board != board.lower():
             raise StoreError("channel name must be lowercase", 400)
-        anonymous_raw = _param(params, "anonymous")
-        permissions_raw = _param(params, "permissions")
-        if anonymous_raw is None and permissions_raw is None and _param(params, "sig") is None:
+        policy_fields = (
+            "anonymous",
+            "permissions",
+            "anonymous_permissions",
+            "signed",
+            "signed_permissions",
+        )
+        if (
+            all(_param(params, field) is None for field in policy_fields)
+            and _param(params, "sig") is None
+        ):
             self._json(200, self.board.store.policy(board))
             return
         if self._limited(True):
             return
 
-        anonymous = _topic_permissions(params)
+        anonymous, signed = _topic_policy_values(params)
+        if anonymous is None and signed is None:
+            raise StoreError("topic policy update requires a permission field", 400)
         key = _required(params, "key")
         sig = _required(params, "sig")
         canonical_key, signer_id = public_identity(key)
@@ -1763,11 +1778,12 @@ class Handler(BaseHTTPRequestHandler):
             version=version,
             board=board,
             anonymous=anonymous,
+            signed=signed,
         )
         auth = signed_request(canonical_key, sig, payload, version=version)
         if not self.board.store.signed_allowed(auth.signer_id, board, "topic.policy"):
             raise StoreError("certificate does not grant topic.policy", 403)
-        self._json(200, self.board.store.set_policy(board, anonymous, version))
+        self._json(200, self.board.store.set_policy(board, anonymous, signed, version))
 
     def _like(self, params: Params) -> None:
         requested = (_param(params, "action") or "like").lower()
@@ -4821,36 +4837,84 @@ def _grant_manifest(
     )
 
 
-def _topic_permissions(params: Params) -> tuple[str, ...]:
-    raw_mask = _param(params, "permissions")
-    raw_actions = _param(params, "anonymous")
+def _policy_mask(
+    raw: str,
+    *,
+    field: str,
+    decoder,
+) -> tuple[str, ...]:
+    try:
+        mask = int(raw, 10)
+    except ValueError as exc:
+        raise StoreError(f"{field} must be an integer bit mask", 400) from exc
+    try:
+        return decoder(mask)
+    except ValueError as exc:
+        raise StoreError(str(exc), 400) from exc
 
-    from_mask: tuple[str, ...] | None = None
-    if raw_mask is not None:
-        try:
-            mask = int(raw_mask, 10)
-        except ValueError as exc:
-            raise StoreError("permissions must be an integer bit mask", 400) from exc
-        if mask < 0 or mask > ANONYMOUS_PERMISSION_MASK:
-            raise StoreError(
-                f"permissions must be between 0 and {ANONYMOUS_PERMISSION_MASK}",
-                400,
-            )
-        from_mask = anonymous_actions(mask)
 
-    from_actions = _actions(raw_actions or "") if raw_actions is not None else None
-    if (
-        from_mask is not None
-        and from_actions is not None
-        and anonymous_permission_mask(from_actions) != anonymous_permission_mask(from_mask)
-    ):
-        raise StoreError("permissions and anonymous actions disagree", 400)
+def _policy_actions(
+    raw: str,
+    *,
+    field: str,
+    allowed: frozenset[str],
+) -> tuple[str, ...]:
+    actions = _actions(raw)
+    invalid = set(actions) - allowed
+    if invalid:
+        raise StoreError(f"{field} contains unsupported actions: {sorted(invalid)}", 400)
+    return actions
 
-    if from_mask is not None:
-        return from_mask
-    if from_actions is not None:
-        return from_actions
-    return ()
+
+def _topic_policy_values(
+    params: Params,
+) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
+    legacy_raw = _param(params, "permissions")
+    anonymous_mask_raw = _param(params, "anonymous_permissions")
+    anonymous_actions_raw = _param(params, "anonymous")
+    signed_mask_raw = _param(params, "signed_permissions")
+    signed_actions_raw = _param(params, "signed")
+
+    anonymous: tuple[str, ...] | None = None
+    if legacy_raw is not None:
+        anonymous = _policy_mask(legacy_raw, field="permissions", decoder=anonymous_actions)
+    if anonymous_mask_raw is not None:
+        decoded = _policy_mask(
+            anonymous_mask_raw,
+            field="anonymous_permissions",
+            decoder=anonymous_base_actions,
+        )
+        if anonymous is not None and set(anonymous) != set(decoded):
+            raise StoreError("permissions and anonymous_permissions disagree", 400)
+        anonymous = decoded
+    if anonymous_actions_raw is not None:
+        decoded = _policy_actions(
+            anonymous_actions_raw,
+            field="anonymous",
+            allowed=ANONYMOUS_BASE_ACTIONS,
+        )
+        if anonymous is not None and set(anonymous) != set(decoded):
+            raise StoreError("anonymous policy fields disagree", 400)
+        anonymous = decoded
+
+    signed: tuple[str, ...] | None = None
+    if signed_mask_raw is not None:
+        signed = _policy_mask(
+            signed_mask_raw,
+            field="signed_permissions",
+            decoder=signed_base_actions,
+        )
+    if signed_actions_raw is not None:
+        decoded = _policy_actions(
+            signed_actions_raw,
+            field="signed",
+            allowed=SIGNED_BASE_ACTIONS,
+        )
+        if signed is not None and set(signed) != set(decoded):
+            raise StoreError("signed policy fields disagree", 400)
+        signed = decoded
+
+    return anonymous, signed
 
 
 def _actions(value: str) -> tuple[str, ...]:

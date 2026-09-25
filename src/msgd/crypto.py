@@ -111,7 +111,8 @@ def request_payload(
     name: str = "",
     title: str = "",
     body: str = "",
-    anonymous: tuple[str, ...] = (),
+    anonymous: tuple[str, ...] | None = None,
+    signed: tuple[str, ...] | None = None,
     serial: str = "",
     files: tuple[dict[str, object], ...] = (),
     reply_to: int | None = None,
@@ -190,10 +191,11 @@ def request_payload(
         if action == "post.purge":
             fields.append(("reason", reason))
     elif action == "topic.policy":
-        fields += [
-            ("board", board),
-            ("anonymous", ",".join(sorted(anonymous))),
-        ]
+        fields.append(("board", board))
+        if anonymous is not None:
+            fields.append(("anonymous", ",".join(sorted(anonymous))))
+        if signed is not None:
+            fields.append(("signed", ",".join(sorted(signed))))
     elif action == "cert.revoke":
         if not SERIAL_RE.fullmatch(serial):
             raise SignatureError("invalid certificate serial")

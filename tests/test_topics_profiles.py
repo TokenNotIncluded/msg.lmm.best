@@ -335,6 +335,12 @@ class TopicsProfilesCase(unittest.TestCase):
         self.assertEqual(status, 200, search_body)
         self.assertIn(f"#{post_id} ", search_body)
 
+        self.server.board.store.set_policy(
+            "main",
+            ("post.create", "post.edit.any", "post.delete.any"),
+            None,
+            1,
+        )
         status, edit_body = self.c.get(
             "/publish",
             edit=str(post_id),

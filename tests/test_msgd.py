@@ -480,6 +480,7 @@ class ServerCase(unittest.TestCase):
         self.assertIn(f"#{first} /main/{first}", by_reply)
         self.assertIn("replies=1", by_reply)
 
+        self.assertEqual(self.set_policy_bits(self.root_key, "main", 7)[0], 200)
         status, edit_body = self.c.get("/publish", edit=str(first), text="first")
         self.assertEqual(status, 200, edit_body)
         status, by_updated = self.c.get("/index/by-updated")
@@ -578,6 +579,7 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(latest_post)["target"], f"/main/{file_post}")
 
+        self.assertEqual(self.set_policy_bits(self.root_key, "alpha", 7)[0], 200)
         status, edit_body = self.c.get("/publish", edit=str(board_post), text="x")
         self.assertEqual(status, 200, edit_body)
         status, latest_update = self.c.get("/latest/update", format="json")
@@ -630,7 +632,8 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("/rss.xml", root_headers.get("Link", ""))
 
-    def test_unsigned_mode_remains_public(self) -> None:
+    def test_unsigned_mode_remains_public_when_topic_allows_mutation(self) -> None:
+        self.assertEqual(self.set_policy_bits(self.root_key, "main", 7)[0], 200)
         pid = self.publish("one")
         self.assertEqual(self.c.get("/publish", edit=str(pid), text="two")[0], 200)
         self.assertEqual(self.c.get(f"/main/{pid}/raw")[1], "two")
@@ -879,9 +882,13 @@ class ServerCase(unittest.TestCase):
             nonce=info["nonce"],
             issued=str(info["issued"]),
         )
-        self.assertEqual(status, 403)
+        self.assertEqual(status, 201)
+        meta = json.loads(
+            self.c.get("/main/" + str(self.server.board.store.stats()["latest_id"]) + "/meta")[1]
+        )
+        self.assertEqual(meta["authentication"]["status"], "signed-inactive")
 
-    def test_revocation_invalidates_descendant_permissions(self) -> None:
+    def test_revocation_removes_certificate_grants_but_keeps_signed_base(self) -> None:
         ca = Ed25519PrivateKey.generate()
         serial = self.issue(
             self.root_key,
@@ -907,7 +914,9 @@ class ServerCase(unittest.TestCase):
         status, _ = self.signed_revoke(self.root_key, serial)
         self.assertEqual(status, 200)
         status, _ = self.signed_edit(member, pid, "after")
-        self.assertEqual(status, 403)
+        self.assertEqual(status, 200)
+        meta = json.loads(self.c.get(f"/main/{pid}/meta")[1])
+        self.assertEqual(meta["authentication"]["status"], "signed-inactive")
 
     def test_ca_workflow_create_issue_revoke_and_audit(self) -> None:
         applicant = Ed25519PrivateKey.generate()
@@ -1061,13 +1070,15 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status, 200, body)
         policy = json.loads(body)
         self.assertEqual(policy["permissions"], 1)
+        self.assertEqual(policy["anonymous_permissions"], 1)
+        self.assertEqual(policy["signed_permissions"], 11)
         self.assertEqual(policy["anonymous"], ["post.create"])
 
         status, home = self.c.get("/")
         self.assertEqual(status, 200)
-        self.assertIn("| topic | posts | perm | purpose |", home)
-        self.assertIn("| /main | 0 | 1 |", home)
-        self.assertIn("1=create 2=edit unsigned 4=delete unsigned", home)
+        self.assertIn("| topic | posts | anon | signed | purpose |", home)
+        self.assertIn("| /main | 0 | 1 | 11 |", home)
+        self.assertIn("1=create 2=edit.self 4=edit.any 8=delete.self 16=delete.any", home)
 
         post_id = self.publish("create allowed")
         self.assertEqual(
@@ -1094,14 +1105,18 @@ class ServerCase(unittest.TestCase):
         )
         self.assertEqual(status, 400)
 
-    def test_topic_policy_can_disable_anonymous_create(self) -> None:
+    def test_topic_policy_can_disable_anonymous_without_disabling_signed_base(self) -> None:
         status, _ = self.set_policy(self.root_key, "main", "")
         self.assertEqual(status, 200)
         self.assertEqual(self.c.get("/publish", board="main", text="anon")[0], 403)
 
         member = Ed25519PrivateKey.generate()
-        self.issue(self.root_key, member)
-        self.assertGreater(self.signed_create(member, "certified"), 0)
+        pid = self.signed_create(member, "signed")
+        self.assertGreater(pid, 0)
+        meta = json.loads(self.c.get(f"/main/{pid}/meta")[1])
+        self.assertEqual(meta["authentication"]["status"], "signed")
+        status, _ = self.signed_edit(member, pid, "self edit")
+        self.assertEqual(status, 200)
 
     def test_new_post_evicts_oldest_only_when_full(self) -> None:
         first = self.publish("1234567890")
@@ -1112,6 +1127,7 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(self.c.get(f"/main/{third}")[0], 200)
 
     def test_capacity_reclaims_oldest_archive_before_active_posts(self) -> None:
+        self.assertEqual(self.set_policy_bits(self.root_key, "main", 7)[0], 200)
         first = self.publish("1234567890")
         second = self.publish("abcdefghij")
         status, body = self.c.get("/publish", delete=str(first))
@@ -1124,6 +1140,7 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(self.c.get(f"/main/{third}")[0], 200)
 
     def test_purge_can_irreversibly_remove_an_archived_post(self) -> None:
+        self.assertEqual(self.set_policy_bits(self.root_key, "main", 7)[0], 200)
         post_id = self.publish("leaked credential")
         status, body = self.c.get("/publish", delete=str(post_id))
         self.assertEqual(status, 200, body)
@@ -1182,6 +1199,7 @@ class ServerCase(unittest.TestCase):
         self.assertIsNotNone(self.server.board.store.get_post(second))
 
     def test_edit_cannot_evict_other_posts(self) -> None:
+        self.assertEqual(self.set_policy_bits(self.root_key, "main", 7)[0], 200)
         first = self.publish("1234567890")
         second = self.publish("abcdefghij")
         status, _ = self.c.get("/publish", edit=str(second), text="abcdefghijkl")
@@ -1212,6 +1230,12 @@ class PostUploadCase(unittest.TestCase):
             read_per_minute=1000,
         )
         self.server = build_server(cfg)
+        self.server.board.store.set_policy(
+            "main",
+            ("post.create", "post.edit.any", "post.delete.any"),
+            None,
+            1,
+        )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         host, port = self.server.server_address[:2]
@@ -1377,6 +1401,12 @@ class InboxCase(unittest.TestCase):
             read_per_minute=1000,
         )
         self.server = build_server(cfg)
+        self.server.board.store.set_policy(
+            "main",
+            ("post.create", "post.edit.any", "post.delete.any"),
+            None,
+            1,
+        )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         host, port = self.server.server_address[:2]

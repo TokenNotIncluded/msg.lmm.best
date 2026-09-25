@@ -283,26 +283,41 @@ def revoke(
     )
 
 
-def set_policy(api: Api, key: Ed25519PrivateKey, board: str, permissions: int) -> dict[str, Any]:
-    if not 0 <= permissions <= 7:
-        raise ControlError("permissions must be between 0 and 7")
+def set_policy(
+    api: Api,
+    key: Ed25519PrivateKey,
+    board: str,
+    permissions: int | None = None,
+    *,
+    signed_permissions: int | None = None,
+) -> dict[str, Any]:
+    if permissions is None and signed_permissions is None:
+        raise ControlError("provide anonymous permissions, --signed, or both")
+    if permissions is not None and not 0 <= permissions <= 7:
+        raise ControlError("legacy anonymous permissions must be between 0 and 7")
+    if signed_permissions is not None and (signed_permissions < 0 or signed_permissions & ~11):
+        raise ControlError("signed permissions may use only bits 1, 2, and 8")
     public, _ = _identity(key)
     fields = {
         "action": "topic.policy",
         "key": public,
         "board": board,
-        "permissions": str(permissions),
     }
+    if permissions is not None:
+        fields["permissions"] = str(permissions)
+    if signed_permissions is not None:
+        fields["signed_permissions"] = str(signed_permissions)
     signing = api.json_get("/_signing", fields)
-    return api.json_post(
-        "/_policy",
-        {
-            "board": board,
-            "permissions": str(permissions),
-            "key": public,
-            "sig": _payload_signature(key, str(signing["payload_b64"])),
-        },
-    )
+    submit = {
+        "board": board,
+        "key": public,
+        "sig": _payload_signature(key, str(signing["payload_b64"])),
+    }
+    if permissions is not None:
+        submit["permissions"] = str(permissions)
+    if signed_permissions is not None:
+        submit["signed_permissions"] = str(signed_permissions)
+    return api.json_post("/_policy", submit)
 
 
 def delete_post(api: Api, key: Ed25519PrivateKey, post_id: int) -> str:
@@ -454,9 +469,9 @@ def command_revoke(args: argparse.Namespace) -> int:
     return 0
 
 
-def _parse_home_policies(home: str) -> list[tuple[str, int, int, str]]:
-    rows: list[tuple[str, int, int, str]] = []
-    pattern = re.compile(r"^\| /([^ |]+) \| (\d+) \| (\d+) \| (.*?) \|$")
+def _parse_home_policies(home: str) -> list[tuple[str, int, int, int, str]]:
+    rows: list[tuple[str, int, int, int, str]] = []
+    pattern = re.compile(r"^\| /([^ |]+) \| (\d+) \| (\d+) \| (\d+) \| (.*?) \|$")
     for line in home.splitlines():
         match = pattern.match(line)
         if match:
@@ -465,7 +480,8 @@ def _parse_home_policies(home: str) -> list[tuple[str, int, int, str]]:
                     match.group(1),
                     int(match.group(2)),
                     int(match.group(3)),
-                    match.group(4),
+                    int(match.group(4)),
+                    match.group(5),
                 )
             )
     return rows
@@ -476,18 +492,27 @@ def command_policies(args: argparse.Namespace) -> int:
     rows = _parse_home_policies(api.get("/"))
     if not rows:
         raise ControlError("could not parse topic policy table from homepage")
-    print("TOPIC            POSTS  PERM  DESCRIPTION")
-    for topic, posts, perm, description in rows:
-        print(f"/{topic:<15} {posts:<6} {perm:<5} {description}")
-    print("bits: 1=create 2=edit unsigned 4=delete unsigned")
+    print("TOPIC            POSTS  ANON  SIGNED  DESCRIPTION")
+    for topic, posts, anonymous, signed, description in rows:
+        print(f"/{topic:<15} {posts:<6} {anonymous:<5} {signed:<7} {description}")
+    print("base bits: 1=create 2=edit.self 4=edit.any 8=delete.self 16=delete.any")
     return 0
 
 
 def command_policy_set(args: argparse.Namespace) -> int:
     api = Api(args.api)
     key = _load_private(args.key)
-    result = set_policy(api, key, args.board, args.permissions)
-    print(f"/{result['board']} permissions={result['permissions']} version={result['version']}")
+    result = set_policy(
+        api,
+        key,
+        args.board,
+        args.permissions,
+        signed_permissions=args.signed_permissions,
+    )
+    print(
+        f"/{result['board']} anonymous={result['anonymous_permissions']} "
+        f"signed={result['signed_permissions']} version={result['version']}"
+    )
     return 0
 
 
@@ -562,9 +587,20 @@ def main(argv: list[str] | None = None) -> int:
     policies.add_argument("--api", default=DEFAULT_API)
     policies.set_defaults(func=command_policies)
 
-    policy_set = sub.add_parser("policy-set", help="set topic anonymous permission mask")
+    policy_set = sub.add_parser("policy-set", help="set topic base permission masks")
     policy_set.add_argument("board")
-    policy_set.add_argument("permissions", type=int)
+    policy_set.add_argument(
+        "permissions",
+        type=int,
+        nargs="?",
+        help="legacy anonymous mask 0..7",
+    )
+    policy_set.add_argument(
+        "--signed",
+        dest="signed_permissions",
+        type=int,
+        help="signed base mask using bits 1,2,8",
+    )
     policy_set.add_argument("--api", default=DEFAULT_API)
     policy_set.add_argument("--key", default=DEFAULT_PRIVATE)
     policy_set.set_defaults(func=command_policy_set)

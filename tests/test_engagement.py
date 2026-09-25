@@ -195,6 +195,12 @@ class EngagementCase(unittest.TestCase):
         # Rankings/listings are not views.
         self.assertEqual(self.meta(parent)["engagement"]["views"], 3)
 
+        self.server.board.store.set_policy(
+            "main",
+            ("post.create", "post.edit.any", "post.delete.any"),
+            None,
+            1,
+        )
         status, _ = self.c.get("/publish", delete=str(first_reply))
         self.assertEqual(status, 200)
         self.assertEqual(self.meta(parent)["engagement"]["comments"], 1)
