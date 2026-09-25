@@ -115,7 +115,7 @@ class SSHAccessTests(unittest.TestCase):
         service = RepoService(self.cfg)
         service.ensure_repository("demo")
         info = service.repository_info("demo")
-        self.assertEqual(info["ssh_clone_url"], "ssh://msg@example.test/demo.git")
+        self.assertEqual(info["ssh_clone_url"], "ssh://msg@example.test/repos/demo.git")
 
     def test_git_ssh_command_enforces_repository_scopes(self) -> None:
         service = RepoService(self.cfg)
