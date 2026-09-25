@@ -61,7 +61,13 @@ from msgd.render import (
     render_users,
 )
 from msgd.search import SearchSyntaxError, parse_search_query, search_help
-from msgd.sshaccess import SSHKeyStore, SSH_PRESETS, normalize_scopes, normalize_ssh_public_key, ssh_access_payload
+from msgd.sshaccess import (
+    SSH_PRESETS,
+    SSHKeyStore,
+    normalize_scopes,
+    normalize_ssh_public_key,
+    ssh_access_payload,
+)
 from msgd.store import (
     ANONYMOUS_BASE_ACTIONS,
     KEYSTORE_FORMAT,
