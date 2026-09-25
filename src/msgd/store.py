@@ -1379,10 +1379,7 @@ class Store:
         if cursor is not None:
             value, file_id = cursor
             operator = ">" if order == "asc" else "<"
-            where.append(
-                f"({expression} {operator} ? OR "
-                f"({expression} = ? AND a.id {operator} ?))"
-            )
+            where.append(f"({expression} {operator} ? OR ({expression} = ? AND a.id {operator} ?))")
             params.extend((value, value, file_id))
 
         direction = "ASC" if order == "asc" else "DESC"
@@ -3421,9 +3418,7 @@ class Store:
         if files is not None and auth is not None:
             uploader_profile = self.profile_by_author(auth.signer_id)
             file_uploader_name = (
-                str(uploader_profile["name"])
-                if uploader_profile is not None
-                else auth.signer_id
+                str(uploader_profile["name"]) if uploader_profile is not None else auth.signer_id
             )
 
         with self._lock, self._conn:
