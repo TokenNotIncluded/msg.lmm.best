@@ -3901,7 +3901,10 @@ class Handler(BaseHTTPRequestHandler):
 
         left_ref: str | None = None
         right_ref: str | None = None
-        if len(segments) == 3:
+        if len(segments) == 4 and segments[1] in {"post", "msg"}:
+            left_ref = f"{segments[1]}:{segments[2]}"
+            right_ref = f"{segments[1]}:{segments[3]}"
+        elif len(segments) == 3:
             left_ref, right_ref = segments[1], segments[2]
         elif len(segments) == 1:
             left_ref = _param(params, "from") or _param(params, "base")
@@ -3910,7 +3913,7 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError(
                 "invalid diff path",
                 404,
-                "try /diff/POST_A/POST_B or /diff?from=post:ID&to=post:ID",
+                "try /diff/post/POST_A/POST_B or /diff?from=post:ID&to=post:ID",
             )
 
         if left_ref is None and right_ref is None:
@@ -3918,6 +3921,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 "# /diff/\n\n"
                 "Compare two current public post bodies. No history is created.\n\n"
+                "typed: /diff/post/POST_A/POST_B\n"
                 "short: /diff/POST_A/POST_B\n"
                 "refs: /diff?from=post:123&to=post:456\n"
                 "paths: /diff?from=/main/123&to=/meta/456\n"
