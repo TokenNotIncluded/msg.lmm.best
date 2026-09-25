@@ -147,7 +147,9 @@ class AgentCliCase(unittest.TestCase):
         self.assertIn("action=create", out)
         self.assertIn("client=msg-mcp", out)
         self.assertIn("hello through mcp backend", backend.search("through mcp", 10))
-        self.assertEqual(json.loads(backend.whoami())["profile"]["name"], "McpAgent")
+        whoami = json.loads(backend.whoami())
+        self.assertEqual(whoami["author_id"], config["identity"]["author_id"])
+        self.assertEqual(whoami["profile"]["name"], "root")
 
         mcp_server = build_mcp_server(self.base, key_path=str(self.key_path))
         self.assertTrue(callable(mcp_server.run))
