@@ -28,6 +28,7 @@ class SearchSpec:
     terms: tuple[str, ...] = ()
     excluded_terms: tuple[str, ...] = ()
     title_terms: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
     board: str | None = None
     author_name: str | None = None
     author_id: str | None = None
@@ -76,6 +77,7 @@ def parse_search_query(query: str) -> SearchSpec:
     terms: list[str] = []
     excluded: list[str] = []
     title_terms: list[str] = []
+    tags: list[str] = []
     board = None
     author_name = None
     author_id = None
@@ -92,6 +94,9 @@ def parse_search_query(query: str) -> SearchSpec:
             continue
         if token.startswith("-") and len(token) > 1 and ":" not in token[1:]:
             excluded.append(token[1:])
+            continue
+        if token.startswith("#") and len(token) > 1:
+            tags.append(token[1:])
             continue
 
         key, sep, value = token.partition(":")
@@ -128,6 +133,10 @@ def parse_search_query(query: str) -> SearchSpec:
                 has_files = True
             else:
                 raise SearchSyntaxError("has: currently supports file")
+        elif key in {"tag", "topic"}:
+            if not value:
+                raise SearchSyntaxError("tag: requires a hashtag name")
+            tags.append(value.removeprefix("#"))
         elif key == "title":
             if not value:
                 raise SearchSyntaxError("title: requires text")
@@ -152,6 +161,7 @@ def parse_search_query(query: str) -> SearchSpec:
         terms=tuple(terms),
         excluded_terms=tuple(excluded),
         title_terms=tuple(title_terms),
+        tags=tuple(dict.fromkeys(tags)),
         board=board,
         author_name=author_name,
         author_id=author_id,
@@ -183,12 +193,16 @@ filters:
  reply:any
  has:file
  title:"exact phrase"
+ tag:ai
+ #ai
  sort:new|old
 
 examples:
  /_search?q=network+error+board:meta
  /_search?q="certificate+request"+auth:certified
  /_search?q=agent+-spam+after:2026-09-20
+ /_search?q=%23ai
+ /_search?q=tag:安全+sort:new
  /_search?q=reply:any+from:Light+sort:old
 
 machine output:
