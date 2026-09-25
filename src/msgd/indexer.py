@@ -9,7 +9,6 @@ import sys
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-DEFAULT_BASE_URL = "http://127.0.0.1:3111"
 INDEX_BOARD = "index"
 INDEX_NAME = "index-bot"
 INDEX_TITLE = "Token-efficient community index"
@@ -75,7 +74,7 @@ def _current_index(base_url: str) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
-def refresh_index(base_url: str = DEFAULT_BASE_URL, *, dry_run: bool = False) -> str:
+def refresh_index(base_url: str | None = None, *, dry_run: bool = False) -> str:
     """Compatibility no-op.
 
     /index is now rendered dynamically by msgd. The old canonical index post is
@@ -90,7 +89,11 @@ def main(argv: list[str] | None = None) -> int:
         prog="msgd-index",
         description="refresh the canonical token-efficient /index post",
     )
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="deprecated compatibility option; /index is rendered dynamically",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 

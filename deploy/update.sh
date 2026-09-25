@@ -3,9 +3,18 @@
 # Usage: bash deploy/update.sh [ssh-host]
 set -euo pipefail
 
-HOST="${1:-archczy}"
-DOMAIN="msg.lmm.best"
+HOST="${1:-${MSG_DEPLOY_HOST:-}}"
+DOMAIN="${MSG_DOMAIN:-msg.lmm.best}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [[ -z "$HOST" ]]; then
+    echo "error: ssh host is required (argument or MSG_DEPLOY_HOST)" >&2
+    exit 2
+fi
+if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+    echo "error: invalid MSG_DOMAIN: $DOMAIN" >&2
+    exit 2
+fi
 STAGE="/tmp/msg-lmm-best-update.$$"
 
 cd "$ROOT"
@@ -45,7 +54,7 @@ tar -C "$ROOT" -cf - \
     | ssh "$HOST" "tar -C '$STAGE' -xf -"
 
 echo "==> update $HOST"
-ssh "$HOST" STAGE="$STAGE" WHEEL="$WHEEL" 'bash -s' <<'REMOTE'
+ssh "$HOST" STAGE="$STAGE" WHEEL="$WHEEL" DOMAIN="$DOMAIN" 'bash -s' <<'REMOTE'
 set -euo pipefail
 trap 'rm -rf "$STAGE"' EXIT
 
@@ -216,21 +225,43 @@ sudo systemctl daemon-reload
 echo "==> restart"
 sudo systemctl restart "$SERVICE"
 
+LOCAL_API="$("$VENV/bin/python" - "$CONFIG" <<'PY'
+import sys
+from msgd.config import Config
+
+print(Config.load(sys.argv[1]).local_api_url)
+PY
+)"
 for _ in $(seq 1 50); do
-    if curl -fsS http://127.0.0.1:3111/_health >/dev/null; then
+    if curl -fsS "$LOCAL_API/_health" >/dev/null; then
         break
     fi
     sleep 0.2
 done
-curl -fsS http://127.0.0.1:3111/_health
-
+curl -fsS "$LOCAL_API/_health"
 
 echo "==> nginx request/path limits"
 sudo install -m 0644 "$D/nginx/nginx.conf" /etc/nginx/nginx.conf
-sed 's/^#TLS# \{0,1\}//' "$D/nginx/msg.lmm.best.conf" \
-    | sudo tee /etc/nginx/conf.d/msg.lmm.best.conf >/dev/null
-sudo install -m 0644 "$D/nginx/msg.lmm.best.proxy.conf" \
-    /etc/nginx/msg.lmm.best.proxy.conf
+UPSTREAM="${LOCAL_API#http://}"
+CLIENT_MAX_BODY_SIZE="$("$VENV/bin/python" - "$CONFIG" <<'PY'
+import sys
+from msgd.config import Config
+
+cfg = Config.load(sys.argv[1])
+print(max(cfg.max_request_bytes, cfg.repo_max_request_bytes))
+PY
+)"
+PROXY_CONF="/etc/nginx/$DOMAIN.proxy.conf"
+sed -e "s|__CLIENT_MAX_BODY_SIZE__|$CLIENT_MAX_BODY_SIZE|g" \
+    "$D/nginx/msg.lmm.best.proxy.conf" \
+    | sudo tee "$PROXY_CONF" >/dev/null
+sed \
+    -e 's/^#TLS# \{0,1\}//' \
+    -e "s|__DOMAIN__|$DOMAIN|g" \
+    -e "s|__UPSTREAM__|$UPSTREAM|g" \
+    -e "s|__PROXY_CONF__|$PROXY_CONF|g" \
+    "$D/nginx/msg.lmm.best.conf" \
+    | sudo tee "/etc/nginx/conf.d/$DOMAIN.conf" >/dev/null
 sudo nginx -t
 sudo systemctl reload nginx
 REMOTE

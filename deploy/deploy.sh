@@ -3,9 +3,18 @@
 # Usage: deploy/deploy.sh [ssh-host]
 set -euo pipefail
 
-HOST="${1:-archczy}"
-DOMAIN="msg.lmm.best"
+HOST="${1:-${MSG_DEPLOY_HOST:-}}"
+DOMAIN="${MSG_DOMAIN:-msg.lmm.best}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [[ -z "$HOST" ]]; then
+    echo "error: ssh host is required (argument or MSG_DEPLOY_HOST)" >&2
+    exit 2
+fi
+if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+    echo "error: invalid MSG_DOMAIN: $DOMAIN" >&2
+    exit 2
+fi
 STAGE="/tmp/msg-lmm-best-install.$$"
 
 cd "$ROOT"
@@ -40,6 +49,7 @@ trap 'rm -rf "$STAGE"' EXIT
 
 D="$STAGE/deploy"
 VENV=/opt/msg-lmm-best/venv
+CONFIG=/etc/msg-lmm-best/msg.conf
 DB=/var/lib/msg-lmm-best/msg.db
 
 if sudo test -e "$DB"; then
@@ -69,7 +79,9 @@ sudo install -d -m 0755 /opt/msg-lmm-best /etc/msg-lmm-best /var/lib/letsencrypt
 sudo uv venv --quiet --python /usr/bin/python3 "$VENV"
 sudo UV_NO_CACHE=1 uv pip install --quiet --python "$VENV/bin/python" \
     --compile-bytecode "$STAGE/dist/$WHEEL"
-sudo install -m 0644 "$D/etc/msg-lmm-best/msg.conf" /etc/msg-lmm-best/msg.conf
+sed -E "s|^site_name = .*|site_name = $DOMAIN|" "$D/etc/msg-lmm-best/msg.conf" \
+    | sudo tee "$CONFIG" >/dev/null
+sudo chmod 0644 "$CONFIG"
 sudo install -d -m 0755 /etc/msg-lmm-best/templates /etc/msg-lmm-best/commerce
 sudo install -m 0644 "$D/etc/msg-lmm-best/templates/store.json" /etc/msg-lmm-best/templates/store.json
 sudo install -m 0644 "$D/etc/msg-lmm-best/templates/ads.json" /etc/msg-lmm-best/templates/ads.json
@@ -78,7 +90,7 @@ sudo install -m 0644 "$D/etc/msg-lmm-best/terms.md" /etc/msg-lmm-best/terms.md
 
 echo "==> root CA"
 sudo "$VENV/bin/msgd-cert" init-root
-"$VENV/bin/msgd" --config /etc/msg-lmm-best/msg.conf --check
+"$VENV/bin/msgd" --config "$CONFIG" --check
 sudo rm -f /usr/local/bin/msgd-admin
 sudo ln -sfn "$VENV/bin/msgdctl" /usr/local/bin/msgdctl
 sudo ln -sfn "$VENV/bin/msgd-cert" /usr/local/bin/msgd-cert
@@ -104,17 +116,24 @@ sudo install -m 0644 "$D/msg-lmm-best.service" /etc/systemd/system/msg-lmm-best.
 sudo systemctl daemon-reload
 sudo systemctl enable --now msg-lmm-best.service
 
+LOCAL_API="$("$VENV/bin/python" - "$CONFIG" <<'PY'
+import sys
+from msgd.config import Config
+
+print(Config.load(sys.argv[1]).local_api_url)
+PY
+)"
 for _ in $(seq 1 50); do
-    if curl -fsS http://127.0.0.1:3111/_health >/dev/null; then
+    if curl -fsS "$LOCAL_API/_health" >/dev/null; then
         break
     fi
     sleep 0.2
 done
-curl -fsS http://127.0.0.1:3111/_health
+curl -fsS "$LOCAL_API/_health"
 
 echo "==> seed default /store products"
 sudo "$VENV/bin/msg" \
-    --api http://127.0.0.1:3111 \
+    --api "$LOCAL_API" \
     --key /etc/msg-lmm-best/root-ca.key \
     post store \
     --fields-file "$D/etc/msg-lmm-best/products/membership.json"
@@ -122,8 +141,27 @@ sudo "$VENV/bin/msg" \
 echo "==> nginx http"
 sudo install -d -m 0755 /etc/nginx/conf.d
 sudo install -m 0644 "$D/nginx/nginx.conf" /etc/nginx/nginx.conf
-sudo install -m 0644 "$D/nginx/$DOMAIN.proxy.conf" "/etc/nginx/$DOMAIN.proxy.conf"
-sudo install -m 0644 "$D/nginx/$DOMAIN.conf" "/etc/nginx/conf.d/$DOMAIN.conf"
+UPSTREAM="${LOCAL_API#http://}"
+CLIENT_MAX_BODY_SIZE="$("$VENV/bin/python" - "$CONFIG" <<'PY'
+import sys
+from msgd.config import Config
+
+cfg = Config.load(sys.argv[1])
+print(max(cfg.max_request_bytes, cfg.repo_max_request_bytes))
+PY
+)"
+PROXY_CONF="/etc/nginx/$DOMAIN.proxy.conf"
+sed -e "s|__CLIENT_MAX_BODY_SIZE__|$CLIENT_MAX_BODY_SIZE|g" \
+    "$D/nginx/msg.lmm.best.proxy.conf" \
+    | sudo tee "$PROXY_CONF" >/dev/null
+render_nginx() {
+    sed \
+        -e "s|__DOMAIN__|$DOMAIN|g" \
+        -e "s|__UPSTREAM__|$UPSTREAM|g" \
+        -e "s|__PROXY_CONF__|$PROXY_CONF|g" \
+        "$D/nginx/msg.lmm.best.conf"
+}
+render_nginx | sudo tee "/etc/nginx/conf.d/$DOMAIN.conf" >/dev/null
 sudo nginx -t
 sudo systemctl enable --now nginx
 
@@ -133,7 +171,7 @@ sudo certbot certonly --webroot -w /var/lib/letsencrypt -d "$DOMAIN" \
     --register-unsafely-without-email --keep-until-expiring \
     --deploy-hook "systemctl reload nginx"
 
-sed 's/^#TLS# \{0,1\}//' "$D/nginx/$DOMAIN.conf" \
+render_nginx | sed 's/^#TLS# \{0,1\}//' \
     | sudo tee "/etc/nginx/conf.d/$DOMAIN.conf" >/dev/null
 sudo nginx -t
 sudo systemctl reload nginx
