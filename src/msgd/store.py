@@ -963,7 +963,13 @@ class Store:
             ),
         }
 
-    def register_certificate(self, body: str, signature: str) -> Certificate:
+    def register_certificate(
+        self,
+        body: str,
+        signature: str,
+        *,
+        csr_id: int | None = None,
+    ) -> Certificate:
         try:
             cert = parse_certificate(body)
         except SignatureError as exc:
@@ -974,6 +980,13 @@ class Store:
             if existing["body"] == cert.body and existing["signature"] == signature:
                 return cert
             raise StoreError("certificate serial already exists", 409)
+
+        csr = None
+        if csr_id is not None:
+            csr = self.csr(csr_id)
+            if csr is None:
+                raise StoreError("CSR not found", 404)
+            self._validate_csr_certificate(csr, cert)
 
         root = self.root_info()
         if root is None:
@@ -1006,6 +1019,7 @@ class Store:
         except SignatureError as exc:
             raise StoreError(str(exc), 403) from exc
 
+        now = time.time()
         with self._lock, self._conn:
             self._conn.execute(
                 """
@@ -1022,9 +1036,34 @@ class Store:
                     cert.subject_key,
                     cert.body,
                     canonical_sig,
-                    time.time(),
+                    now,
                 ),
             )
+            if csr is not None:
+                cur = self._conn.execute(
+                    """
+                    UPDATE certificate_requests
+                       SET status='issued', decided=?, decision_by=?,
+                           certificate_serial=?
+                     WHERE id=? AND status='pending'
+                    """,
+                    (now, cert.issuer_id, cert.serial, csr_id),
+                )
+                if cur.rowcount != 1:
+                    raise StoreError("CSR changed while issuing", 409)
+
+        self._audit_ca(
+            "issued",
+            f"[ISSUED] {cert.serial[:12]}",
+            [
+                *( [f"csr=/_csr?id={csr_id}"] if csr_id is not None else [] ),
+                f"certificate=/_cert?serial={cert.serial}",
+                f"subject={cert.subject_id}",
+                f"issuer={cert.issuer_id}",
+                f"delegate={str(cert.delegate).lower()}",
+                f"grants={canonical_json(self._grant_list(cert.grants))}",
+            ],
+        )
         return cert
 
     def certificate(self, serial: str) -> dict[str, Any] | None:
@@ -1094,7 +1133,12 @@ class Store:
             )
         return action in permissions
 
-    def revoke_certificate(self, serial: str, signer_id: str) -> None:
+    def revoke_certificate(
+        self,
+        serial: str,
+        signer_id: str,
+        reason: str = "",
+    ) -> None:
         row = self.certificate(serial)
         if row is None:
             raise StoreError("certificate not found", 404)
@@ -1115,11 +1159,25 @@ class Store:
         if not allowed:
             raise StoreError("not allowed to revoke this certificate", 403)
 
+        now = time.time()
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO revocations(serial, revoked_at, revoked_by) VALUES (?, ?, ?)",
-                (serial, time.time(), signer_id),
+                """
+                INSERT INTO revocations(serial, revoked_at, revoked_by, reason)
+                VALUES (?, ?, ?, ?)
+                """,
+                (serial, now, signer_id, reason[:500]),
             )
+        self._audit_ca(
+            "revoked",
+            f"[REVOKED] {serial[:12]}",
+            [
+                f"certificate=/_cert?serial={serial}",
+                f"subject={cert.subject_id}",
+                f"by={signer_id}",
+                f"reason={reason[:300]}",
+            ],
+        )
 
     def is_revoked(self, serial: str) -> bool:
         with self._lock:
@@ -1132,7 +1190,7 @@ class Store:
     def revocations(self) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT serial, revoked_at, revoked_by FROM revocations ORDER BY revoked_at"
+                "SELECT serial, revoked_at, revoked_by, reason FROM revocations ORDER BY revoked_at"
             ).fetchall()
         return [dict(row) for row in rows]
 
