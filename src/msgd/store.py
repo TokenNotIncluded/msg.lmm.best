@@ -1244,6 +1244,10 @@ class Store:
             ).fetchone()["n"]
         )
         body = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        nbytes = len(body.encode("utf-8"))
+        used = self._storage_bytes()
+        if used + nbytes > self.cfg.max_storage_bytes:
+            return
         title = f"[{kind}]"
         cur = self._conn.execute(
             """
@@ -1257,7 +1261,7 @@ class Store:
                 body,
                 now,
                 now,
-                len(body.encode("utf-8")),
+                nbytes,
             ),
         )
         post_id = int(cur.lastrowid or 0)
