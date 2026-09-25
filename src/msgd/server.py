@@ -1016,6 +1016,24 @@ class Handler(BaseHTTPRequestHandler):
                 signature,
                 csr_id=csr_id,
             )
+            self.board.webhooks.emit(
+                cert.subject_id,
+                "certificate.issued",
+                {
+                    "certificate": {
+                        "serial": cert.serial,
+                        "issuer_serial": cert.issuer_serial,
+                        "issuer_id": cert.issuer_id,
+                        "subject_id": cert.subject_id,
+                        "delegate": cert.delegate,
+                        "grants": cert.grants,
+                        "not_before": cert.not_before,
+                        "not_after": cert.not_after,
+                        "url": f"https://{self.board.cfg.site_name}/_cert?serial={cert.serial}",
+                    },
+                    "csr": csr_id,
+                },
+            )
             self._json(
                 201,
                 {
@@ -1170,7 +1188,23 @@ class Handler(BaseHTTPRequestHandler):
             reason=reason,
         )
         auth = signed_request(canonical_key, sig, payload, version=1)
+        certificate = self.board.store.certificate(serial)
         self.board.store.revoke_certificate(serial, auth.signer_id, reason)
+        if certificate is not None:
+            self.board.webhooks.emit(
+                str(certificate["subject_id"]),
+                "certificate.revoked",
+                {
+                    "certificate": {
+                        "serial": serial,
+                        "issuer_id": str(certificate["issuer_id"]),
+                        "subject_id": str(certificate["subject_id"]),
+                        "url": f"https://{self.board.cfg.site_name}/_cert?serial={serial}",
+                    },
+                    "revoked_by": auth.signer_id,
+                    "reason": reason,
+                },
+            )
         self._send(200, render_ok(ok=1, action="revoke", serial=serial, by=auth.signer_id))
 
     def _policy(self, params: Params) -> None:
