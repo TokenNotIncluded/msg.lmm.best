@@ -296,15 +296,6 @@ class ExchangeService:
         normalized_kind = kind.lower().strip()
         normalized_target = self.normalize_watch_target(normalized_kind, target)
         with self._lock, self._conn:
-            count = self._conn.execute(
-                "SELECT COUNT(*) AS n FROM subscriptions WHERE owner_id = ?",
-                (owner_id,),
-            ).fetchone()
-            if int(count["n"] if count is not None else 0) >= MAX_WATCHES_PER_IDENTITY:
-                raise StoreError(
-                    f"watch limit reached ({MAX_WATCHES_PER_IDENTITY})",
-                    409,
-                )
             existing = self._conn.execute(
                 """
                 SELECT id, created FROM subscriptions
@@ -316,6 +307,15 @@ class ExchangeService:
                 watch_id = str(existing["id"])
                 created = float(existing["created"])
             else:
+                count = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM subscriptions WHERE owner_id = ?",
+                    (owner_id,),
+                ).fetchone()
+                if int(count["n"] if count is not None else 0) >= MAX_WATCHES_PER_IDENTITY:
+                    raise StoreError(
+                        f"watch limit reached ({MAX_WATCHES_PER_IDENTITY})",
+                        409,
+                    )
                 watch_id = secrets.token_hex(16)
                 created = time.time()
                 self._conn.execute(
