@@ -3072,6 +3072,38 @@ class Store:
             rows = self._conn.execute(sql, params).fetchall()
         return [post for row in rows if (post := self._row(row)) is not None]
 
+    def _list_posts_by_timestamp(
+        self,
+        column: str,
+        *,
+        cursor: tuple[float, int] | None = None,
+        limit: int = 20,
+        order: str = "desc",
+    ) -> list[Post]:
+        if column not in {"created", "updated"}:
+            raise StoreError("unsupported timestamp index", 500)
+        if order not in {"asc", "desc"}:
+            raise StoreError("order must be asc or desc", 400)
+
+        where: list[str] = []
+        params: list[Any] = []
+        if cursor is not None:
+            value, post_id = cursor
+            operator = ">" if order == "asc" else "<"
+            where.append(f"({column} {operator} ? OR ({column} = ? AND id {operator} ?))")
+            params.extend((value, value, post_id))
+
+        sql = self._select_posts()
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        direction = "ASC" if order == "asc" else "DESC"
+        sql += f" ORDER BY {column} {direction}, id {direction} LIMIT ?"
+        params.append(max(1, min(limit, self.cfg.max_limit + 1)))
+
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [post for row in rows if (post := self._row(row)) is not None]
+
     def list_posts_by_time(
         self,
         *,
@@ -3080,27 +3112,27 @@ class Store:
         order: str = "desc",
     ) -> list[Post]:
         """List posts by creation time with a stable (created, id) cursor."""
-        if order not in {"asc", "desc"}:
-            raise StoreError("order must be asc or desc", 400)
+        return self._list_posts_by_timestamp(
+            "created",
+            cursor=cursor,
+            limit=limit,
+            order=order,
+        )
 
-        where: list[str] = []
-        params: list[Any] = []
-        if cursor is not None:
-            created, post_id = cursor
-            operator = ">" if order == "asc" else "<"
-            where.append(f"(created {operator} ? OR (created = ? AND id {operator} ?))")
-            params.extend((created, created, post_id))
-
-        sql = self._select_posts()
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        direction = "ASC" if order == "asc" else "DESC"
-        sql += f" ORDER BY created {direction}, id {direction} LIMIT ?"
-        params.append(max(1, min(limit, self.cfg.max_limit + 1)))
-
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
-        return [post for row in rows if (post := self._row(row)) is not None]
+    def list_posts_by_updated(
+        self,
+        *,
+        cursor: tuple[float, int] | None = None,
+        limit: int = 20,
+        order: str = "desc",
+    ) -> list[Post]:
+        """List posts by update time with a stable (updated, id) cursor."""
+        return self._list_posts_by_timestamp(
+            "updated",
+            cursor=cursor,
+            limit=limit,
+            order=order,
+        )
 
     def list_bound_names(
         self,
@@ -3149,6 +3181,172 @@ class Store:
                 "last_used": round(float(row["last_used"]), 3),
                 "posts": int(row["posts"]),
                 "profile": f"/@{quote(str(row['display_name']), safe='')}",
+            }
+            for row in rows
+        ]
+
+    def list_tags_by_name(
+        self,
+        *,
+        cursor_key: str | None = None,
+        limit: int = 20,
+        order: str = "asc",
+    ) -> list[dict[str, Any]]:
+        if order not in {"asc", "desc"}:
+            raise StoreError("order must be asc or desc", 400)
+        params: list[Any] = []
+        where = ""
+        if cursor_key is not None:
+            operator = ">" if order == "asc" else "<"
+            where = f" WHERE t.tag {operator} ?"
+            params.append(cursor_key)
+        direction = "ASC" if order == "asc" else "DESC"
+        params.append(max(1, min(limit, self.cfg.max_limit + 1)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT t.tag, COUNT(*) AS posts,
+                       COUNT(DISTINCT p.board) AS boards,
+                       MAX(p.updated) AS last_ts,
+                       MAX(p.id) AS latest_id
+                  FROM post_tags t
+                  JOIN posts p ON p.id = t.post_id
+                  {where}
+                 GROUP BY t.tag
+                 ORDER BY t.tag {direction}
+                 LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_boards_by_name(
+        self,
+        *,
+        cursor_key: str | None = None,
+        limit: int = 20,
+        order: str = "asc",
+    ) -> list[dict[str, Any]]:
+        if order not in {"asc", "desc"}:
+            raise StoreError("order must be asc or desc", 400)
+        params: list[Any] = []
+        where = ""
+        if cursor_key is not None:
+            operator = ">" if order == "asc" else "<"
+            where = f" WHERE b.name {operator} ?"
+            params.append(cursor_key)
+        direction = "ASC" if order == "asc" else "DESC"
+        params.append(max(1, min(limit, self.cfg.max_limit + 1)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT b.name, b.description, COUNT(p.id) AS posts,
+                       COALESCE(MAX(p.updated), 0) AS last_ts,
+                       COALESCE(MAX(p.id), 0) AS latest_id
+                  FROM boards b
+                  LEFT JOIN posts p ON p.board = b.name
+                  {where}
+                 GROUP BY b.name, b.description
+                 ORDER BY b.name {direction}
+                 LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["permissions"] = self.policy(str(row["name"]))["permissions"]
+            result.append(item)
+        return result
+
+    def list_authors(
+        self,
+        *,
+        cursor_key: str | None = None,
+        limit: int = 20,
+        order: str = "asc",
+    ) -> list[dict[str, Any]]:
+        if order not in {"asc", "desc"}:
+            raise StoreError("order must be asc or desc", 400)
+        params: list[Any] = []
+        where = ["p.author_id IS NOT NULL", "p.system = 0"]
+        if cursor_key is not None:
+            if not valid_author_id(cursor_key):
+                raise StoreError("invalid author cursor", 400)
+            operator = ">" if order == "asc" else "<"
+            where.append(f"p.author_id {operator} ?")
+            params.append(cursor_key)
+        direction = "ASC" if order == "asc" else "DESC"
+        params.append(max(1, min(limit, self.cfg.max_limit + 1)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT p.author_id, MAX(p.author_key) AS public_key,
+                       COUNT(*) AS posts, MIN(p.created) AS first_seen,
+                       MAX(p.updated) AS last_seen
+                  FROM posts p
+                 WHERE {" AND ".join(where)}
+                 GROUP BY p.author_id
+                 ORDER BY p.author_id {direction}
+                 LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [
+            {
+                "author_id": str(row["author_id"]),
+                "public_key": str(row["public_key"] or ""),
+                "posts": int(row["posts"]),
+                "first_seen": round(float(row["first_seen"]), 3),
+                "last_seen": round(float(row["last_seen"]), 3),
+                "key_url": f"/key/{row['author_id']}",
+            }
+            for row in rows
+        ]
+
+    def list_reply_groups(
+        self,
+        *,
+        cursor_id: int | None = None,
+        limit: int = 20,
+        order: str = "asc",
+    ) -> list[dict[str, Any]]:
+        if order not in {"asc", "desc"}:
+            raise StoreError("order must be asc or desc", 400)
+        params: list[Any] = []
+        where = ["r.reply_to IS NOT NULL"]
+        if cursor_id is not None:
+            operator = ">" if order == "asc" else "<"
+            where.append(f"r.reply_to {operator} ?")
+            params.append(cursor_id)
+        direction = "ASC" if order == "asc" else "DESC"
+        params.append(max(1, min(limit, self.cfg.max_limit + 1)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT r.reply_to AS parent_id, parent.board AS parent_board,
+                       COUNT(*) AS replies, MIN(r.id) AS first_reply_id,
+                       MAX(r.id) AS latest_reply_id,
+                       MAX(r.updated) AS last_ts
+                  FROM posts r
+                  LEFT JOIN posts parent ON parent.id = r.reply_to
+                 WHERE {" AND ".join(where)}
+                 GROUP BY r.reply_to, parent.board
+                 ORDER BY r.reply_to {direction}
+                 LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [
+            {
+                "parent_id": int(row["parent_id"]),
+                "parent_board": (
+                    str(row["parent_board"]) if row["parent_board"] is not None else None
+                ),
+                "replies": int(row["replies"]),
+                "first_reply_id": int(row["first_reply_id"]),
+                "latest_reply_id": int(row["latest_reply_id"]),
+                "last_ts": round(float(row["last_ts"]), 3),
             }
             for row in rows
         ]
