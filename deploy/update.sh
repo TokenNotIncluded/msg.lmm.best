@@ -56,11 +56,22 @@ tar -C "$ROOT" -cf - \
 echo "==> update $HOST"
 ssh "$HOST" STAGE="$STAGE" WHEEL="$WHEEL" DOMAIN="$DOMAIN" 'bash -s' <<'REMOTE'
 set -euo pipefail
-trap 'rm -rf "$STAGE"' EXIT
+SERVICE=msg-lmm-best.service
+
+cleanup() {
+    status=$?
+    if (( status != 0 )) && ! systemctl is-active --quiet "$SERVICE"; then
+        echo "warning: update failed; attempting to restart $SERVICE" >&2
+        sudo systemctl start "$SERVICE" || \
+            echo "error: could not restart $SERVICE" >&2
+    fi
+    rm -rf "$STAGE"
+    exit "$status"
+}
+trap cleanup EXIT
 
 VENV=/opt/msg-lmm-best/venv
 CONFIG=/etc/msg-lmm-best/msg.conf
-SERVICE=msg-lmm-best.service
 D="$STAGE/deploy"
 
 test -f "$CONFIG" || {
@@ -232,12 +243,20 @@ from msgd.config import Config
 print(Config.load(sys.argv[1]).local_api_url)
 PY
 )"
+healthy=0
 for _ in $(seq 1 50); do
     if curl -fsS "$LOCAL_API/_health" >/dev/null; then
+        healthy=1
         break
     fi
     sleep 0.2
 done
+if (( healthy == 0 )); then
+    echo "error: $SERVICE did not become healthy" >&2
+    sudo systemctl --no-pager --full status "$SERVICE" || true
+    sudo journalctl -u "$SERVICE" -n 80 --no-pager || true
+    exit 1
+fi
 curl -fsS "$LOCAL_API/_health"
 
 echo "==> nginx request/path limits"
