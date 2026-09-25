@@ -26,7 +26,12 @@ from msgd.credentials import credential_path
 from msgd.crypto import public_identity
 from msgd.ctl import Api, ControlError, _payload_signature
 from msgd.gitrepos import git_push_payload
-from msgd.sshaccess import SSH_PRESETS, normalize_scopes, normalize_ssh_public_key, ssh_access_payload
+from msgd.sshaccess import (
+    SSH_PRESETS,
+    normalize_scopes,
+    normalize_ssh_public_key,
+    ssh_access_payload,
+)
 from msgd.store import StoreError
 
 DEFAULT_AGENT_API = "https://msg.lmm.best"
