@@ -728,7 +728,15 @@ class Handler(BaseHTTPRequestHandler):
                 row["active"] = self.board.store.certificate_active(str(row["serial"]))
             self._json(200, rows)
             return
-        raise StoreError("serial or subject is required", 400)
+        limit = _int(params, "limit", 50, 1, self.board.cfg.max_limit)
+        assert limit is not None
+        self._json(
+            200,
+            self.board.store.list_certificates(
+                issuer_id=_param(params, "issuer"),
+                limit=limit,
+            ),
+        )
 
     def _csr(self, params: Params, method: str) -> None:
         store = self.board.store
