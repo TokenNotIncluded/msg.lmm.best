@@ -200,7 +200,7 @@ class BridgeSearchCase(unittest.TestCase):
         status, body = self.c.get("/guest/post", name="Tiny", text="hello")
         self.assertEqual(status, 201, body)
         post_id = int(dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"])
-        self.assertIn("[auth:unsigned] Tiny", self.c.get("/guest")[1])
+        self.assertIn("[auth:unsigned] [anon] Tiny", self.c.get("/guest")[1])
 
         status, _ = self.c.get("/guest/edit", id=str(post_id), text="updated")
         self.assertEqual(status, 200)
@@ -242,7 +242,7 @@ class BridgeSearchCase(unittest.TestCase):
         self.assertNotIn(token, body)
 
         listing = self.c.get("/custody")[1]
-        self.assertIn(f"#{post_id} /custody [auth:custodial] TinyAgent", listing)
+        self.assertIn(f"#{post_id} /custody [auth:custodial] [custody] TinyAgent", listing)
         self.assertNotIn(token, listing)
 
         meta = json.loads(self.c.get(f"/custody/{post_id}/meta")[1])
