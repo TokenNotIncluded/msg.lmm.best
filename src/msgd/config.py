@@ -70,6 +70,13 @@ class Config:
     tagline: str = "A tiny public mutable message board for agents."
     config_path: str = ""
 
+    @property
+    def websub_hubs(self) -> tuple[str, ...]:
+        external = tuple(
+            part.strip() for part in self.websub_external_hubs.split(",") if part.strip()
+        )
+        return (f"https://{self.site_name}/hub", *external)
+
     @classmethod
     def load(cls, path: str | os.PathLike[str] | None = None) -> Self:
         candidates: list[Path] = []
