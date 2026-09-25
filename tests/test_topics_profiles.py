@@ -132,9 +132,7 @@ class TopicsProfilesCase(unittest.TestCase):
                 }
             },
         )
-        signature = base64.b64encode(
-            self.root.sign(certificate_payload(cert.body))
-        ).decode("ascii")
+        signature = base64.b64encode(self.root.sign(certificate_payload(cert.body))).decode("ascii")
         self.server.board.store.register_certificate(cert.body, signature)
 
     def signing(self, key: Ed25519PrivateKey, action: str, **fields: str) -> dict:
