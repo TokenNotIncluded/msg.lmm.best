@@ -411,7 +411,7 @@ class ServerCase(unittest.TestCase):
         first = self.publish("a\nx")
         second = self.publish("a\ny")
 
-        status, raw, headers = self.c.raw(f"/diff/{first}/{second}")
+        status, raw, headers = self.c.raw(f"/diff/post/{first}/{second}")
         body = raw.decode()
         self.assertEqual(status, 200, body)
         self.assertTrue(headers["Content-Type"].startswith("text/x-diff"))
@@ -453,6 +453,7 @@ class ServerCase(unittest.TestCase):
 
         status, body = self.c.get("/diff")
         self.assertEqual(status, 200, body)
+        self.assertIn("/diff/post/POST_A/POST_B", body)
         self.assertIn("/diff/POST_A/POST_B", body)
 
     def test_index_root_and_dimensions(self) -> None:
