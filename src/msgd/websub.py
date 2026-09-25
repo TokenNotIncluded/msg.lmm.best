@@ -419,12 +419,17 @@ class WebSubService:
                 retry_after = RETRY_DELAYS[min(attempts, len(RETRY_DELAYS) - 1)]
                 self.store.finish_websub_hub_ping(
                     str(row["id"]),
+                    int(row["generation"]),
                     success=False,
                     error=str(exc),
                     retry_after=retry_after,
                 )
             else:
-                self.store.finish_websub_hub_ping(str(row["id"]), success=True)
+                self.store.finish_websub_hub_ping(
+                    str(row["id"]),
+                    int(row["generation"]),
+                    success=True,
+                )
         return processed
 
     def _worker(self) -> None:
