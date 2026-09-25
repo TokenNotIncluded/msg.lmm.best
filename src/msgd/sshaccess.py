@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -79,9 +80,10 @@ def scopes_from_preset(value: str) -> tuple[str, ...]:
 
 
 def normalize_ssh_public_key(value: str) -> tuple[str, str, str]:
+    value = value.strip()
     if "\n" in value or "\r" in value or len(value.encode("utf-8")) > 16_384:
         raise StoreError("invalid SSH public key", 400)
-    parts = value.strip().split()
+    parts = value.split()
     if len(parts) < 2:
         raise StoreError("SSH public key must contain key type and base64 data", 400)
     key_type, encoded = parts[0], parts[1]
@@ -91,7 +93,7 @@ def normalize_ssh_public_key(value: str) -> tuple[str, str, str]:
         raise StoreError("invalid SSH public key base64", 400)
     try:
         blob = base64.b64decode(encoded, validate=True)
-    except ValueError as exc:
+    except (ValueError, binascii.Error) as exc:
         raise StoreError("invalid SSH public key base64", 400) from exc
     if not blob or len(blob) > 8192:
         raise StoreError("invalid SSH public key data", 400)
