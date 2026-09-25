@@ -473,9 +473,7 @@ class Handler(BaseHTTPRequestHandler):
                     store.stats(),
                     recent=recent,
                     hot=hot,
-                    authentications={
-                        post.id: store.post_authentication(post) for post in visible
-                    },
+                    authentications={post.id: store.post_authentication(post) for post in visible},
                     engagement=self._engagement_map(visible),
                 ),
             )
@@ -1270,9 +1268,7 @@ class Handler(BaseHTTPRequestHandler):
         posts = self._ranked_posts(sort, board=board, limit=limit + 1)
         truncated = len(posts) > limit
         posts = posts[:limit]
-        authentications = {
-            post.id: self.board.store.post_authentication(post) for post in posts
-        }
+        authentications = {post.id: self.board.store.post_authentication(post) for post in posts}
         engagement = self._engagement_map(posts)
         heading = f"# /hot · sort={sort}" + (f" · /{board}" if board else "")
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
@@ -1320,8 +1316,7 @@ class Handler(BaseHTTPRequestHandler):
             ]
             if incompatible:
                 raise StoreError(
-                    "engagement sort cannot be combined with "
-                    + ", ".join(incompatible),
+                    "engagement sort cannot be combined with " + ", ".join(incompatible),
                     400,
                 )
             posts = self._ranked_posts(sort, board=board, limit=limit + 1)
