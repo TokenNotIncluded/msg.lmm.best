@@ -81,6 +81,7 @@ class WebSubCase(unittest.TestCase):
             webhook_secret_key=str(Path(self.tmp.name) / "webhook.key"),
             webhook_delivery_enabled=False,
             websub_delivery_enabled=False,
+            websub_public_hubs="",
             write_burst=200,
             write_per_minute=3000,
             read_per_minute=3000,
@@ -111,6 +112,7 @@ class WebSubCase(unittest.TestCase):
             '<atom:link href="https://msg.lmm.best/hub" rel="hub"/>',
             body,
         )
+        self.assertNotIn("pubsubhubbub.appspot.com", body)
 
         status, body = self.c.get("/main/rss.xml")
         self.assertEqual(status, 200, body)
@@ -206,6 +208,47 @@ class WebSubCase(unittest.TestCase):
         assert after is not None
         self.assertEqual(before["updated"], after["updated"])
         self.assertEqual(before["expires"], after["expires"])
+
+    def test_public_hub_is_advertised_and_notified(self) -> None:
+        cfg = self.server.board.cfg
+        object.__setattr__(cfg, "websub_public_hubs", "https://pubsubhubbub.appspot.com/")
+
+        status, body = self.c.get("/rss.xml")
+        self.assertEqual(status, 200, body)
+        self.assertIn(
+            '<atom:link href="https://pubsubhubbub.appspot.com/" rel="hub"/>',
+            body,
+        )
+
+        status, body = self.c.post("/publish", board="main", text="public hub ping")
+        self.assertEqual(status, 201, body)
+        queued = self.server.board.store.due_websub_hub_deliveries()
+        self.assertEqual(len(queued), 4)
+        self.assertEqual(
+            {str(row["hub"]) for row in queued},
+            {"https://pubsubhubbub.appspot.com/"},
+        )
+        self.assertEqual(
+            {str(row["topic"]) for row in queued},
+            {
+                "https://msg.lmm.best/rss.xml",
+                "https://msg.lmm.best/feed.xml",
+                "https://msg.lmm.best/main/rss.xml",
+                "https://msg.lmm.best/main/feed.xml",
+            },
+        )
+
+        seen: list[tuple[str, str]] = []
+
+        def notify(hub: str, topic: str) -> int:
+            seen.append((hub, topic))
+            return 204
+
+        with patch("msgd.websub._notify_public_hub", side_effect=notify):
+            self.server.board.websub._run_once()
+
+        self.assertEqual(len(seen), 4)
+        self.assertEqual(self.server.board.store.due_websub_hub_deliveries(), [])
 
     def test_rejects_non_feed_topic_and_oversized_secret(self) -> None:
         status, _ = self.c.post(
