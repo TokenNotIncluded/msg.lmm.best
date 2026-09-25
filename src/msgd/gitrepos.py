@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -62,7 +63,7 @@ def git_push_payload(audience: str, signer_id: str, issued: int) -> bytes:
         f"audience={audience}\n"
         f"signer={signer_id}\n"
         f"issued={issued}\n"
-    ).encode("utf-8")
+    ).encode()
 
 
 @dataclass(frozen=True)
@@ -327,8 +328,9 @@ class RepoService:
         if content_encoding:
             env["HTTP_CONTENT_ENCODING"] = content_encoding
 
-        output = tempfile.TemporaryFile()
-        errors = tempfile.TemporaryFile()
+        # The response body must stay open after this function returns.
+        output = tempfile.TemporaryFile()  # noqa: SIM115
+        errors = tempfile.TemporaryFile()  # noqa: SIM115
         process = None
         try:
             process = subprocess.Popen(
@@ -355,10 +357,8 @@ class RepoService:
                         process.stdin.write(chunk)
                     except BrokenPipeError:
                         broken = True
-                try:
+                with suppress(BrokenPipeError):
                     process.stdin.close()
-                except BrokenPipeError:
-                    pass
             try:
                 return_code = process.wait(timeout=120)
             except subprocess.TimeoutExpired as exc:
