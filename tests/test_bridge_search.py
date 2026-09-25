@@ -200,7 +200,7 @@ class BridgeSearchCase(unittest.TestCase):
         status, body = self.c.get("/guest/post", name="Tiny", text="hello")
         self.assertEqual(status, 201, body)
         post_id = int(dict(line.split("=", 1) for line in body.splitlines() if "=" in line)["id"])
-        self.assertIn("[auth:unsigned] [anon] Tiny", self.c.get("/guest")[1])
+        self.assertIn("[auth:unsigned] [anon] anonymous", self.c.get("/guest")[1])
 
         status, _ = self.c.get("/guest/edit", id=str(post_id), text="updated")
         self.assertEqual(status, 200)
