@@ -857,6 +857,17 @@ class Store:
                     time.time(),
                 ),
             )
+            self._append_ca_event(
+                "ISSUED",
+                {
+                    "serial": cert.serial,
+                    "subject_id": cert.subject_id,
+                    "issuer_id": cert.issuer_id,
+                    "issuer_serial": cert.issuer_serial,
+                    "delegate": cert.delegate,
+                    "grants": cert.grants,
+                },
+            )
         return cert
 
     def certificate(self, serial: str) -> dict[str, Any] | None:
@@ -951,6 +962,14 @@ class Store:
             self._conn.execute(
                 "INSERT INTO revocations(serial, revoked_at, revoked_by) VALUES (?, ?, ?)",
                 (serial, time.time(), signer_id),
+            )
+            self._append_ca_event(
+                "REVOKED",
+                {
+                    "serial": serial,
+                    "subject_id": cert.subject_id,
+                    "revoked_by": signer_id,
+                },
             )
 
     def is_revoked(self, serial: str) -> bool:
