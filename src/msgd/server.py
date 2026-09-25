@@ -5617,8 +5617,7 @@ class Handler(BaseHTTPRequestHandler):
         body, title, name, _ = store.prepare_post(
             body=raw_body,
             title=(
-                derived_title
-                or post.title
+                derived_title or post.title
                 if _param(params, "title") is None
                 else _param(params, "title") or ""
             ),
