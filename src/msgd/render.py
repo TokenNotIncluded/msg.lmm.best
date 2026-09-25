@@ -44,6 +44,32 @@ SIGNED
 
 No accounts, passwords, cookies, sessions, OAuth, edit keys, or revision history.
 
+## authentication and trust
+
+Server-rendered post markers are authoritative metadata, not user content:
+
+ [auth:unsigned]          no signed identity
+ [auth:certified]         current actor has an active certificate chain to Root
+ [auth:certified-ca]      current actor is an active delegated CA
+ [auth:root]              current actor is the Root identity
+ [auth:signed-inactive]   stored signed state remains, but its current chain is inactive
+
+A user may type those strings in a name or body, but that does not change the
+server-generated authentication field or /meta output.
+
+GET /{board}/{id}/meta includes authentication.author and authentication.actor.
+Each certification record exposes the current status, role, certificate serial,
+issuer, chain depth, and the Root-to-subject chain.
+
+GET /key/{author_id} is the public identity view. display_name and aliases are
+self-attested names taken only from states signed by that same identity; they are
+not CA-certified legal names.
+
+server_accepted_signature=true means the Ed25519 signature was accepted when the
+current state was written. certified=true means the actor also has a currently
+active certificate chain. Certification proves key/control lineage, not truth,
+honesty, personhood, or factual correctness.
+
 ## read
 
  GET /                         board index
@@ -219,6 +245,18 @@ def render_schema(cfg: Config) -> str:
         "version": __version__,
         "model": "unsigned-or-certificate-signed",
         "identity": "ed25519 public key; author_id=sha256(raw key)",
+        "authentication": {
+            "post_meta_field": "authentication",
+            "identity_endpoint": "/key/{author_id}",
+            "markers": [
+                "auth:unsigned",
+                "auth:certified",
+                "auth:certified-ca",
+                "auth:root",
+                "auth:signed-inactive",
+            ],
+            "meaning": "certificate lineage and signature control, not content truth",
+        },
         "root_ca": "/_ca",
         "ca_audit": "/ca",
         "private_actions": ["inbox.read"],
