@@ -2009,35 +2009,30 @@ def render_files_listing(
 
 
 def render_latest_root() -> str:
-    return (
-        "# /latest\n"
-        "\n"
-        "stable pointers to the newest current objects\n"
-        "\n"
-        "post    /latest/post    newest non-system post\n"
-        "update  /latest/update  most recently modified post\n"
-        "reply   /latest/reply   newest reply post\n"
-        "user    /latest/user    newest signed identity\n"
-        "profile /latest/profile most recently updated signed profile\n"
-        "board   /latest/board   newest non-default board\n"
-        "tag     /latest/tag     most recently used hashtag\n"
-        "file    /latest/file    newest active attachment\n"
-        "\n"
-        "machine: ?format=json\n"
-        "follow: ?redirect=1 (307 Temporary Redirect)\n"
-    )
-
-
+    rows = [
+        ("post", "/latest/post", "newest non-system post"),
+        ("update", "/latest/update", "most recently modified post"),
+        ("reply", "/latest/reply", "newest reply post"),
+        ("user", "/latest/user", "newest signed identity"),
+        ("profile", "/latest/profile", "most recently updated signed profile"),
+        ("board", "/latest/board", "newest non-default board"),
+        ("tag", "/latest/tag", "most recently used hashtag"),
+        ("file", "/latest/file", "newest active attachment"),
+    ]
+    lines = ["# /latest", "", "stable pointers to the newest current objects", ""]
+    lines.extend(f"{kind:<7} {md_link(path, path):<36} {description}" for kind, path, description in rows)
+    lines += ["", "machine: ?format=json", "follow: ?redirect=1 (307 Temporary Redirect)"]
+    return "\n".join(lines) + "\n"
 def render_latest_pointer(item: dict[str, Any]) -> str:
     kind = str(item.get("type") or "object")
-    lines = [f"# /latest/{kind}", "", f"target: {item['target']}"]
+    target = str(item["target"])
+    target_text = md_link(target, target) if target.startswith("/") else target
+    lines = [f"# /latest/{kind}", "", f"target: {target_text}"]
     for key, value in item.items():
         if key in {"type", "target"} or value is None or value == "":
             continue
         lines.append(f"{key}: {value}")
     return "\n".join(lines) + "\n"
-
-
 def render_post_index(
     kind: str,
     posts: list[Post] | tuple[Post, ...],
@@ -2052,21 +2047,21 @@ def render_post_index(
         for post in posts:
             title = f' · "{post.title}"' if post.title else ""
             target = f"/{post.board}/{post.id}"
+            link = md_link(target, target)
+            post_ref = md_link(f"#{post.id}", target)
             if kind == "by-time":
                 prefix = iso(post.created)
             elif kind == "by-updated":
                 prefix = iso(post.updated)
             else:
-                prefix = f"#{post.id}"
+                prefix = post_ref
             if kind in {"by-time", "by-updated"}:
-                lines.append(f"{prefix} · #{post.id} · {target} · {post.name}{title}")
+                lines.append(f"{prefix} · {post_ref} · {link} · {post.name}{title}")
             else:
-                lines.append(f"{prefix} · {target} · {iso(post.created)} · {post.name}{title}")
+                lines.append(f"{prefix} · {link} · {iso(post.created)} · {post.name}{title}")
     if next_url:
-        lines += ["", f"next: {next_url}"]
+        lines += ["", f"next: {md_link(next_url, next_url)}"]
     return "\n".join(lines) + "\n"
-
-
 def render_name_index(
     names: list[dict[str, Any]] | tuple[dict[str, Any], ...],
     *,
@@ -2078,15 +2073,14 @@ def render_name_index(
         lines.append("(empty)")
     else:
         for item in names:
+            profile = str(item["profile"])
             lines.append(
-                f"{item['name']} · {item['profile']} · "
+                f"{item['name']} · {md_link(profile, profile)} · "
                 f"posts={int(item['posts'])} · last={iso(float(item['last_used']))}"
             )
     if next_url:
-        lines += ["", f"next: {next_url}"]
+        lines += ["", f"next: {md_link(next_url, next_url)}"]
     return "\n".join(lines) + "\n"
-
-
 def render_dimension_index(
     kind: str,
     entries: list[dict[str, Any]] | tuple[dict[str, Any], ...],
