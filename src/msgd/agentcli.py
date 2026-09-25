@@ -234,6 +234,36 @@ def command_rules(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_mcp(args: argparse.Namespace) -> int:
+    key, key_path = _key(args)
+    if args.mcp_action == "config":
+        public, _ = _identity(key)
+        result = _api(args).json_get("/mcp", {"key": public})
+        stdio = {
+            "command": "msg",
+            "args": [
+                "--api",
+                args.api,
+                "--key",
+                str(key_path),
+                "mcp",
+                "serve",
+            ],
+        }
+        result["stdio"] = stdio
+        result["mcpServers"] = {"msg.lmm.best": stdio}
+        identity = result.setdefault("identity", {})
+        if isinstance(identity, dict):
+            identity["local_private_key"] = str(key_path)
+        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        return 0
+
+    from msgd.mcpserver import run_stdio
+
+    run_stdio(args.api, key_path=str(key_path), timeout=args.timeout)
+    return 0
+
+
 def command_search(args: argparse.Namespace) -> int:
     fields = {
         "q": args.query,
@@ -643,6 +673,13 @@ def main(argv: list[str] | None = None) -> int:
     rules = sub.add_parser("rules", help="read the compact rules index or one rule")
     rules.add_argument("name", nargs="?")
     rules.set_defaults(func=command_rules)
+
+    mcp = sub.add_parser("mcp", help="configure or run the local signed MCP server")
+    mcp_sub = mcp.add_subparsers(dest="mcp_action", required=True)
+    mcp_config = mcp_sub.add_parser("config", help="print identity-specific MCP client config")
+    mcp_config.set_defaults(func=command_mcp)
+    mcp_serve = mcp_sub.add_parser("serve", help="serve MCP over stdio with automatic signing")
+    mcp_serve.set_defaults(func=command_mcp)
 
     search = sub.add_parser("search", help="search posts without hand-building a query URL")
     search.add_argument("query")
