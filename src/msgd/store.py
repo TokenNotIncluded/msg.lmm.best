@@ -2860,6 +2860,89 @@ class Store:
             rows = self._conn.execute(sql, params).fetchall()
         return [post for row in rows if (post := self._row(row)) is not None]
 
+    def list_posts_by_time(
+        self,
+        *,
+        cursor: tuple[float, int] | None = None,
+        limit: int = 20,
+        order: str = "desc",
+    ) -> list[Post]:
+        """List posts by creation time with a stable (created, id) cursor."""
+        if order not in {"asc", "desc"}:
+            raise StoreError("order must be asc or desc", 400)
+
+        where: list[str] = []
+        params: list[Any] = []
+        if cursor is not None:
+            created, post_id = cursor
+            operator = ">" if order == "asc" else "<"
+            where.append(
+                f"(created {operator} ? OR (created = ? AND id {operator} ?))"
+            )
+            params.extend((created, created, post_id))
+
+        sql = self._select_posts()
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        direction = "ASC" if order == "asc" else "DESC"
+        sql += f" ORDER BY created {direction}, id {direction} LIMIT ?"
+        params.append(max(1, min(limit, self.cfg.max_limit + 1)))
+
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [post for row in rows if (post := self._row(row)) is not None]
+
+    def list_bound_names(
+        self,
+        *,
+        cursor_key: str | None = None,
+        limit: int = 20,
+        order: str = "asc",
+    ) -> list[dict[str, Any]]:
+        """List claimed signed names alphabetically for the canonical name index."""
+        if order not in {"asc", "desc"}:
+            raise StoreError("order must be asc or desc", 400)
+
+        params: list[Any] = []
+        where = ""
+        if cursor_key is not None:
+            operator = ">" if order == "asc" else "<"
+            where = f" WHERE nc.name_key {operator} ?"
+            params.append(cursor_key)
+
+        direction = "ASC" if order == "asc" else "DESC"
+        sql = f"""
+            SELECT nc.name_key, nc.display_name, nc.author_id, nc.public_key,
+                   nc.claimed, nc.last_used, COUNT(p.id) AS posts
+              FROM name_claims nc
+              LEFT JOIN posts p
+                ON p.author_id = nc.author_id
+               AND p.system = 0
+               AND p.custody_id IS NULL
+              {where}
+             GROUP BY nc.name_key, nc.display_name, nc.author_id, nc.public_key,
+                      nc.claimed, nc.last_used
+             ORDER BY nc.name_key {direction}
+             LIMIT ?
+        """
+        params.append(max(1, min(limit, self.cfg.max_limit + 1)))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+
+        return [
+            {
+                "name_key": str(row["name_key"]),
+                "name": str(row["display_name"]),
+                "author_id": str(row["author_id"]),
+                "public_key": str(row["public_key"]),
+                "claimed": round(float(row["claimed"]), 3),
+                "last_used": round(float(row["last_used"]), 3),
+                "posts": int(row["posts"]),
+                "profile": f"/@{quote(str(row['display_name']), safe='')}",
+            }
+            for row in rows
+        ]
+
     @staticmethod
     def _like_pattern(value: str) -> str:
         escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
