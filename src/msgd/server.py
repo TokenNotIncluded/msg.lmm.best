@@ -20,8 +20,8 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from msgd import __version__
 from msgd.analytics import Engagement
-from msgd.config import Config
 from msgd.commerce import CommerceService
+from msgd.config import Config
 from msgd.crypto import (
     ACTIONS,
     SignatureError,
