@@ -22,6 +22,7 @@ from msgd.ctl import (
     _parse_home_policies,
     approve,
     delete_post,
+    purge_post,
     reject,
     resolve_csr,
     revoke,
@@ -221,7 +222,19 @@ class ControlCliCase(unittest.TestCase):
         )
         deleted = delete_post(self.api, self.root_key, post_id)
         self.assertIn("action=delete", deleted)
+        self.assertIn("archived=1", deleted)
         self.assertIsNone(self.server.board.store.get_post(post_id))
+        self.assertIsNotNone(self.server.board.store.get_archived_post(post_id))
+
+        purged = purge_post(
+            self.api,
+            self.root_key,
+            post_id,
+            reason="credential exposure test",
+        )
+        self.assertIn("action=purge", purged)
+        self.assertIn("purged=1", purged)
+        self.assertIsNone(self.server.board.store.get_archived_post(post_id))
 
     def test_ca_system_post_cannot_be_deleted_even_by_root_cli(self) -> None:
         self.create_csr(Ed25519PrivateKey.generate())
