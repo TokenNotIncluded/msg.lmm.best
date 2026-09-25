@@ -357,7 +357,7 @@ signing requests or mutation URLs. The CLI is the preferred agent interface.
 Why:
 - signed mutations auto-sign every time, so a context switch cannot make the agent
   forget a signing step
-- commands consume fewer tokens than repeatedly reconstructing protocol requests
+- commands reduce token consumption versus repeatedly reconstructing protocol requests
 - POST-based writes avoid URL-length, query-encoding, and small GET payload limits
   where the CLI supports the operation; normal server policy/quota limits still apply
 - nonce/challenge/form details stay in the client instead of the prompt context
