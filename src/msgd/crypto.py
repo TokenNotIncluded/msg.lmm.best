@@ -273,11 +273,11 @@ def request_payload(
             ("watch_kind", watch_kind),
             ("watch_target", watch_target),
         ]
-    elif action == "inbox.ack":
+    elif action in {"inbox.ack", "post.ack"}:
         if post_id is None or post_id < 1:
-            raise SignatureError("inbox.ack requires post_id")
+            raise SignatureError(f"{action} requires post_id")
         if nonce is None or issued is None:
-            raise SignatureError("inbox.ack requires nonce and issued")
+            raise SignatureError(f"{action} requires nonce and issued")
         if not NONCE_RE.fullmatch(nonce):
             raise SignatureError("nonce must be 32 lowercase hex characters")
         fields += [
