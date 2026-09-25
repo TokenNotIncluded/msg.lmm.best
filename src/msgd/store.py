@@ -967,7 +967,7 @@ class Store:
 
     def ensure_board(self, name: str) -> None:
         if not valid_board_name(name):
-            raise StoreError(f"invalid board name: {name!r}", 400)
+            raise StoreError(board_name_error(name), 400)
         with self._lock:
             row = self._conn.execute("SELECT 1 FROM boards WHERE name = ?", (name,)).fetchone()
             if row is None:
@@ -2400,6 +2400,10 @@ class Store:
             name=name,
             max_body_bytes=max_body_bytes,
         )
+        if auth is None:
+            name = self.anonymous_display_name(name, check_claim=False)
+        else:
+            self.normalize_identity_name(name)
         files = self.prepare_files(files)
         self.ensure_board(board)
         if reply_to is not None:
@@ -2417,6 +2421,28 @@ class Store:
             self.consume_nonce(auth)
 
         with self._lock, self._conn:
+            if auth is None:
+                base_name = self.anonymous_base_name(name)
+                name_key = self.normalize_identity_name(base_name)
+                claim = self._conn.execute(
+                    "SELECT author_id, public_key FROM name_claims WHERE name_key = ?",
+                    (name_key,),
+                ).fetchone()
+                if claim is not None:
+                    raise StoreError(
+                        f"name {base_name!r} is already bound to public key {claim['public_key']} "
+                        f"(author_id {claim['author_id']})",
+                        409,
+                    )
+            else:
+                self._claim_identity_name(
+                    author_id=auth.signer_id,
+                    public_key=auth.public_key,
+                    name=name,
+                    signature=auth.signature,
+                    seen=now,
+                )
+
             file_bytes = sum(file.nbytes for file in files)
             new_bytes = nbytes + file_bytes
             if new_bytes > self.cfg.max_storage_bytes:
@@ -2484,6 +2510,20 @@ class Store:
             )
             post_id = int(cur.lastrowid or 0)
             if auth is not None:
+                self._conn.execute(
+                    """
+                    UPDATE name_claims
+                       SET claim_post_id = COALESCE(claim_post_id, ?),
+                           last_used = ?
+                     WHERE name_key = ? AND author_id = ?
+                    """,
+                    (
+                        post_id,
+                        now,
+                        self.normalize_identity_name(name),
+                        auth.signer_id,
+                    ),
+                )
                 self._remember_identity_name(auth.signer_id, name, now)
             self._insert_attachments(post_id, files)
             self._reindex_inbox(post_id)
@@ -2537,8 +2577,35 @@ class Store:
                 raise StoreError("signed post requires a signed request", 403)
             if auth.version != post.sig_version + 1:
                 raise StoreError("stale signature version", 409)
+            if auth.signer_id != post.author_id and new_name != post.name:
+                raise StoreError("only the post owner may change its bound display name", 403)
+            self.normalize_identity_name(new_name)
+        elif new_name != post.name:
+            new_name = self.anonymous_display_name(new_name, check_claim=False)
 
         with self._lock, self._conn:
+            if post.signed and auth is not None and auth.signer_id == post.author_id:
+                self._claim_identity_name(
+                    author_id=auth.signer_id,
+                    public_key=post.author_key or auth.public_key,
+                    name=new_name,
+                    signature=auth.signature,
+                    seen=time.time(),
+                    post_id=post.id,
+                )
+            elif not post.signed and new_name != post.name:
+                base_name = self.anonymous_base_name(new_name)
+                name_key = self.normalize_identity_name(base_name)
+                claim = self._conn.execute(
+                    "SELECT author_id, public_key FROM name_claims WHERE name_key = ?",
+                    (name_key,),
+                ).fetchone()
+                if claim is not None:
+                    raise StoreError(
+                        f"name {base_name!r} is already bound to public key {claim['public_key']} "
+                        f"(author_id {claim['author_id']})",
+                        409,
+                    )
             used = self._storage_bytes()
             old_bytes = self._post_storage_bytes(post.id)
             file_bytes = (
