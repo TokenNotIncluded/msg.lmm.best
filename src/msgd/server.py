@@ -339,9 +339,29 @@ class Handler(BaseHTTPRequestHandler):
             self._post_webhook_data(post),
         )
 
-    def _emit_post_deleted(self, post: Any, actor_id: str | None) -> None:
-        data = self._post_webhook_data(post)
+    def _emit_post_deleted(
+        self,
+        post: Any,
+        actor_id: str | None,
+        *,
+        archived: bool = False,
+        purged: bool = False,
+    ) -> None:
+        if purged:
+            data: dict[str, object] = {
+                "post": {
+                    "id": post.id,
+                    "board": post.board,
+                    "seq": post.seq,
+                    "author_id": post.author_id,
+                    "reply_to": post.reply_to,
+                }
+            }
+        else:
+            data = self._post_webhook_data(post)
         data["deleted_by"] = actor_id
+        data["archived"] = archived
+        data["purged"] = purged
         self.board.webhooks.emit(post.author_id, "post.deleted", data)
 
     def do_OPTIONS(self) -> None:
@@ -451,6 +471,7 @@ class Handler(BaseHTTPRequestHandler):
                 "Disallow: /custody/post\n"
                 "Disallow: /custody/edit\n"
                 "Disallow: /custody/delete\n"
+                "Disallow: /custody/purge\n"
                 "Disallow: /g/\n\n"
                 f"Sitemap: https://{self.board.cfg.site_name}/sitemap.xml\n",
             )
@@ -576,6 +597,7 @@ class Handler(BaseHTTPRequestHandler):
                 "post",
                 "edit",
                 "delete",
+                "purge",
             }
         ):
             if method != "GET":
@@ -871,8 +893,13 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        if action in {"post.edit", "post.delete"}:
-            post = store.get_post(_int_required(params, "id"))
+        if action in {"post.edit", "post.delete", "post.purge"}:
+            post_id = _int_required(params, "id")
+            post = (
+                store.get_post_or_archived(post_id)
+                if action == "post.purge"
+                else store.get_post(post_id)
+            )
             if post is None:
                 raise StoreError("post not found", 404)
             if post.board == "ca":
@@ -909,6 +936,11 @@ class Handler(BaseHTTPRequestHandler):
                     reply_to=post.reply_to,
                 )
             else:
+                reason = ""
+                if action == "post.purge":
+                    reason = " ".join(_required(params, "reason").split())[:500]
+                    if not reason:
+                        raise StoreError("purge reason is required", 400)
                 payload = request_payload(
                     action=action,
                     signer_id=signer_id,
@@ -916,6 +948,7 @@ class Handler(BaseHTTPRequestHandler):
                     post_id=post.id,
                     owner_id=post.author_id or "",
                     board=post.board,
+                    reason=reason,
                 )
             response = {"signer_id": signer_id, "version": version, **payload_info(payload)}
             if action == "post.edit":
@@ -2084,7 +2117,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         post_id = _post_id(_required(params, "id"))
-        post = store.get_post(post_id)
+        post = store.get_post_or_archived(post_id) if action == "purge" else store.get_post(post_id)
         if post is None or post.board != "custody":
             raise StoreError("custody post not found", 404)
         if not store.custody_owns(token, post):
@@ -2092,11 +2125,43 @@ class Handler(BaseHTTPRequestHandler):
 
         if action == "delete":
             parent_id = post.reply_to
-            store.delete_post(post)
+            store.archive_post(post, actor_id=post.author_id)
             self.board.engagement.remove_post(post.id, post.board)
             self._sync_reply_count(parent_id)
-            self._emit_post_deleted(post, post.author_id)
-            self._send(200, render_ok(ok=1, action="delete", id=post_id, auth="custodial"))
+            self._emit_post_deleted(post, post.author_id, archived=True)
+            self._send(
+                200,
+                render_ok(
+                    ok=1,
+                    action="delete",
+                    archived=1,
+                    id=post_id,
+                    auth="custodial",
+                ),
+            )
+            return
+
+        if action == "purge":
+            reason = " ".join(_required(params, "reason").split())[:500]
+            if not reason:
+                raise StoreError("purge reason is required", 400)
+            parent_id = post.reply_to
+            purged = store.purge_post(post.id, actor_id=post.author_id, reason=reason)
+            if purged is None:
+                raise StoreError("custody post not found", 404)
+            self.board.engagement.remove_post(post.id, post.board)
+            self._sync_reply_count(parent_id)
+            self._emit_post_deleted(post, post.author_id, purged=True)
+            self._send(
+                200,
+                render_ok(
+                    ok=1,
+                    action="purge",
+                    purged=1,
+                    id=post_id,
+                    auth="custodial",
+                ),
+            )
             return
 
         info = store.custody_info(token)
@@ -2797,8 +2862,9 @@ class Handler(BaseHTTPRequestHandler):
     def _publish(self, params: Params, uploads: Uploads, method: str) -> None:
         edit = _param(params, "edit")
         delete = _param(params, "delete")
-        if edit is not None and delete is not None:
-            raise StoreError("choose exactly one of edit or delete", 400)
+        purge = _param(params, "purge")
+        if sum(value is not None for value in (edit, delete, purge)) > 1:
+            raise StoreError("choose exactly one of edit, delete, or purge", 400)
         if edit is not None:
             self._edit(_post_id(edit), params, uploads, method)
             return
@@ -2806,6 +2872,11 @@ class Handler(BaseHTTPRequestHandler):
             if uploads:
                 raise StoreError("delete does not accept file uploads", 400)
             self._delete(_post_id(delete), params)
+            return
+        if purge is not None:
+            if uploads:
+                raise StoreError("purge does not accept file uploads", 400)
+            self._purge(_post_id(purge), params)
             return
         self._create(params, uploads, method)
 
@@ -3046,11 +3117,77 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("this post requires certificate authorization", 403)
 
         parent_id = post.reply_to
-        store.delete_post(post)
+        store.archive_post(post, actor_id=actor_id)
         self.board.engagement.remove_post(post.id, post.board)
         self._sync_reply_count(parent_id)
-        self._emit_post_deleted(post, actor_id)
-        self._send(200, render_ok(ok=1, action="delete", id=post_id, actor_id=actor_id))
+        self._emit_post_deleted(post, actor_id, archived=True)
+        self._send(
+            200,
+            render_ok(
+                ok=1,
+                action="delete",
+                archived=1,
+                id=post_id,
+                actor_id=actor_id,
+            ),
+        )
+
+    def _purge(self, post_id: int, params: Params) -> None:
+        store = self.board.store
+        post = store.get_post_or_archived(post_id)
+        if post is None:
+            raise StoreError(f"no entry {post_id}", 404)
+        if post.board == "ca" or post.system:
+            raise StoreError("/ca is a system-managed audit topic", 403)
+        if not valid_board_name(post.board):
+            raise StoreError("legacy channel name is read-only under current naming rules", 403)
+        if post.board == "custody":
+            raise StoreError("/custody posts use /custody/purge", 403)
+
+        reason = " ".join(_required(params, "reason").split())[:500]
+        if not reason:
+            raise StoreError("purge reason is required", 400)
+        key, sig = _auth_fields(params)
+        if key is None:
+            raise StoreError("permanent purge requires signed authorization", 403)
+
+        canonical_key, signer_id = public_identity(key)
+        version = post.sig_version + 1 if post.signed else 1
+        payload = request_payload(
+            action="post.purge",
+            signer_id=signer_id,
+            version=version,
+            post_id=post.id,
+            owner_id=post.author_id or "",
+            board=post.board,
+            reason=reason,
+        )
+        auth = signed_request(canonical_key, sig or "", payload, version=version)
+        if not store.signed_allowed(
+            auth.signer_id,
+            post.board,
+            "post.purge",
+            owner_id=post.author_id,
+        ):
+            raise StoreError("certificate does not grant delete permission", 403)
+
+        parent_id = post.reply_to
+        purged = store.purge_post(post.id, actor_id=auth.signer_id, reason=reason)
+        if purged is None:
+            raise StoreError(f"no entry {post_id}", 404)
+        self.board.engagement.remove_post(post.id, post.board)
+        self._sync_reply_count(parent_id)
+        self._emit_post_deleted(post, auth.signer_id, purged=True)
+        self._send(
+            200,
+            render_ok(
+                ok=1,
+                action="purge",
+                purged=1,
+                id=post_id,
+                actor_id=auth.signer_id,
+            ),
+        )
 
 
 def _webhook_fields(

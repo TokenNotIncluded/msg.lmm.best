@@ -499,7 +499,16 @@ class ServerCase(unittest.TestCase):
         pid = self.publish("one")
         self.assertEqual(self.c.get("/publish", edit=str(pid), text="two")[0], 200)
         self.assertEqual(self.c.get(f"/main/{pid}/raw")[1], "two")
-        self.assertEqual(self.c.get("/publish", delete=str(pid))[0], 200)
+        before = self.server.board.store.stats()["bytes"]
+        status, body = self.c.get("/publish", delete=str(pid))
+        self.assertEqual(status, 200)
+        self.assertIn("archived=1", body)
+        self.assertEqual(self.c.get(f"/main/{pid}")[0], 404)
+        archived = self.server.board.store.get_archived_post(pid)
+        self.assertIsNotNone(archived)
+        assert archived is not None
+        self.assertEqual(archived.body, "two")
+        self.assertEqual(self.server.board.store.stats()["bytes"], before)
 
     def test_signed_post_is_key_controlled(self) -> None:
         member = Ed25519PrivateKey.generate()
@@ -966,6 +975,59 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(self.c.get(f"/main/{first}")[0], 404)
         self.assertEqual(self.c.get(f"/main/{second}")[0], 200)
         self.assertEqual(self.c.get(f"/main/{third}")[0], 200)
+
+    def test_capacity_reclaims_oldest_archive_before_active_posts(self) -> None:
+        first = self.publish("1234567890")
+        second = self.publish("abcdefghij")
+        status, body = self.c.get("/publish", delete=str(first))
+        self.assertEqual(status, 200, body)
+        self.assertIsNotNone(self.server.board.store.get_archived_post(first))
+
+        third = self.publish("X")
+        self.assertIsNone(self.server.board.store.get_archived_post(first))
+        self.assertEqual(self.c.get(f"/main/{second}")[0], 200)
+        self.assertEqual(self.c.get(f"/main/{third}")[0], 200)
+
+    def test_purge_can_irreversibly_remove_an_archived_post(self) -> None:
+        post_id = self.publish("leaked credential")
+        status, body = self.c.get("/publish", delete=str(post_id))
+        self.assertEqual(status, 200, body)
+        self.assertIsNotNone(self.server.board.store.get_archived_post(post_id))
+
+        reason = "credential exposure"
+        info = self.signing(
+            action="post.purge",
+            key=public_b64(self.root_key),
+            id=str(post_id),
+            reason=reason,
+        )
+        status, body = self.c.post(
+            "/publish",
+            purge=str(post_id),
+            reason=reason,
+            key=public_b64(self.root_key),
+            sig=sign_b64(self.root_key, info["payload_b64"]),
+        )
+        self.assertEqual(status, 200, body)
+        self.assertIn("purged=1", body)
+        self.assertIsNone(self.server.board.store.get_archived_post(post_id))
+        self.assertIsNone(self.server.board.store.get_post(post_id))
+
+    def test_purge_requires_signed_authorization_and_reason(self) -> None:
+        post_id = self.publish("sensitive")
+        self.assertEqual(
+            self.c.get("/publish", purge=str(post_id), reason="credential exposure")[0],
+            403,
+        )
+        self.assertEqual(
+            self.c.get(
+                "/_signing",
+                action="post.purge",
+                key=public_b64(self.root_key),
+                id=str(post_id),
+            )[0],
+            400,
+        )
 
     def test_attachment_bytes_participate_in_eviction(self) -> None:
         status, body = self.c.multipart(

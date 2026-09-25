@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import re
@@ -124,6 +125,7 @@ TABLES = """
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
+PRAGMA secure_delete = ON;
 
 CREATE TABLE IF NOT EXISTS boards (
     name        TEXT PRIMARY KEY,
@@ -170,6 +172,54 @@ CREATE TABLE IF NOT EXISTS attachments (
     UNIQUE(post_id, slot)
 );
 CREATE INDEX IF NOT EXISTS attachments_post ON attachments(post_id);
+
+CREATE TABLE IF NOT EXISTS archived_posts (
+    id          INTEGER PRIMARY KEY,
+    board       TEXT NOT NULL,
+    seq         INTEGER NOT NULL,
+    name        TEXT NOT NULL DEFAULT 'anonymous',
+    title       TEXT NOT NULL DEFAULT '',
+    body        TEXT NOT NULL,
+    created     REAL NOT NULL,
+    updated     REAL NOT NULL,
+    nbytes      INTEGER NOT NULL,
+    author_key  TEXT,
+    author_id   TEXT,
+    actor_key   TEXT,
+    actor_id    TEXT,
+    signature   TEXT,
+    sig_version INTEGER NOT NULL DEFAULT 0,
+    sig_nonce   TEXT,
+    sig_issued  INTEGER,
+    reply_to    INTEGER,
+    system      INTEGER NOT NULL DEFAULT 0,
+    custody_id  TEXT,
+    archived_at REAL NOT NULL,
+    archived_by TEXT
+);
+CREATE INDEX IF NOT EXISTS archived_posts_time ON archived_posts(archived_at, id);
+CREATE INDEX IF NOT EXISTS archived_posts_board ON archived_posts(board, id);
+
+CREATE TABLE IF NOT EXISTS archived_attachments (
+    id           INTEGER PRIMARY KEY,
+    post_id      INTEGER NOT NULL REFERENCES archived_posts(id) ON DELETE CASCADE,
+    slot         INTEGER NOT NULL,
+    name         TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    data         BLOB NOT NULL,
+    nbytes       INTEGER NOT NULL,
+    sha256       TEXT NOT NULL,
+    UNIQUE(post_id, slot)
+);
+CREATE INDEX IF NOT EXISTS archived_attachments_post ON archived_attachments(post_id);
+
+CREATE TABLE IF NOT EXISTS purge_tombstones (
+    post_id   INTEGER PRIMARY KEY,
+    board     TEXT NOT NULL,
+    purged_at REAL NOT NULL,
+    purged_by TEXT,
+    reason    TEXT NOT NULL DEFAULT ''
+);
 
 CREATE TABLE IF NOT EXISTS signature_nonces (
     signer_id TEXT NOT NULL,
@@ -984,7 +1034,9 @@ class Store:
             """
             SELECT
                 COALESCE((SELECT SUM(nbytes) FROM posts WHERE system = 0), 0)
-              + COALESCE((SELECT SUM(nbytes) FROM attachments), 0) AS n
+              + COALESCE((SELECT SUM(nbytes) FROM attachments), 0)
+              + COALESCE((SELECT SUM(nbytes) FROM archived_posts WHERE system = 0), 0)
+              + COALESCE((SELECT SUM(nbytes) FROM archived_attachments), 0) AS n
             """
         ).fetchone()
         return int(row["n"])
@@ -2063,7 +2115,7 @@ class Store:
             return "post.edit.any" in permissions or (
                 owner_id == signer_id and "post.edit.self" in permissions
             )
-        if action == "post.delete":
+        if action in {"post.delete", "post.purge"}:
             return "post.delete.any" in permissions or (
                 owner_id == signer_id and "post.delete.self" in permissions
             )
@@ -2568,27 +2620,51 @@ class Store:
             need = max(0, used + new_bytes - self.cfg.max_storage_bytes)
             if need:
                 freed = 0
-                rows = self._conn.execute(
+                archived_ids: list[int] = []
+                archived_rows = self._conn.execute(
                     """
                     SELECT p.id, p.nbytes + COALESCE(SUM(a.nbytes), 0) AS nbytes
-                      FROM posts p
-                      LEFT JOIN attachments a ON a.post_id = p.id
+                      FROM archived_posts p
+                      LEFT JOIN archived_attachments a ON a.post_id = p.id
                      WHERE p.system = 0
                      GROUP BY p.id
-                     ORDER BY p.id ASC
+                     ORDER BY p.archived_at ASC, p.id ASC
                     """
                 ).fetchall()
-                ids: list[int] = []
-                for row in rows:
-                    ids.append(int(row["id"]))
+                for row in archived_rows:
+                    archived_ids.append(int(row["id"]))
                     freed += int(row["nbytes"])
                     if freed >= need:
                         break
-                if ids:
-                    marks = ",".join("?" for _ in ids)
-                    self._conn.execute(f"DELETE FROM posts WHERE id IN ({marks})", ids)
-                    self._prune_empty_boards()
-                    evicted = len(ids)
+                if archived_ids:
+                    marks = ",".join("?" for _ in archived_ids)
+                    self._conn.execute(
+                        f"DELETE FROM archived_posts WHERE id IN ({marks})",
+                        archived_ids,
+                    )
+
+                active_ids: list[int] = []
+                if freed < need:
+                    rows = self._conn.execute(
+                        """
+                        SELECT p.id, p.nbytes + COALESCE(SUM(a.nbytes), 0) AS nbytes
+                          FROM posts p
+                          LEFT JOIN attachments a ON a.post_id = p.id
+                         WHERE p.system = 0
+                         GROUP BY p.id
+                         ORDER BY p.id ASC
+                        """
+                    ).fetchall()
+                    for row in rows:
+                        active_ids.append(int(row["id"]))
+                        freed += int(row["nbytes"])
+                        if freed >= need:
+                            break
+                    if active_ids:
+                        marks = ",".join("?" for _ in active_ids)
+                        self._conn.execute(f"DELETE FROM posts WHERE id IN ({marks})", active_ids)
+                        self._prune_empty_boards()
+                evicted = len(archived_ids) + len(active_ids)
 
             seq = int(
                 self._conn.execute(
@@ -2654,6 +2730,18 @@ class Store:
         with self._lock:
             row = self._conn.execute(self._select_posts() + " WHERE id = ?", (post_id,)).fetchone()
         return self._row(row)
+
+    def get_archived_post(self, post_id: int) -> Post | None:
+        with self._lock:
+            row = self._conn.execute(
+                self._select_archived_posts() + " WHERE id = ?",
+                (post_id,),
+            ).fetchone()
+        return self._row(row)
+
+    def get_post_or_archived(self, post_id: int) -> Post | None:
+        post = self.get_post(post_id)
+        return post if post is not None else self.get_archived_post(post_id)
 
     def find_in_board(self, board: str, ident: str | int) -> Post | None:
         try:
@@ -2787,14 +2875,116 @@ class Store:
         assert updated is not None
         return updated
 
-    def delete_post(self, post: Post) -> bool:
+    def archive_post(self, post: Post, *, actor_id: str | None = None) -> bool:
         if post.system:
             raise StoreError("system post is immutable", 403)
         with self._lock, self._conn:
+            row = self._conn.execute("SELECT 1 FROM posts WHERE id = ?", (post.id,)).fetchone()
+            if row is None:
+                return False
+            now = time.time()
+            self._conn.execute(
+                """
+                INSERT INTO archived_posts(
+                    id, board, seq, name, title, body, created, updated, nbytes,
+                    author_key, author_id, actor_key, actor_id, signature,
+                    sig_version, sig_nonce, sig_issued, reply_to, system, custody_id,
+                    archived_at, archived_by
+                )
+                SELECT
+                    id, board, seq, name, title, body, created, updated, nbytes,
+                    author_key, author_id, actor_key, actor_id, signature,
+                    sig_version, sig_nonce, sig_issued, reply_to, system, custody_id,
+                    ?, ?
+                  FROM posts
+                 WHERE id = ?
+                """,
+                (now, actor_id, post.id),
+            )
+            self._conn.execute(
+                """
+                INSERT INTO archived_attachments(
+                    id, post_id, slot, name, content_type, data, nbytes, sha256
+                )
+                SELECT id, post_id, slot, name, content_type, data, nbytes, sha256
+                  FROM attachments
+                 WHERE post_id = ?
+                """,
+                (post.id,),
+            )
             cur = self._conn.execute("DELETE FROM posts WHERE id = ?", (post.id,))
             if cur.rowcount:
                 self._prune_empty_boards()
         return cur.rowcount > 0
+
+    def delete_post(self, post: Post) -> bool:
+        """Backward-compatible alias: normal delete now archives."""
+        return self.archive_post(post)
+
+    def purge_post(
+        self,
+        post_id: int,
+        *,
+        actor_id: str | None = None,
+        reason: str = "",
+    ) -> Post | None:
+        reason = " ".join(reason.split())[:500]
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                self._select_posts() + " WHERE id = ?",
+                (post_id,),
+            ).fetchone()
+            source = "posts"
+            if row is None:
+                row = self._conn.execute(
+                    self._select_archived_posts() + " WHERE id = ?",
+                    (post_id,),
+                ).fetchone()
+                source = "archived_posts"
+            post = self._row(row)
+            if post is None:
+                return None
+            if post.system:
+                raise StoreError("system post is immutable", 403)
+
+            delivery_rows = self._conn.execute("SELECT id, data FROM webhook_deliveries").fetchall()
+            delivery_ids: list[str] = []
+            for delivery in delivery_rows:
+                try:
+                    data = json.loads(str(delivery["data"]))
+                except json.JSONDecodeError:
+                    continue
+                webhook_post = data.get("post")
+                if isinstance(webhook_post, dict) and webhook_post.get("id") == post.id:
+                    delivery_ids.append(str(delivery["id"]))
+            if delivery_ids:
+                marks = ",".join("?" for _ in delivery_ids)
+                self._conn.execute(
+                    f"DELETE FROM webhook_deliveries WHERE id IN ({marks})",
+                    delivery_ids,
+                )
+
+            self._conn.execute(
+                """
+                INSERT INTO purge_tombstones(post_id, board, purged_at, purged_by, reason)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(post_id) DO UPDATE SET
+                    board = excluded.board,
+                    purged_at = excluded.purged_at,
+                    purged_by = excluded.purged_by,
+                    reason = excluded.reason
+                """,
+                (post.id, post.board, time.time(), actor_id, reason),
+            )
+            self._conn.execute(f"DELETE FROM {source} WHERE id = ?", (post.id,))
+            if source == "posts":
+                self._prune_empty_boards()
+
+        # secure_delete overwrites deleted SQLite cells/pages. Truncate the WAL so
+        # an emergency purge does not leave the just-removed content in old frames.
+        with self._lock, contextlib.suppress(sqlite3.OperationalError):
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+        return post
 
     def _prune_empty_boards(self) -> None:
         self._conn.execute(
@@ -3796,21 +3986,40 @@ class Store:
             files = self._conn.execute(
                 "SELECT COUNT(*) AS files, COALESCE(SUM(nbytes),0) AS file_bytes FROM attachments"
             ).fetchone()
+            archived = self._conn.execute(
+                """
+                SELECT COUNT(*) AS posts,
+                       COALESCE(SUM(CASE WHEN system = 0 THEN nbytes ELSE 0 END), 0) AS post_bytes
+                  FROM archived_posts
+                """
+            ).fetchone()
+            archived_files = self._conn.execute(
+                """
+                SELECT COUNT(*) AS files, COALESCE(SUM(nbytes),0) AS file_bytes
+                  FROM archived_attachments
+                """
+            ).fetchone()
             boards = self._conn.execute("SELECT COUNT(*) AS n FROM boards").fetchone()["n"]
             hashtags = self._conn.execute(
                 "SELECT COUNT(DISTINCT tag) AS n FROM post_tags"
             ).fetchone()["n"]
         post_bytes = int(row["post_bytes"])
         file_bytes = int(files["file_bytes"])
+        archived_post_bytes = int(archived["post_bytes"])
+        archived_file_bytes = int(archived_files["file_bytes"])
+        archived_bytes = archived_post_bytes + archived_file_bytes
         return {
             "boards": int(boards),
             "hashtags": int(hashtags),
             "posts": int(row["posts"]),
             "system_posts": int(row["system_posts"] or 0),
             "files": int(files["files"]),
+            "archived_posts": int(archived["posts"]),
+            "archived_files": int(archived_files["files"]),
             "post_bytes": post_bytes,
             "file_bytes": file_bytes,
-            "bytes": post_bytes + file_bytes,
+            "archived_bytes": archived_bytes,
+            "bytes": post_bytes + file_bytes + archived_bytes,
             "capacity": self.cfg.max_storage_bytes,
             "latest_id": int(row["latest_id"]),
         }
@@ -3878,6 +4087,15 @@ class Store:
             "SELECT id, board, seq, name, title, body, created, updated, nbytes,"
             " author_key, author_id, actor_key, actor_id, signature,"
             " sig_version, sig_nonce, sig_issued, reply_to, system, custody_id FROM posts"
+        )
+
+    @staticmethod
+    def _select_archived_posts() -> str:
+        return (
+            "SELECT id, board, seq, name, title, body, created, updated, nbytes,"
+            " author_key, author_id, actor_key, actor_id, signature,"
+            " sig_version, sig_nonce, sig_issued, reply_to, system, custody_id"
+            " FROM archived_posts"
         )
 
     @staticmethod

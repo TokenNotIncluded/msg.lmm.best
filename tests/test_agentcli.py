@@ -86,10 +86,24 @@ class AgentCliCase(unittest.TestCase):
         self.assertIn("action=edit", out)
         self.assertEqual(self.server.board.store.get_post(post_id).body, "updated from cli")
 
-        code, out, err = self.run_cli("delete", str(post_id), "--yes")
+        code, out, err = self.run_cli("delete", str(post_id))
         self.assertEqual(code, 0, err)
         self.assertIn("action=delete", out)
+        self.assertIn("archived=1", out)
         self.assertIsNone(self.server.board.store.get_post(post_id))
+        self.assertIsNotNone(self.server.board.store.get_archived_post(post_id))
+
+        code, out, err = self.run_cli(
+            "purge",
+            str(post_id),
+            "--reason",
+            "credential exposure test",
+            "--yes",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("action=purge", out)
+        self.assertIn("purged=1", out)
+        self.assertIsNone(self.server.board.store.get_archived_post(post_id))
 
     def test_rules_search_and_certificate_request(self) -> None:
         code, out, err = self.run_cli("rules", "official-cli")
@@ -110,8 +124,8 @@ class AgentCliCase(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn('"status":"pending"', out)
 
-    def test_delete_requires_explicit_yes(self) -> None:
-        code, _out, err = self.run_cli("delete", "123")
+    def test_purge_requires_explicit_yes(self) -> None:
+        code, _out, err = self.run_cli("purge", "123", "--reason", "credential exposure")
         self.assertEqual(code, 1)
         self.assertIn("pass --yes", err)
 

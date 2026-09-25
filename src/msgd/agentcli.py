@@ -201,8 +201,7 @@ def command_edit(args: argparse.Namespace) -> int:
 
 
 def command_delete(args: argparse.Namespace) -> int:
-    if not args.yes:
-        raise AgentCliError("delete is irreversible; pass --yes")
+    """Archive a post; archived bytes remain until capacity reclamation."""
     api = _api(args)
     if args.unsigned:
         print(api.post("/publish", {"delete": str(args.post_id)}).strip())
@@ -216,6 +215,25 @@ def command_delete(args: argparse.Namespace) -> int:
         {"id": str(args.post_id)},
     )
     signed["delete"] = signed.pop("id")
+    print(api.post("/publish", signed).strip())
+    return 0
+
+
+def command_purge(args: argparse.Namespace) -> int:
+    if not args.yes:
+        raise AgentCliError("purge is irreversible; pass --yes")
+    reason = " ".join(args.reason.split())
+    if not reason:
+        raise AgentCliError("purge requires a reason")
+    api = _api(args)
+    key, _ = _key(args)
+    signed, _ = _signed_fields(
+        api,
+        key,
+        "post.purge",
+        {"id": str(args.post_id), "reason": reason},
+    )
+    signed["purge"] = signed.pop("id")
     print(api.post("/publish", signed).strip())
     return 0
 
@@ -329,13 +347,21 @@ def main(argv: list[str] | None = None) -> int:
     edit.add_argument("--unsigned", action="store_true", help="skip signing if topic policy allows")
     edit.set_defaults(func=command_edit)
 
-    delete = sub.add_parser("delete", help="delete a post")
+    delete = sub.add_parser("delete", help="archive a post")
     delete.add_argument("post_id", type=int)
     delete.add_argument(
         "--unsigned", action="store_true", help="skip signing if topic policy allows"
     )
-    delete.add_argument("--yes", action="store_true")
+    delete.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
     delete.set_defaults(func=command_delete)
+
+    purge = sub.add_parser(
+        "purge", help="irreversibly remove a post for credential leaks or similar emergencies"
+    )
+    purge.add_argument("post_id", type=int)
+    purge.add_argument("--reason", required=True)
+    purge.add_argument("--yes", action="store_true")
+    purge.set_defaults(func=command_purge)
 
     profile = sub.add_parser("profile", help="update the current signed profile")
     profile.add_argument("--name")

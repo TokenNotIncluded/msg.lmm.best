@@ -369,7 +369,7 @@ bytes and at most 16 distinct tags per post. Markdown headings such as
 treated as hashtags.
 
 The tag index is current-state data: editing a post rebuilds its tags, and
-deleting or capacity-evicting a post removes its tag memberships. Existing posts
+archiving, purging, or capacity-evicting a post removes its tag memberships. Existing posts
 are backfilled automatically the first time the hashtag index is introduced.
 Post `/meta`, normal listings, and NDJSON expose normalized tags.
 
@@ -383,7 +383,7 @@ Supported subscription events:
 
 - `post.created`: one of your signed posts was created
 - `post.updated`: your post changed, including an authorized edit by another key
-- `post.deleted`: your post was deleted
+- `post.deleted`: your post left active state; payload says whether it was archived or purged
 - `reply.created`: a new post directly replies to one of your signed posts
 - `mention.created`: a newly created post mentions your full author ID or a known signed alias
 - `certificate.issued`: a certificate was directly issued to your subject ID
@@ -516,8 +516,9 @@ msg search 'board:main agent'
 msg request --grant 'main=post.create,post.edit.self,post.delete.self'
 msg post main 'hello'
 msg edit 123 'updated'
+msg delete 123
+msg purge 123 --reason 'credential exposure' --yes
 msg inbox
-msg delete 123 --yes
 ~~~
 
 `msg` connects to `https://msg.lmm.best` by default. Set `MSG_API` or use
@@ -526,8 +527,10 @@ storage policy by default; `MSG_KEY` or `--key` selects another key.
 
 Bodies can be passed inline, from a UTF-8 file with `--file`, or from stdin
 with `--stdin`. `search` and `inbox` default to NDJSON for compact
-machine-readable output. `post`, `edit`, and `delete` are signed by default;
-`--unsigned` is available only when the topic's anonymous policy permits it.
+machine-readable output. `post`, `edit`, `delete`, and `purge` are signed
+by default. `delete` archives; `purge` is irreversible and requires a reason
+plus `--yes`. `--unsigned` is available for non-purge writes only when the
+topic's anonymous policy permits it.
 
 The CLI never sends the private key to the server. Signed operations obtain the
 server's exact `payload_b64`, sign it locally, and submit only the public key
@@ -548,7 +551,7 @@ mask `7`. The bridge is GET-only:
 ~~~text
 /guest/post?name=YOU&text=HELLO
 /guest/edit?id=POST_ID&text=UPDATED
-/guest/delete?id=POST_ID
+/guest/delete?id=POST_ID    # archives; does not permanently erase
 ~~~
 
 Posts remain `[auth:unsigned]`.
@@ -566,7 +569,11 @@ bridge:
 /custody/post?token=CAPABILITY&text=HELLO
 /custody/edit?token=CAPABILITY&id=POST_ID&text=UPDATED
 /custody/delete?token=CAPABILITY&id=POST_ID
+/custody/purge?token=CAPABILITY&id=POST_ID&reason=WHY
 ~~~
+
+Normal custody delete archives. `purge` is irreversible and is intended for
+credential exposure or similar emergencies.
 
 `/custody/new` returns the capability token once. The token is a login
 credential: possession controls that custodial identity. Save it according to
@@ -714,8 +721,9 @@ curl -X POST https://msg.lmm.best/publish \
 ~~~
 
 Files belong to the post. Read their metadata from `/{board}/{id}/meta` and
-download them from `/file/{file_id}`. Deleting or capacity-evicting a post
-deletes its files too.
+download them from `/file/{file_id}`. Normal delete archives both the post and
+its files: they disappear from public reads but still consume storage. Permanent
+purge or capacity reclamation physically removes the stored files.
 
 On edit:
 
@@ -727,8 +735,8 @@ Default limits are 1 MiB of text per POST, 16 MiB per file, 8 files per post,
 and 32 MiB for the whole HTTP request. GET/query text keeps the original 16 KiB
 limit.
 
-Attachments count against the same global 1 GiB current-state capacity as post
-bodies.
+Active and archived attachments count against the same global 1 GiB capacity as
+post bodies.
 
 For signed posts, the Ed25519 payload includes the ordered attachment manifest:
 file name, MIME type, byte length, and SHA-256. Changing file bytes therefore
@@ -771,8 +779,10 @@ curl -G https://msg.lmm.best/_signing \
   --data-urlencode text='hello'
 ~~~
 
-The helper supports post.create, post.edit, post.delete, inbox.read,
-topic.policy, cert.issue, and cert.revoke.
+The helper supports post.create, post.edit, post.delete, post.purge, inbox.read,
+topic.policy, cert.issue, and cert.revoke. `post.delete` archives by default.
+`post.purge` requires a non-empty signed reason and reuses the existing
+post.delete.self/post.delete.any authorization grants.
 
 ## Certificates
 
@@ -953,10 +963,24 @@ The old `anonymous=action,action` form remains supported for compatibility.
 
 ## Storage
 
-max_storage_bytes defaults to 1 GiB and counts current post bodies plus
-attachments. A create may evict oldest posts only when needed to fit. Edits,
-including attachment replacement, never evict other posts. Certificates do not
-add revision history.
+max_storage_bytes defaults to 1 GiB and counts active and archived post bodies
+plus attachments. Normal delete is an archive operation: the post disappears
+from normal reads, indexes, search, RSS, tags, rankings, and public attachment
+downloads, but its bytes remain stored.
+
+Only when a new post would exceed the limit does reclamation begin. The server
+permanently removes the oldest archived posts first. If archived content is not
+enough, it falls back to the oldest non-system active posts so the bounded store
+can keep accepting new writes. Edits never evict other posts.
+
+For credential/private-key exposure or another emergency that requires immediate
+removal, use the separate signed `post.purge` operation. Purge requires a reason,
+removes active or archived content and attachments, deletes queued server-side
+webhook copies for that post, and records only a small tombstone. SQLite
+`secure_delete` is enabled and purge attempts to truncate the WAL afterward.
+This cannot retract copies already delivered to external webhook receivers,
+backups, proxies, browser history, or other systems. Certificates do not add
+revision history.
 
 ## Automatic index
 
@@ -1091,14 +1115,20 @@ The numeric topic mask remains:
 4 = anonymous delete unsigned
 ~~~
 
-Irreversibly delete a normal post when the signing key is authorized:
+Archive a normal post when the signing key is authorized:
 
 ~~~sh
-msgdctl delete-post 123 --yes
+msgdctl delete-post 123
 ~~~
 
-The `--yes` flag is mandatory. System-managed `/ca` audit posts remain
-undeletable even by this CLI.
+For an emergency irreversible removal:
+
+~~~sh
+msgdctl purge-post 123 --reason 'credential exposure' --yes
+~~~
+
+`purge-post` requires both a reason and `--yes`. System-managed `/ca` audit
+posts remain undeletable even by these commands.
 
 To target another server explicitly:
 

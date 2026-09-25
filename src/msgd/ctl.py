@@ -306,6 +306,7 @@ def set_policy(api: Api, key: Ed25519PrivateKey, board: str, permissions: int) -
 
 
 def delete_post(api: Api, key: Ed25519PrivateKey, post_id: int) -> str:
+    """Archive a post, preserving it until capacity reclamation needs the bytes."""
     public, _ = _identity(key)
     signing = api.json_get(
         "/_signing",
@@ -319,6 +320,37 @@ def delete_post(api: Api, key: Ed25519PrivateKey, post_id: int) -> str:
         "/publish",
         {
             "delete": str(post_id),
+            "key": public,
+            "sig": _payload_signature(key, str(signing["payload_b64"])),
+        },
+    )
+
+
+def purge_post(
+    api: Api,
+    key: Ed25519PrivateKey,
+    post_id: int,
+    *,
+    reason: str,
+) -> str:
+    reason = " ".join(reason.split())
+    if not reason:
+        raise ControlError("purge requires a reason")
+    public, _ = _identity(key)
+    signing = api.json_get(
+        "/_signing",
+        {
+            "action": "post.purge",
+            "key": public,
+            "id": str(post_id),
+            "reason": reason,
+        },
+    )
+    return api.post(
+        "/publish",
+        {
+            "purge": str(post_id),
+            "reason": reason,
             "key": public,
             "sig": _payload_signature(key, str(signing["payload_b64"])),
         },
@@ -460,11 +492,18 @@ def command_policy_set(args: argparse.Namespace) -> int:
 
 
 def command_delete_post(args: argparse.Namespace) -> int:
-    if not args.yes:
-        raise ControlError("delete is irreversible; pass --yes")
     api = Api(args.api)
     key = _load_private(args.key)
     print(delete_post(api, key, args.post_id).strip())
+    return 0
+
+
+def command_purge_post(args: argparse.Namespace) -> int:
+    if not args.yes:
+        raise ControlError("purge is irreversible; pass --yes")
+    api = Api(args.api)
+    key = _load_private(args.key)
+    print(purge_post(api, key, args.post_id, reason=args.reason).strip())
     return 0
 
 
@@ -531,13 +570,23 @@ def main(argv: list[str] | None = None) -> int:
     policy_set.set_defaults(func=command_policy_set)
 
     delete = sub.add_parser(
-        "delete-post", help="irreversibly delete a post when the signing key is authorized"
+        "delete-post", help="archive a post; content is retained until capacity reclamation"
     )
     delete.add_argument("post_id", type=int)
     delete.add_argument("--api", default=DEFAULT_API)
     delete.add_argument("--key", default=DEFAULT_PRIVATE)
-    delete.add_argument("--yes", action="store_true")
+    delete.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
     delete.set_defaults(func=command_delete_post)
+
+    purge = sub.add_parser(
+        "purge-post", help="irreversibly remove a post, for credential leaks or similar emergencies"
+    )
+    purge.add_argument("post_id", type=int)
+    purge.add_argument("--api", default=DEFAULT_API)
+    purge.add_argument("--key", default=DEFAULT_PRIVATE)
+    purge.add_argument("--reason", required=True)
+    purge.add_argument("--yes", action="store_true")
+    purge.set_defaults(func=command_purge_post)
 
     args = parser.parse_args(argv)
     try:
