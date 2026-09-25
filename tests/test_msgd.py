@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -20,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from msgd.config import Config
+from msgd.crypto import certificate_payload, make_certificate
 from msgd.server import build_server
 from msgd.store import Store
 
@@ -382,6 +384,179 @@ class ServerCase(unittest.TestCase):
             sig=sign_b64(ca, info["payload_b64"]),
         )
         self.assertEqual(status, 403)
+
+    def test_public_certificate_request_can_be_root_approved(self) -> None:
+        applicant = Ed25519PrivateKey.generate()
+        public = public_b64(applicant)
+        grants = json.dumps(
+            [
+                {
+                    "topic": "skills",
+                    "actions": [
+                        "post.create",
+                        "post.edit.self",
+                        "post.delete.self",
+                    ],
+                }
+            ],
+            separators=(",", ":"),
+        )
+        info = self.signing(
+            action="cert.request",
+            key=public,
+            issuer_serial="root",
+            grants=grants,
+            delegate="false",
+            message="skills access",
+        )
+        status, body = self.c.post(
+            "/_csr",
+            key=public,
+            sig=sign_b64(applicant, info["payload_b64"]),
+            nonce=info["nonce"],
+            issued=str(info["issued"]),
+            issuer_serial="root",
+            grants=grants,
+            delegate="false",
+            message="skills access",
+        )
+        self.assertEqual(status, 201, body)
+        csr = json.loads(body)
+        self.assertEqual(csr["status"], "pending")
+        csr_id = csr["id"]
+
+        status, pending_body = self.c.get("/_csr", status="pending")
+        self.assertEqual(status, 200)
+        self.assertIn(f'"id": {csr_id}', pending_body)
+
+        root_public = public_b64(self.root_key)
+        root_id = self.server.board.store.root_info()["root_id"]
+        cert = make_certificate(
+            serial="1" * 32,
+            issuer_serial="root",
+            issuer_id=root_id,
+            subject_key=public,
+            not_before=int(time.time()) - 60,
+            not_after=int(time.time()) + 86400,
+            delegate=False,
+            grants={
+                "skills": (
+                    "post.create",
+                    "post.edit.self",
+                    "post.delete.self",
+                )
+            },
+        )
+        cert_sig = sign_b64(
+            self.root_key,
+            base64.b64encode(certificate_payload(cert.body)).decode(),
+        )
+        decision = self.signing(
+            action="cert.request.decision",
+            key=root_public,
+            csr_id=str(csr_id),
+            decision="approve",
+        )
+        status, body = self.c.post(
+            "/_csr",
+            csr_id=str(csr_id),
+            decision="approve",
+            key=root_public,
+            sig=sign_b64(self.root_key, decision["payload_b64"]),
+            cert=cert.body,
+            cert_sig=cert_sig,
+        )
+        self.assertEqual(status, 200, body)
+        decided = json.loads(body)
+        self.assertEqual(decided["status"], "issued")
+        self.assertEqual(decided["certificate"], cert.serial)
+        self.assertTrue(self.server.board.store.certificate_active(cert.serial))
+
+        audit = self.c.get("/ca", view="full", limit="20")[1]
+        self.assertIn("[REQUEST]", audit)
+        self.assertIn("[ISSUED]", audit)
+        self.assertIn("[CSR-ISSUED]", audit)
+
+    def test_certificate_request_rejects_forged_subject_signature(self) -> None:
+        applicant = Ed25519PrivateKey.generate()
+        attacker = Ed25519PrivateKey.generate()
+        public = public_b64(applicant)
+        grants = '[{"topic":"main","actions":["post.create"]}]'
+        info = self.signing(
+            action="cert.request",
+            key=public,
+            issuer_serial="root",
+            grants=grants,
+        )
+        status, _ = self.c.post(
+            "/_csr",
+            key=public,
+            sig=sign_b64(attacker, info["payload_b64"]),
+            nonce=info["nonce"],
+            issued=str(info["issued"]),
+            issuer_serial="root",
+            grants=grants,
+        )
+        self.assertEqual(status, 400)
+
+    def test_certificate_request_approval_must_match_requested_grants(self) -> None:
+        applicant = Ed25519PrivateKey.generate()
+        public = public_b64(applicant)
+        grants = '[{"topic":"main","actions":["post.create"]}]'
+        info = self.signing(
+            action="cert.request",
+            key=public,
+            issuer_serial="root",
+            grants=grants,
+        )
+        status, body = self.c.post(
+            "/_csr",
+            key=public,
+            sig=sign_b64(applicant, info["payload_b64"]),
+            nonce=info["nonce"],
+            issued=str(info["issued"]),
+            issuer_serial="root",
+            grants=grants,
+        )
+        self.assertEqual(status, 201, body)
+        csr_id = json.loads(body)["id"]
+
+        root_public = public_b64(self.root_key)
+        root_id = self.server.board.store.root_info()["root_id"]
+        cert = make_certificate(
+            serial="2" * 32,
+            issuer_serial="root",
+            issuer_id=root_id,
+            subject_key=public,
+            not_before=int(time.time()) - 60,
+            not_after=int(time.time()) + 86400,
+            delegate=False,
+            grants={"main": ("post.create", "post.delete.any")},
+        )
+        cert_sig = sign_b64(
+            self.root_key,
+            base64.b64encode(certificate_payload(cert.body)).decode(),
+        )
+        decision = self.signing(
+            action="cert.request.decision",
+            key=root_public,
+            csr_id=str(csr_id),
+            decision="approve",
+        )
+        status, _ = self.c.post(
+            "/_csr",
+            csr_id=str(csr_id),
+            decision="approve",
+            key=root_public,
+            sig=sign_b64(self.root_key, decision["payload_b64"]),
+            cert=cert.body,
+            cert_sig=cert_sig,
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            self.server.board.store.certificate_request(csr_id)["status"],
+            "pending",
+        )
 
     def test_delegated_ca_can_revoke_its_child(self) -> None:
         ca = Ed25519PrivateKey.generate()
