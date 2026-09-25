@@ -4621,7 +4621,7 @@ class Store:
                 "SELECT attempts, generation FROM websub_hub_pings WHERE id = ?",
                 (ping_id,),
             ).fetchone()
-            if row is None:
+            if row is None or int(row["generation"]) != generation:
                 return
             attempts = int(row["attempts"]) + 1
             if success:
