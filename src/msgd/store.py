@@ -79,6 +79,8 @@ RESERVED_BOARDS = {
     "llms.txt",
     "robots.txt",
     "sitemap.xml",
+    "rss.xml",
+    "feed.xml",
     "favicon.ico",
 }
 DEFAULT_BOARDS = {
