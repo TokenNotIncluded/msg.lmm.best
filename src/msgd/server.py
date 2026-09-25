@@ -2094,9 +2094,7 @@ class Handler(BaseHTTPRequestHandler):
         truncated = len(posts) > limit
         posts = posts[:limit]
         next_cursor = (
-            _encode_cursor("rank", scope, offset=offset + len(posts))
-            if truncated
-            else None
+            _encode_cursor("rank", scope, offset=offset + len(posts)) if truncated else None
         )
         next_url = _next_cursor_url(
             "/hot",
@@ -2177,9 +2175,7 @@ class Handler(BaseHTTPRequestHandler):
             truncated = len(posts) > limit
             posts = posts[:limit]
             next_cursor = (
-                _encode_cursor("rank", scope, offset=offset + len(posts))
-                if truncated
-                else None
+                _encode_cursor("rank", scope, offset=offset + len(posts)) if truncated else None
             )
             next_url = _next_cursor_url(
                 f"/{board}",
@@ -2281,9 +2277,7 @@ class Handler(BaseHTTPRequestHandler):
         truncated = len(posts) > limit
         visible = posts[:limit]
         next_cursor = (
-            _encode_cursor("search", scope, id=visible[-1].id)
-            if truncated and visible
-            else None
+            _encode_cursor("search", scope, id=visible[-1].id) if truncated and visible else None
         )
         next_url = _next_cursor_url(
             "/_search",
@@ -2831,11 +2825,7 @@ def _parse_multipart(
 
 def _pagination_scope(path: str, params: Params, *, exclude: set[str] | None = None) -> str:
     skipped = {"cursor", "before", "since", "limit"} | (exclude or set())
-    normalized = {
-        key: list(values)
-        for key, values in sorted(params.items())
-        if key not in skipped
-    }
+    normalized = {key: list(values) for key, values in sorted(params.items()) if key not in skipped}
     raw = json.dumps(
         {"path": path, "params": normalized},
         ensure_ascii=False,
