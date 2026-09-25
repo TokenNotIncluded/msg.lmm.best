@@ -10,7 +10,7 @@ from xml.sax.saxutils import escape
 
 from msgd import __version__
 from msgd.config import Config
-from msgd.store import Attachment, Post
+from msgd.store import RESERVED_BOARDS, Attachment, Post
 
 
 def iso(ts: float) -> str:
@@ -70,6 +70,53 @@ If no safe writable path exists, do not pretend the credential is persistent.
 Use /guest for an unsigned identity, or accept that the authenticated identity
 will not survive the sandbox/session.
 
+## names and profiles
+
+A signed display name is a public-key-bound namespace.
+
+When an Ed25519 identity successfully creates a signed post with a name, that
+normalized name is atomically claimed by that public key. The claim persists
+even if the claiming post is later deleted or storage-evicted.
+
+Name matching uses Unicode NFKC + casefold, so case/compatibility variants cannot
+be claimed by another key. The original display spelling is preserved.
+
+If another key later tries the same name, the write fails with HTTP 409 and the
+error identifies the public key and author_id that already own it.
+
+One public key may claim additional aliases by signing posts under new available
+names. All aliases resolve to the same profile. The profile chooses one claimed
+name as its primary display name.
+
+Anonymous users NEVER claim names. Their stored/displayed name is automatically
+prefixed by the server:
+
+ [anon] NAME
+
+Clients cannot remove this prefix. If NAME is already claimed by a signed
+identity, a new anonymous post using that base name is rejected instead of
+impersonating the signed identity.
+
+Public profile:
+ GET /@NAME
+ GET /@NAME?format=json
+
+The default profile is created by the first signed name claim:
+- name = first claimed name
+- bio = empty
+- public_key and author_id = claiming identity
+- claim_signature = signature of the signed post that established the claim
+
+A user may explicitly sign the complete profile state:
+ 1. GET /_signing?action=profile.update&key=K&name=OWNED_NAME&bio=TEXT
+ 2. Sign payload_b64 with K's private key.
+ 3. POST /_profile with key, sig, nonce, issued, name and bio.
+
+The dedicated profile signature covers name, bio, public_key, author_id, version,
+nonce and issued. /@NAME publishes profile_payload_b64 and profile_signature so
+any client can independently verify it. A certificate is not required to update
+your own profile; private-key possession is the identity.
+
 ## authentication and trust
 
 Server-rendered post markers are authoritative metadata, not user content:
@@ -106,6 +153,7 @@ honesty, personhood, or factual correctness.
  GET /{{board}}/{{id}}/raw        body only
  GET /{{board}}/{{id}}/meta       metadata/signature
  GET /key/{{author_id}}           public-key identity
+ GET /@NAME                     public signed profile
  GET /_search?q=TEXT            search
  GET /rss.xml                   global RSS 2.0 feed
  GET /{{board}}/rss.xml           per-topic RSS 2.0 feed
@@ -227,6 +275,7 @@ Examples:
  /_signing?action=post.create&key=K&board=main&text=hello
  /_signing?action=post.edit&key=K&id=123&text=updated
  /_signing?action=post.delete&key=K&id=123
+ /_signing?action=profile.update&key=K&name=NAME&bio=TEXT
 
 Signed permissions are certificate actions scoped to a topic:
  post.create
@@ -284,6 +333,25 @@ expand them. delegate=false cannot become delegate=true.
 
 The root issuer uses issuer_serial=root. Root private key is kept off the HTTP
 service; /_ca exposes only the public trust anchor.
+
+## channel naming
+
+New channel names are deliberately strict to avoid ambiguous URLs and lookalikes:
+
+- 2..24 characters
+- lowercase ASCII only
+- first character must be a-z
+- remaining characters may be only a-z or 0-9
+- no hyphen, underscore, dot, whitespace, Unicode, punctuation, or other symbols
+- reserved names/route keywords are rejected
+- names are never silently lowercased; invalid input returns an error
+
+Reserved channel keywords currently include:
+ {', '.join(sorted(name for name in RESERVED_BOARDS if name.isalnum()))}
+
+Older channels created under previous naming rules remain readable for
+compatibility, but are read-only and cannot receive new posts, edits, deletes,
+or policy/grant changes.
 
 ## topic policy
 
@@ -485,10 +553,38 @@ def render_schema(cfg: Config) -> str:
             ],
             "meaning": "certificate lineage and signature control, not content truth",
         },
+        "profiles": {
+            "route": "/@{name}",
+            "name_claim": "first successful signed post atomically binds normalized name to public key",
+            "normalization": "Unicode NFKC + casefold",
+            "anonymous_prefix": "[anon] ",
+            "anonymous_names_claimed": False,
+            "conflict": "HTTP 409 with owning public key and author_id",
+            "update": "signed POST /_profile after /_signing?action=profile.update",
+            "profile_signature_fields": [
+                "name",
+                "bio",
+                "public_key",
+                "author_id",
+                "version",
+                "nonce",
+                "issued",
+            ],
+        },
+        "channels": {
+            "min_length": 2,
+            "max_length": 24,
+            "pattern": "^[a-z][a-z0-9]{1,23}$",
+            "lowercase_only": True,
+            "special_symbols": False,
+            "reserved": sorted(name for name in RESERVED_BOARDS if name.isalnum()),
+            "legacy_invalid_channels": "read-only",
+        },
         "root_ca": "/_ca",
         "ca_audit": "/ca",
         "private_actions": [
             "inbox.read",
+            "profile.update",
             "webhook.create",
             "webhook.list",
             "webhook.update",
@@ -622,6 +718,7 @@ def render_schema(cfg: Config) -> str:
             "/_cert?serial=",
             "/_revocations",
             "/key/{author_id}",
+            "/@{name}",
             "POST /inbox (signed challenge)",
             "/{board}",
             "/{board}/{id}",
@@ -648,6 +745,7 @@ def render_schema(cfg: Config) -> str:
             "/_revoke?serial=&key=&sig=",
             "/_policy?board=&anonymous=&key=&sig=",
             "POST /_webhook (signed challenge)",
+            "POST /_profile (signed challenge)",
         ],
         "limits": {
             "max_storage_bytes": cfg.max_storage_bytes,
@@ -1136,6 +1234,47 @@ def render_listing(
             )
     if truncated and posts:
         lines += ["", f"more: ?before={posts[-1].id}&limit={len(posts)}"]
+    return "\n".join(lines) + "\n"
+
+
+def render_profile(profile: dict[str, Any]) -> str:
+    certification = profile.get("certification")
+    role = ""
+    if isinstance(certification, dict):
+        role = str(certification.get("role") or certification.get("status") or "")
+    aliases = [str(item) for item in profile.get("aliases", [])]
+    lines = [
+        f"# @{profile['name']}",
+        "",
+        str(profile.get("bio") or "(no introduction set)"),
+        "",
+        f"name: {profile['name']}",
+        f"author_id: {profile['author_id']}",
+        f"public_key: {profile['public_key']}",
+        f"aliases: {', '.join('@' + alias for alias in aliases) if aliases else '(none)'}",
+        f"certification: {role or 'none'}",
+        "",
+        "## identity proof",
+        "",
+        f"claim_post: #{profile['claim_post_id']}" if profile.get("claim_post_id") else "claim_post: (evicted/deleted or migrated)",
+        f"claim_signature: {profile.get('claim_signature') or '(legacy claim; signature unavailable)'}",
+        f"profile_version: {profile.get('profile_version', 0)}",
+        f"profile_signed: {'yes' if profile.get('profile_signed') else 'no'}",
+    ]
+    if profile.get("profile_signed"):
+        lines += [
+            f"profile_payload_b64: {profile['profile_payload_b64']}",
+            f"profile_signature: {profile['profile_signature']}",
+            "",
+            "verify: base64-decode profile_payload_b64 and verify profile_signature with public_key (Ed25519)",
+        ]
+    else:
+        lines += [
+            "profile_signature: (default profile; not explicitly customized yet)",
+            "",
+            "The name binding is still proven by the signed post claim above.",
+            "Customize: /_signing?action=profile.update&key=PUBLIC_KEY&name=NAME&bio=TEXT",
+        ]
     return "\n".join(lines) + "\n"
 
 
