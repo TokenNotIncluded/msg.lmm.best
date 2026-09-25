@@ -34,6 +34,7 @@ ssh "$HOST" "rm -rf '$STAGE' && mkdir -p '$STAGE'"
 tar -C "$ROOT" -cf - \
     "dist/$WHEEL" \
     deploy/msg-lmm-best.service \
+    deploy/sshd/msg-lmm-best.conf \
     deploy/nginx/nginx.conf \
     deploy/nginx/msg.lmm.best.conf \
     deploy/nginx/msg.lmm.best.proxy.conf \
@@ -63,7 +64,7 @@ command -v uv >/dev/null || {
 }
 
 echo "==> Valkey"
-sudo pacman -S --needed --noconfirm valkey git
+sudo pacman -S --needed --noconfirm valkey git openssh
 sudo systemctl enable --now valkey.service
 test -x /usr/bin/python3 || {
     echo "error: /usr/bin/python3 is missing" >&2
@@ -73,6 +74,23 @@ test -x /usr/bin/python3 || {
     echo "error: system Python 3.14+ is required; update the server packages first" >&2
     exit 1
 }
+
+echo "==> persistent msg service account"
+sudo install -d -m 0755 /var/empty /var/empty/msg-lmm-best
+if ! id -u msg >/dev/null 2>&1; then
+    sudo useradd --system --user-group --no-create-home \
+        --home-dir /var/empty/msg-lmm-best --shell /bin/sh msg
+fi
+sudo systemctl stop "$SERVICE"
+STATE=/var/lib/msg-lmm-best
+if sudo test -L "$STATE"; then
+    REAL_STATE="$(sudo readlink -f "$STATE")"
+    sudo rm -f "$STATE"
+    sudo mv "$REAL_STATE" "$STATE"
+fi
+sudo install -d -o msg -g msg -m 0750 "$STATE"
+sudo chown -R msg:msg "$STATE"
+sudo chmod 0750 "$STATE"
 
 if ! test -x "$VENV/bin/python" || ! "$VENV/bin/python" -c     'import sys; raise SystemExit(sys.version_info < (3, 14))'; then
     echo "==> migrate venv to Python 3.14"
@@ -133,6 +151,32 @@ echo "==> validate"
 sudo rm -f /usr/local/bin/msgd-admin
 sudo ln -sfn "$VENV/bin/msgdctl" /usr/local/bin/msgdctl
 sudo ln -sfn "$VENV/bin/msgd-cert" /usr/local/bin/msgd-cert
+sudo ln -sfn "$VENV/bin/msg-ssh-auth" /usr/local/bin/msg-ssh-auth
+sudo ln -sfn "$VENV/bin/msg-ssh-shell" /usr/local/bin/msg-ssh-shell
+
+if ! sudo grep -q '^\[ssh\]' "$CONFIG"; then
+    echo "==> enable restricted SSH"
+    sudo tee -a "$CONFIG" >/dev/null <<'EOF'
+
+[ssh]
+shell_command = /usr/local/bin/msg-ssh-shell
+max_keys_per_identity = 16
+EOF
+fi
+
+echo "==> sshd restricted account"
+sudo install -d -m 0755 /etc/ssh/sshd_config.d
+sudo install -m 0644 "$D/sshd/msg-lmm-best.conf" \
+    /etc/ssh/sshd_config.d/msg-lmm-best.conf
+sudo /usr/bin/sshd -t
+SSH_EFFECTIVE="$(sudo /usr/bin/sshd -T -C user=msg,host=localhost,addr=127.0.0.1)"
+grep -Fx 'authenticationmethods publickey' <<<"$SSH_EFFECTIVE" >/dev/null
+grep -Fx 'passwordauthentication no' <<<"$SSH_EFFECTIVE" >/dev/null
+grep -Fx 'authorizedkeysfile none' <<<"$SSH_EFFECTIVE" >/dev/null
+grep -Fx 'disableforwarding yes' <<<"$SSH_EFFECTIVE" >/dev/null
+grep -F 'authorizedkeyscommand /usr/local/bin/msg-ssh-auth' \
+    <<<"$SSH_EFFECTIVE" >/dev/null
+sudo systemctl reload sshd.service
 
 echo "==> systemd"
 sudo install -m 0644 "$D/msg-lmm-best.service" \

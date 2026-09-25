@@ -38,6 +38,10 @@ class Config:
     repo_auth_ttl_seconds: int = 300
     repo_max_request_bytes: int = 67_108_864
 
+    # OpenSSH restricted-shell integration.
+    ssh_shell_command: str = "/usr/local/bin/msg-ssh-shell"
+    ssh_max_keys_per_identity: int = 16
+
     # Logical capacity of active + archived post bodies and attachments.
     # Normal delete archives; new writes reclaim oldest archives first when full.
     max_storage_bytes: int = 1_073_741_824  # 1 GiB
@@ -129,6 +133,10 @@ class Config:
             repo_max_blob_bytes=get("repos", "max_blob_bytes", base.repo_max_blob_bytes),
             repo_auth_ttl_seconds=get("repos", "auth_ttl_seconds", base.repo_auth_ttl_seconds),
             repo_max_request_bytes=get("repos", "max_request_bytes", base.repo_max_request_bytes),
+            ssh_shell_command=get("ssh", "shell_command", base.ssh_shell_command),
+            ssh_max_keys_per_identity=get(
+                "ssh", "max_keys_per_identity", base.ssh_max_keys_per_identity
+            ),
             max_storage_bytes=get("storage", "max_storage_bytes", base.max_storage_bytes),
             max_post_bytes=get("limits", "max_post_bytes", base.max_post_bytes),
             max_post_bytes_post=get("limits", "max_post_bytes_post", base.max_post_bytes_post),
@@ -192,9 +200,14 @@ class Config:
             "repo_max_blob_bytes",
             "repo_auth_ttl_seconds",
             "repo_max_request_bytes",
+            "ssh_max_keys_per_identity",
         ):
             if getattr(self, key) < 1:
                 raise SystemExit(f"{key} must be >= 1")
+        if not self.ssh_shell_command.strip():
+            raise SystemExit("ssh_shell_command must not be empty")
+        if any(char in self.ssh_shell_command for char in '"\r\n'):
+            raise SystemExit("ssh_shell_command contains unsafe characters")
         if self.default_limit > self.max_limit:
             raise SystemExit("default_limit must not exceed max_limit")
         if self.websub_default_lease_seconds > self.websub_max_lease_seconds:

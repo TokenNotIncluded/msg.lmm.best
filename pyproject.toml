@@ -16,6 +16,8 @@ msgd = "msgd.cli:main"
 msgd-index = "msgd.indexer:main"
 msgd-cert = "msgd.certcli:main"
 msgdctl = "msgd.ctl:main"
+msg-ssh-auth = "msgd.sshaccess:auth_main"
+msg-ssh-shell = "msgd.sshaccess:shell_main"
 
 [dependency-groups]
 dev = ["ruff==0.16.9"]
