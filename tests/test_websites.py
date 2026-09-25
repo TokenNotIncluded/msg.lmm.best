@@ -252,7 +252,9 @@ class WebSiteCase(unittest.TestCase):
 
         first = b"a" * 40
         second = b"b" * 30
-        self.assertEqual(self.put(self.alice, "first.bin", first, "application/octet-stream")[0], 200)
+        self.assertEqual(
+            self.put(self.alice, "first.bin", first, "application/octet-stream")[0], 200
+        )
         status, error = self.put(
             self.alice,
             "second.bin",
