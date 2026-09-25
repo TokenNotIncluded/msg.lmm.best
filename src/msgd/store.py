@@ -37,7 +37,7 @@ from msgd.search import SearchSpec
 BOARD_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 AUTHOR_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 MENTION_RE = re.compile(r"(?<![A-Za-z0-9._-])@([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?![A-Za-z0-9._-])")
-HASHTAG_RE = re.compile(r"(?<![\w/#])#([\w][\w-]{0,31})", re.UNICODE)
+HASHTAG_RE = re.compile(r"(?<![\w/#])#([\w][\w-]{0,31})(?![\w-])", re.UNICODE)
 MAX_TAGS_PER_POST = 16
 
 ANONYMOUS_PERMISSION_BITS = {
