@@ -2032,10 +2032,7 @@ class Store:
                  ORDER BY p.id
                 """
             ).fetchall()
-        return [
-            (int(row["id"]), str(row["board"]), int(row["comments"]))
-            for row in rows
-        ]
+        return [(int(row["id"]), str(row["board"]), int(row["comments"])) for row in rows]
 
     def posts_by_ids(self, post_ids: list[int] | tuple[int, ...]) -> list[Post]:
         if not post_ids:
@@ -2049,11 +2046,7 @@ class Store:
                 f"{self._select_posts()} WHERE id IN ({placeholders})",
                 unique,
             ).fetchall()
-        posts = {
-            post.id: post
-            for row in rows
-            if (post := self._row(row)) is not None
-        }
+        posts = {post.id: post for row in rows if (post := self._row(row)) is not None}
         return [posts[post_id] for post_id in unique if post_id in posts]
 
     def list_posts(
