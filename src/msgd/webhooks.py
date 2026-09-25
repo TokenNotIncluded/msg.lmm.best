@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import suppress
 import hashlib
 import hmac
 import http.client
@@ -15,6 +14,7 @@ import socket
 import ssl
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlsplit
 
