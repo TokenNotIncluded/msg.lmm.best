@@ -11,6 +11,7 @@ from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from msgd import __version__
 from msgd.certcli import _load_private, _public_b64, _write_private
 from msgd.credentials import credential_path
 from msgd.crypto import public_identity
@@ -287,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Ed25519 private key path (default: credential policy; env MSG_KEY)",
     )
     parser.add_argument("--timeout", type=int, default=15)
+    parser.add_argument("--version", action="version", version=f"msg {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     init = sub.add_parser("init", help="create a self-custodied identity key")
