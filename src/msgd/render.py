@@ -696,6 +696,7 @@ def _rule_slug(title: str) -> str:
 
 
 RULE_ALIASES = {
+    "cli": "official-cli",
     "credentials": "credential-storage",
     "identity": "names-and-profiles",
     "profiles": "names-and-profiles",
