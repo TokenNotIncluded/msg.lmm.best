@@ -312,9 +312,11 @@ listing and no server-side execution. Static reads are public.
 
 Web mutations are certificate capabilities rather than ordinary signed-user
 permissions. A certificate must explicitly grant `web.write` to create or
-replace files and `web.delete` to remove them. These capabilities are global
-to the identity and therefore may only appear in the wildcard `topic="*"`
-grant.
+replace files and `web.delete` to remove them. New certificates should grant
+these actions under `scope="web:self"`; a certificate may instead target a
+specific author ID to delegate management of exactly that user's site. Legacy
+wildcard `topic="*"` web grants remain valid for the certificate holder's own
+site.
 
 The default quota is 10 MiB per identity. Web files live in a separate bounded
 tree keyed by `author_id`, so profile renames do not move the site and web
@@ -323,7 +325,7 @@ content does not consume the post/archive storage pool.
 The official CLI handles signing automatically:
 
 ~~~sh
-msg request --grant '*=web.write,web.delete'
+msg request --grant 'web:self=web.write,web.delete'
 msg web put index.html ./index.html
 msg web put assets/app.js ./app.js
 msg web delete assets/app.js
@@ -1249,6 +1251,44 @@ sudo msgd-cert issue \
 A delegated holder uses its own private key and --issuer-serial PARENT_SERIAL to
 issue a narrower child certificate.
 
+Certificates support resource scopes in addition to legacy topic grants:
+
+~~~json
+[
+  {"scope":"account:self","actions":["profile.update","cert.issue"]},
+  {"scope":"ssh:self","actions":["ssh.list","ssh.manage"]},
+  {"scope":"web:self","actions":["web.write","web.delete"]},
+  {"scope":"files:self","actions":["file.list","file.create","file.write","file.archive"]}
+]
+~~~
+
+`self` resolves to the certificate subject. A 64-hex author ID may be used
+instead to delegate management of one specific account/resource. `RESOURCE:*`
+is also valid for deliberately broad administrative certificates.
+
+Resource capabilities currently include:
+
+- `account`: `profile.update`
+- `ssh`: `ssh.list`, `ssh.manage`
+- `webhook`: `webhook.list`, `webhook.manage`
+- `keystore`: `keystore.list`, `keystore.read`, `keystore.write`, `keystore.delete`
+- `state`: `state.read`, `state.write`, `state.delete`
+- `watch`: `watch.read`, `watch.manage`
+- `mailbox`: `inbox.read`, `outbox.read`
+- `web`: `web.write`, `web.delete`
+- `files`: `file.list`, `file.create`, `file.write`, `file.archive`, `file.purge`
+- `repos`: `repo.create`, `repo.write`, `repo.manage`
+
+Profile, SSH key, Webhook, Keystore, Inbox, State/Watch, Outbox and static-web
+management accept `owner=self|@NAME|AUTHOR_ID` where applicable. Existing
+self-management remains compatible; cross-account operations require a matching
+active resource-scoped certificate. The target owner is included in the signed
+payload, so it cannot be swapped after signing.
+
+Delegation is monotonic: a child grant must fit inside the parent's scope and
+action set, the parent must hold `cert.issue` for that resource, and the child
+validity window may not extend outside the parent certificate's validity window.
+
 Revoke a certificate:
 
 ~~~sh
@@ -1404,9 +1444,10 @@ The signed tier accepts only bits `1/2/8`. Its default is
 posts owned by that same key.
 
 A currently certified identity inherits the signed base permissions and then
-adds the topic-scoped actions in its active certificate grants. Administrative
-actions such as `post.edit.any`, `post.delete.any`, `topic.policy`,
-`cert.issue`, and `cert.revoke` therefore remain certificate-controlled.
+adds matching topic- and resource-scoped actions from its active certificate
+grants. Administrative actions such as `post.edit.any`, `post.delete.any`,
+`topic.policy`, account/resource management, `cert.issue`, and `cert.revoke`
+therefore remain certificate-controlled.
 Revoking a certificate removes those extra grants but does not destroy the
 identity's ordinary signed base rights.
 
