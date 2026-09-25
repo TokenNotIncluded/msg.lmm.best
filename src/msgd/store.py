@@ -35,8 +35,8 @@ from msgd.crypto import (
     curve25519_public_key,
     normalize_grant_scope,
     parse_certificate,
-    public_identity,
     scope_covers,
+    public_identity,
     verify_detached,
 )
 from msgd.search import SearchSpec
@@ -1990,17 +1990,9 @@ class Store:
             if not parent.delegate:
                 raise StoreError("issuer certificate cannot delegate", 403)
 
-            # Enforce cert.issue again at the mutation boundary. _check_delegation
-            # also validates the selected parent certificate, but keeping this
-            # identity-level check here prevents a future parser/metadata change
-            # from turning an asserted grant into authority.
-            for scope in cert.grants:
-                requested_scope = concrete_scope(scope, cert.subject_id)
-                if not self.scope_allowed(cert.issuer_id, requested_scope, "cert.issue"):
-                    raise StoreError(
-                        f"issuer lacks active cert.issue for scope {requested_scope}",
-                        403,
-                    )
+            # Delegation authority is certificate-lineage specific. An issuer
+            # identity may hold several CA certificates, but grants from a
+            # different certificate must never expand this selected parent.
             self._check_delegation(parent, cert)
             issuer_key = parent.subject_key
 
@@ -2151,6 +2143,7 @@ class Store:
                 {
                     "serial": cert.serial,
                     "subject_id": cert.subject_id,
+                    "issuer_serial": cert.issuer_serial,
                     "issuer_id": cert.issuer_id,
                     "delegate": cert.delegate,
                     "not_before": cert.not_before,
@@ -2163,6 +2156,7 @@ class Store:
             {
                 "serial": "root",
                 "subject_id": root["root_id"],
+                "issuer_serial": None,
                 "issuer_id": None,
                 "delegate": True,
                 "not_before": None,
@@ -2182,8 +2176,11 @@ class Store:
                 "role": "root",
                 "active_certificates": 0,
                 "certificate_count": 0,
+                "active_issuer_count": 0,
+                "active_issuers": [],
                 "primary": {
                     "serial": "root",
+                    "issuer_serial": None,
                     "issuer_id": None,
                     "delegate": True,
                     "depth": 0,
@@ -2191,6 +2188,7 @@ class Store:
                         {
                             "serial": "root",
                             "subject_id": root["root_id"],
+                            "issuer_serial": None,
                             "issuer_id": None,
                             "delegate": True,
                             "not_before": None,
@@ -2208,6 +2206,8 @@ class Store:
                 "role": None,
                 "active_certificates": 0,
                 "certificate_count": 0,
+                "active_issuer_count": 0,
+                "active_issuers": [],
                 "primary": None,
                 "certificates": [],
                 "inactive_certificates": [],
@@ -2235,6 +2235,7 @@ class Store:
                 inactive.append(
                     {
                         "serial": serial,
+                        "issuer_serial": cert.issuer_serial,
                         "issuer_id": cert.issuer_id,
                         "reason": reason,
                     }
@@ -2245,6 +2246,7 @@ class Store:
                 inactive.append(
                     {
                         "serial": serial,
+                        "issuer_serial": cert.issuer_serial,
                         "issuer_id": cert.issuer_id,
                         "reason": "chain-inactive",
                     }
@@ -2257,6 +2259,7 @@ class Store:
                 {
                     "serial": serial,
                     "url": f"/_cert?serial={serial}",
+                    "issuer_serial": cert.issuer_serial,
                     "issuer_id": cert.issuer_id,
                     "delegate": cert.delegate,
                     "ca": can_issue,
@@ -2274,6 +2277,8 @@ class Store:
                 "role": None,
                 "active_certificates": 0,
                 "certificate_count": len(rows),
+                "active_issuer_count": 0,
+                "active_issuers": [],
                 "primary": None,
                 "certificates": [],
                 "inactive_certificates": inactive[:8],
@@ -2289,12 +2294,15 @@ class Store:
         ca_certificates = [item for item in active if bool(item["ca"])]
         role = "ca" if ca_certificates else "member"
         primary = ca_certificates[0] if ca_certificates else active[0]
+        active_issuers = sorted({str(item["issuer_id"]) for item in active})
         return {
             "status": "active",
             "certified": True,
             "role": role,
             "active_certificates": len(active),
             "certificate_count": len(rows),
+            "active_issuer_count": len(active_issuers),
+            "active_issuers": active_issuers,
             "primary": primary,
             "certificates": active[:8],
             "inactive_certificates": inactive[:8],
@@ -2647,11 +2655,19 @@ class Store:
             raise StoreError("root CA is not initialized", 503)
         cert = parse_certificate(str(row["body"]))
         allowed = signer_id == root["root_id"]
-        if not allowed and signer_id == cert.issuer_id:
-            scopes = tuple(concrete_scope(scope, cert.subject_id) for scope in cert.grants)
-            allowed = all(
-                self.scope_allowed(signer_id, scope, "cert.revoke") for scope in scopes
-            )
+        if not allowed and signer_id == cert.issuer_id and cert.issuer_serial != "root":
+            parent_info = self.certificate(cert.issuer_serial)
+            if parent_info is not None and self.certificate_active(cert.issuer_serial):
+                parent = parse_certificate(str(parent_info["body"]))
+                if parent.subject_id == signer_id:
+                    allowed = all(
+                        "cert.revoke"
+                        in self._certificate_actions(
+                            parent,
+                            concrete_scope(scope, cert.subject_id),
+                        )
+                        for scope in cert.grants
+                    )
         if not allowed:
             raise StoreError("not allowed to revoke this certificate", 403)
 
@@ -5588,6 +5604,18 @@ class Store:
         return True
 
     @staticmethod
+    def _certificate_actions(cert: Certificate, requested_scope: str) -> set[str]:
+        actions: set[str] = set()
+        for grant_scope, granted in cert.grants.items():
+            if scope_covers(
+                grant_scope,
+                requested_scope,
+                subject_id=cert.subject_id,
+            ):
+                actions.update(granted)
+        return actions
+
+    @staticmethod
     def _check_delegation(parent: Certificate, child: Certificate) -> None:
         if not parent.delegate:
             raise StoreError("issuer certificate cannot delegate", 403)
@@ -5595,14 +5623,7 @@ class Store:
             raise StoreError("child certificate validity exceeds issuer certificate", 403)
         for scope, child_actions in child.grants.items():
             child_scope = concrete_scope(scope, child.subject_id)
-            parent_actions: set[str] = set()
-            for parent_scope, actions in parent.grants.items():
-                if scope_covers(
-                    parent_scope,
-                    child_scope,
-                    subject_id=parent.subject_id,
-                ):
-                    parent_actions.update(actions)
+            parent_actions = Store._certificate_actions(parent, child_scope)
             if "cert.issue" not in parent_actions:
                 raise StoreError(f"issuer cannot issue for scope {child_scope}", 403)
             if not set(child_actions).issubset(parent_actions):
