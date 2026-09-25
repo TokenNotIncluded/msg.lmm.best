@@ -1756,7 +1756,10 @@ class Handler(BaseHTTPRequestHandler):
             "signed",
             "signed_permissions",
         )
-        if all(_param(params, field) is None for field in policy_fields) and _param(params, "sig") is None:
+        if (
+            all(_param(params, field) is None for field in policy_fields)
+            and _param(params, "sig") is None
+        ):
             self._json(200, self.board.store.policy(board))
             return
         if self._limited(True):
