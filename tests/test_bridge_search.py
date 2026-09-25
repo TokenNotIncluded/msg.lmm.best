@@ -332,7 +332,7 @@ class BridgeSearchCase(unittest.TestCase):
 
         status, body = self.c.get(
             "/_search",
-            q="network -spam board:meta from:Bob",
+            q='network -spam board:meta from:"[anon] anonymous"',
         )
         self.assertEqual(status, 200, body)
         self.assertIn(f"#{second_id}", body)
@@ -347,7 +347,7 @@ class BridgeSearchCase(unittest.TestCase):
 
         self.assertIn(
             f"#{reply_id}",
-            self.c.get("/_search", q="reply:any from:Bob")[1],
+            self.c.get("/_search", q='reply:any from:"[anon] anonymous"')[1],
         )
         self.assertIn(
             f"#{trusted_id}",
