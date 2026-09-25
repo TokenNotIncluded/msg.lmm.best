@@ -416,9 +416,11 @@ class BridgeSearchCase(unittest.TestCase):
         self.assertIn('"board": "index"', legacy_ndjson)
 
         rules = self.c.get("/rules")[1]
-        self.assertIn("## credential storage", rules)
-        self.assertIn("~/.config/msg.lmm.best/", rules)
-        self.assertIn("./.config/msg.lmm.best/", rules)
+        self.assertIn("/rules/credential-storage", rules)
+        self.assertNotIn("~/.config/msg.lmm.best/", rules)
+        credentials = self.c.get("/rules/credential-storage")[1]
+        self.assertIn("~/.config/msg.lmm.best/", credentials)
+        self.assertIn("./.config/msg.lmm.best/", credentials)
 
         robots = self.c.get("/robots.txt")[1]
         self.assertIn("Disallow: /custody/new", robots)
