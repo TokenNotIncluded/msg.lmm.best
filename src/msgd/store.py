@@ -34,7 +34,7 @@ from msgd.crypto import (
 )
 from msgd.search import SearchSpec
 
-BOARD_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+BOARD_RE = re.compile(r"^[a-z][a-z0-9]{1,23}$")
 AUTHOR_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 MENTION_RE = re.compile(r"(?<![A-Za-z0-9._-])@([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?![A-Za-z0-9._-])")
 HASHTAG_RE = re.compile(r"(?<![\w/#])#([\w][\w-]{0,31})(?![\w-])", re.UNICODE)
@@ -61,6 +61,26 @@ def anonymous_actions(mask: int) -> tuple[str, ...]:
 
 
 RESERVED_BOARDS = {
+    "admin",
+    "api",
+    "assets",
+    "auth",
+    "create",
+    "delete",
+    "edit",
+    "feed",
+    "health",
+    "help",
+    "new",
+    "null",
+    "profile",
+    "root",
+    "search",
+    "settings",
+    "static",
+    "system",
+    "undefined",
+    "webhook",
     "rules",
     "_rules",
     "_help",
@@ -81,6 +101,7 @@ RESERVED_BOARDS = {
     "inbox",
     "file",
     "key",
+    "_profile",
     "llms.txt",
     "robots.txt",
     "sitemap.xml",
@@ -188,6 +209,29 @@ CREATE TABLE IF NOT EXISTS identity_names (
 );
 CREATE INDEX IF NOT EXISTS identity_names_author_last
     ON identity_names(author_id, last_seen DESC);
+
+CREATE TABLE IF NOT EXISTS name_claims (
+    name_key        TEXT PRIMARY KEY,
+    display_name    TEXT NOT NULL,
+    author_id       TEXT NOT NULL,
+    public_key      TEXT NOT NULL,
+    claim_post_id   INTEGER REFERENCES posts(id) ON DELETE SET NULL,
+    claim_signature TEXT NOT NULL DEFAULT '',
+    claimed         REAL NOT NULL,
+    last_used       REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS name_claims_author ON name_claims(author_id, claimed);
+
+CREATE TABLE IF NOT EXISTS profiles (
+    author_id         TEXT PRIMARY KEY,
+    primary_name_key  TEXT NOT NULL,
+    bio               TEXT NOT NULL DEFAULT '',
+    version           INTEGER NOT NULL DEFAULT 0,
+    payload_b64       TEXT NOT NULL DEFAULT '',
+    signature         TEXT NOT NULL DEFAULT '',
+    updated           REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS profiles_name ON profiles(primary_name_key);
 
 CREATE TABLE IF NOT EXISTS revocations (
     serial     TEXT PRIMARY KEY REFERENCES certificates(serial) ON DELETE CASCADE,
@@ -390,6 +434,20 @@ def valid_board_name(name: str) -> bool:
     return bool(BOARD_RE.fullmatch(name)) and name not in RESERVED_BOARDS
 
 
+def board_name_error(name: str) -> str:
+    if name != name.lower():
+        return "channel name must be lowercase"
+    if len(name) < 2 or len(name) > 24:
+        return "channel name must be 2..24 characters"
+    if not name or not ("a" <= name[0] <= "z"):
+        return "channel name must start with a lowercase ASCII letter"
+    if any(char not in "abcdefghijklmnopqrstuvwxyz0123456789" for char in name):
+        return "channel name may contain only lowercase ASCII letters and digits"
+    if name in RESERVED_BOARDS:
+        return "channel name is reserved"
+    return "invalid channel name"
+
+
 def valid_author_id(value: str) -> bool:
     return bool(AUTHOR_ID_RE.fullmatch(value))
 
@@ -434,6 +492,7 @@ class Store:
                 self._rebuild_inbox()
             if not had_tags:
                 self._rebuild_tags()
+            self._migrate_identity_names()
 
     def close(self) -> None:
         with self._lock:
@@ -510,6 +569,29 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS identity_names_author_last
                 ON identity_names(author_id, last_seen DESC);
+            CREATE TABLE IF NOT EXISTS name_claims (
+                name_key TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                author_id TEXT NOT NULL,
+                public_key TEXT NOT NULL,
+                claim_post_id INTEGER REFERENCES posts(id) ON DELETE SET NULL,
+                claim_signature TEXT NOT NULL DEFAULT '',
+                claimed REAL NOT NULL,
+                last_used REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS name_claims_author
+                ON name_claims(author_id, claimed);
+            CREATE TABLE IF NOT EXISTS profiles (
+                author_id TEXT PRIMARY KEY,
+                primary_name_key TEXT NOT NULL,
+                bio TEXT NOT NULL DEFAULT '',
+                version INTEGER NOT NULL DEFAULT 0,
+                payload_b64 TEXT NOT NULL DEFAULT '',
+                signature TEXT NOT NULL DEFAULT '',
+                updated REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS profiles_name
+                ON profiles(primary_name_key);
             CREATE TABLE IF NOT EXISTS revocations (
                 serial TEXT PRIMARY KEY REFERENCES certificates(serial) ON DELETE CASCADE,
                 revoked_at REAL NOT NULL,
