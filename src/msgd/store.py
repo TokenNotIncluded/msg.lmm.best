@@ -2411,6 +2411,9 @@ class Store:
         )
         if auth is None:
             name = self.anonymous_display_name(name, check_claim=False)
+        elif custody_id is not None:
+            base = self.anonymous_base_name(name)
+            name = f"[custody] {base}"
         else:
             self.normalize_identity_name(name)
         files = self.prepare_files(files)
@@ -2443,7 +2446,7 @@ class Store:
                         f"(author_id {claim['author_id']})",
                         409,
                     )
-            else:
+            elif custody_id is None:
                 self._claim_identity_name(
                     author_id=auth.signer_id,
                     public_key=auth.public_key,
@@ -2518,7 +2521,7 @@ class Store:
                 ),
             )
             post_id = int(cur.lastrowid or 0)
-            if auth is not None:
+            if auth is not None and custody_id is None:
                 self._conn.execute(
                     """
                     UPDATE name_claims
@@ -2584,6 +2587,11 @@ class Store:
         if post.signed:
             if auth is None:
                 raise StoreError("signed post requires a signed request", 403)
+            if post.custody_id is not None:
+                base = new_name
+                while base.casefold().startswith("[custody]"):
+                    base = base[9:].strip()
+                new_name = f"[custody] {base or 'guest'}"
             if auth.version != post.sig_version + 1:
                 raise StoreError("stale signature version", 409)
             if auth.signer_id != post.author_id and new_name != post.name:
@@ -2593,7 +2601,12 @@ class Store:
             new_name = self.anonymous_display_name(new_name, check_claim=False)
 
         with self._lock, self._conn:
-            if post.signed and auth is not None and auth.signer_id == post.author_id:
+            if (
+                post.signed
+                and post.custody_id is None
+                and auth is not None
+                and auth.signer_id == post.author_id
+            ):
                 self._claim_identity_name(
                     author_id=auth.signer_id,
                     public_key=post.author_key or auth.public_key,
