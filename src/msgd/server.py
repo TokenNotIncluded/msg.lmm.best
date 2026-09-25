@@ -1828,6 +1828,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action == "inbox.read":
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
             since, before, limit = _inbox_window(params, self.board.cfg)
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
@@ -1837,6 +1838,7 @@ class Handler(BaseHTTPRequestHandler):
                 version=1,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 since=since,
                 before=before,
                 limit=limit,
@@ -1845,6 +1847,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "nonce": nonce,
                     "issued": issued,
                     "since": since,
@@ -1856,6 +1859,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action.startswith("webhook."):
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
             webhook_id, webhook_url, webhook_events, webhook_enabled = _webhook_fields(
                 params,
                 action,
@@ -1868,6 +1872,7 @@ class Handler(BaseHTTPRequestHandler):
                 version=1,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 webhook_id=webhook_id,
                 webhook_url=webhook_url,
                 webhook_events=webhook_events,
@@ -1877,6 +1882,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "nonce": nonce,
                     "issued": issued,
                     "webhook_id": webhook_id or None,
@@ -1889,12 +1895,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action in {"keystore.put", "keystore.delete"}:
-            if store.profile_by_author(signer_id) is None:
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
+            profile = store.profile_by_author(owner_id)
+            if profile is None:
                 raise StoreError("keystore requires an established signed profile", 403)
             name = store.normalize_keystore_name(_required(params, "name"))
-            if action == "keystore.delete" and store.keystore_entry(signer_id, name) is None:
+            if action == "keystore.delete" and store.keystore_entry(owner_id, name) is None:
                 raise StoreError("keystore entry not found", 404)
-            version = store.keystore_version(signer_id, name) + 1
+            version = store.keystore_version(owner_id, name) + 1
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
             ciphertext = ""
@@ -1910,6 +1918,7 @@ class Handler(BaseHTTPRequestHandler):
                 version=version,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 keystore_name=name,
                 keystore_ciphertext=ciphertext,
                 keystore_sha256=digest,
@@ -1918,12 +1927,13 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "version": version,
                     "nonce": nonce,
                     "issued": issued,
                     "name": name,
                     "algorithm": "curve25519",
-                    "public_key": curve25519_public_key(canonical_key),
+                    "public_key": curve25519_public_key(str(profile["public_key"])),
                     "format": KEYSTORE_FORMAT,
                     "sha256": digest or None,
                     **payload_info(payload),
@@ -1932,10 +1942,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action in {"web.write", "web.delete"}:
-            if store.profile_by_author(signer_id) is None:
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
+            if store.profile_by_author(owner_id) is None:
                 raise StoreError("web hosting requires an established signed profile", 403)
-            if not self.board.web.allowed(signer_id, action):
-                raise StoreError(f"certificate does not grant {action}", 403)
+            _require_owner_capability(store, signer_id, owner_id, "web", action)
             web_path = self.board.web.normalize_path(_required(params, "path"))
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
@@ -1969,6 +1979,7 @@ class Handler(BaseHTTPRequestHandler):
                 version=1,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 web_path=web_path,
                 web_sha256=web_sha256,
                 web_bytes=web_bytes,
@@ -1978,6 +1989,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "version": 1,
                     "nonce": nonce,
                     "issued": issued,
@@ -1992,17 +2004,21 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action == "profile.update":
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
             requested_name = _param(params, "name")
             if requested_name:
                 requested_claim = store.name_claim(requested_name)
-                if requested_claim is not None and str(requested_claim["author_id"]) != signer_id:
+                if (
+                    requested_claim is not None
+                    and str(requested_claim["author_id"]) != owner_id
+                ):
                     raise StoreError(
                         f"name {requested_name!r} is already bound to public key "
                         f"{requested_claim['public_key']} "
                         f"(author_id {requested_claim['author_id']})",
                         409,
                     )
-            current = store.profile_by_author(signer_id)
+            current = store.profile_by_author(owner_id)
             if current is None:
                 raise StoreError(
                     "post with a signed name first to create a profile/name claim",
@@ -2016,10 +2032,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise StoreError("profile bio exceeds 4096 UTF-8 bytes", 413)
             name_key = store.normalize_identity_name(name)
             claim = store.name_claim(name_key)
-            if claim is None or str(claim["author_id"]) != signer_id:
-                raise StoreError("profile name must be claimed by this public key", 403)
+            if claim is None or str(claim["author_id"]) != owner_id:
+                raise StoreError("profile name must be claimed by target identity", 403)
             name = str(claim["display_name"])
-            version = store.profile_version(signer_id) + 1
+            version = store.profile_version(owner_id) + 1
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
             payload = request_payload(
@@ -2028,14 +2044,16 @@ class Handler(BaseHTTPRequestHandler):
                 version=version,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 profile_name=name,
                 profile_bio=bio,
-                profile_public_key=canonical_key,
+                profile_public_key=str(current["public_key"]),
             )
             self._json(
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "version": version,
                     "nonce": nonce,
                     "issued": issued,
