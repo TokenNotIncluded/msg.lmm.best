@@ -24,6 +24,7 @@ from msgd.crypto import (
     request_payload,
 )
 
+
 def _load_private(path: str) -> Ed25519PrivateKey:
     value = serialization.load_pem_private_key(Path(path).read_bytes(), password=None)
     if not isinstance(value, Ed25519PrivateKey):
