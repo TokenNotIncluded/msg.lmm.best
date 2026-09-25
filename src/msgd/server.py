@@ -61,6 +61,7 @@ from msgd.render import (
     render_users,
 )
 from msgd.search import SearchSyntaxError, parse_search_query, search_help
+from msgd.sshaccess import SSHKeyStore, SSH_PRESETS, normalize_scopes, normalize_ssh_public_key, ssh_access_payload
 from msgd.store import (
     ANONYMOUS_BASE_ACTIONS,
     KEYSTORE_FORMAT,
@@ -145,6 +146,7 @@ class Board:
         self.store = Store(cfg)
         self.exchange = ExchangeService(cfg, self.store)
         self.repos = RepoService(cfg)
+        self.ssh_keys = SSHKeyStore(cfg)
         self.engagement = Engagement(cfg.valkey_url, prefix=cfg.valkey_prefix)
         if cfg.valkey_required and not self.engagement.available:
             raise RuntimeError(
@@ -187,6 +189,7 @@ class MsgServer(ThreadingHTTPServer):
         self.board.webhooks.close()
         self.board.engagement.close()
         self.board.exchange.close()
+        self.board.ssh_keys.close()
         super().server_close()
 
 
@@ -620,8 +623,47 @@ class Handler(BaseHTTPRequestHandler):
             self._websub(params)
             return
 
+        if head == "ssh":
+            if len(segments) != 1:
+                self._error(404, "invalid SSH path")
+                return
+            if method not in {"GET", "HEAD"}:
+                self._send(
+                    405,
+                    render_error(405, "SSH key management uses signed POST /_ssh"),
+                    extra_headers={"Allow": "GET, HEAD"},
+                )
+                return
+            self._send(
+                200,
+                "# SSH access\n\n"
+                "connect: ssh -i PRIVATE_KEY msg@" + self.board.cfg.site_name + "\n"
+                "Git: ssh://msg@" + self.board.cfg.site_name + "/REPO.git\n\n"
+                "Each SSH public key is a revocable delegated credential.\n"
+                "Scopes: read, write, social, repo-read, repo-write, profile, keys, admin.\n"
+                "Presets: viewer, contributor, owner.\n"
+                "New keys default to read only.\n"
+                "Manage keys with the msg CLI: msg ssh-key --help\n"
+                "The SSH account is forced into the msg restricted command interface; "
+                "no operating-system shell is exposed.\n",
+            )
+            return
+
         if uploads and head not in {"publish", "_signing"}:
             raise StoreError("file uploads are only accepted by /publish or /_signing", 400)
+
+        if head == "_ssh":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "signed POST required"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            if self._limited(True):
+                return
+            self._ssh_keys(params)
+            return
 
         if head == "_webhook":
             if method != "POST":
@@ -637,7 +679,17 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if (
-            head in {"publish", "_cert", "_csr", "_revoke", "_policy", "_profile", "_keystore"}
+            head
+            in {
+                "publish",
+                "_cert",
+                "_csr",
+                "_revoke",
+                "_policy",
+                "_profile",
+                "_keystore",
+                "_ssh",
+            }
             and method == "HEAD"
         ):
             self._send(
@@ -1302,6 +1354,7 @@ class Handler(BaseHTTPRequestHandler):
                         "anonymous": "read-only",
                         "signed": "push",
                         "max_blob_bytes": self.board.cfg.repo_max_blob_bytes,
+                        "ssh": f"ssh://msg@{self.board.cfg.site_name}/REPO.git",
                         "repositories": repositories,
                     },
                 )
@@ -1318,7 +1371,8 @@ class Handler(BaseHTTPRequestHandler):
             ]
             if repositories:
                 lines.extend(
-                    f"/repos/{repo['name']} · {repo['clone_url']}" for repo in repositories
+                    f"/repos/{repo['name']} · {repo['clone_url']} · {repo['ssh_clone_url']}"
+                    for repo in repositories
                 )
             else:
                 lines.append("(no repositories yet; the first signed push creates one)")
@@ -1341,6 +1395,7 @@ class Handler(BaseHTTPRequestHandler):
             "",
             f"visibility={info['visibility']}",
             f"clone={info['clone_url']}",
+            f"ssh={info['ssh_clone_url']}",
             f"push={info['clone_url']}",
             f"anonymous={info['anonymous']}",
             f"signed={info['signed']}",
@@ -1354,6 +1409,111 @@ class Handler(BaseHTTPRequestHandler):
             lines += ["", "## refs"]
             lines.extend(f"{item['ref']} {item['oid']}" for item in refs)
         self._send(200, "\n".join(lines) + "\n")
+
+    def _ssh_keys(self, params: Params) -> None:
+        action = _required(params, "action").strip().lower()
+        identity_key = _required(params, "key")
+        canonical_key, signer_id = public_identity(identity_key)
+        nonce = _required(params, "nonce").strip().lower()
+        issued = _int_required(params, "issued")
+        key_id = (_param(params, "id") or "").strip().lower()
+        name = _param(params, "name") or ""
+        ssh_public_key = ""
+        scopes: tuple[str, ...] = ()
+        expires: int | None = None
+
+        if action == "ssh.add":
+            ssh_public_key, _key_type, _fingerprint = normalize_ssh_public_key(
+                _required(params, "ssh_key")
+            )
+            raw_scopes = (_param(params, "scopes") or "read").strip().lower()
+            scopes = SSH_PRESETS.get(raw_scopes, normalize_scopes(raw_scopes))
+            expires_raw = (_param(params, "expires") or "").strip()
+            if expires_raw:
+                try:
+                    expires = int(expires_raw)
+                except ValueError as exc:
+                    raise StoreError("SSH key expires must be a Unix timestamp", 400) from exc
+        elif action == "ssh.scopes":
+            if not re.fullmatch(r"[0-9a-f]{32}", key_id):
+                raise StoreError("invalid SSH key id", 400)
+            raw_scopes = _required(params, "scopes").strip().lower()
+            scopes = SSH_PRESETS.get(raw_scopes, normalize_scopes(raw_scopes))
+        elif action == "ssh.rename":
+            if not re.fullmatch(r"[0-9a-f]{32}", key_id):
+                raise StoreError("invalid SSH key id", 400)
+            if not " ".join(name.split()):
+                raise StoreError("SSH key name is required", 400)
+        elif action == "ssh.expiry":
+            if not re.fullmatch(r"[0-9a-f]{32}", key_id):
+                raise StoreError("invalid SSH key id", 400)
+            expires_raw = (_param(params, "expires") or "").strip()
+            if expires_raw and expires_raw != "0":
+                try:
+                    expires = int(expires_raw)
+                except ValueError as exc:
+                    raise StoreError("SSH key expires must be a Unix timestamp", 400) from exc
+        elif action == "ssh.revoke":
+            if not re.fullmatch(r"[0-9a-f]{32}", key_id):
+                raise StoreError("invalid SSH key id", 400)
+        elif action != "ssh.list":
+            raise StoreError("unsupported SSH key action", 400)
+
+        payload = ssh_access_payload(
+            action=action,
+            signer_id=signer_id,
+            nonce=nonce,
+            issued=issued,
+            key_id=key_id,
+            ssh_public_key=ssh_public_key,
+            name=name,
+            scopes=scopes,
+            expires=expires,
+        )
+        auth = signed_request(
+            canonical_key,
+            _required(params, "sig"),
+            payload,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        self.board.store.consume_nonce(auth)
+        profile = self.board.store.profile_by_author(auth.signer_id)
+        if profile is None:
+            raise StoreError("SSH access requires a registered signed profile", 403)
+
+        service = self.board.ssh_keys
+        if action == "ssh.list":
+            result: object = service.list(auth.signer_id)
+        elif action == "ssh.add":
+            result = service.add(
+                owner_id=auth.signer_id,
+                public_key=ssh_public_key,
+                name=name,
+                scopes=scopes or ("read",),
+                expires=expires,
+                created_by=auth.signer_id,
+            )
+        elif action == "ssh.scopes":
+            result = service.set_scopes(auth.signer_id, key_id, scopes)
+        elif action == "ssh.rename":
+            result = service.rename(auth.signer_id, key_id, name)
+        elif action == "ssh.expiry":
+            result = service.set_expiry(auth.signer_id, key_id, expires)
+        else:
+            result = service.revoke(auth.signer_id, key_id)
+
+        self._json(
+            200,
+            {
+                "ok": 1,
+                "action": action,
+                "account": profile["name"],
+                "owner_id": auth.signer_id,
+                "result": result,
+            },
+        )
 
     def _signing(self, params: Params, uploads: Uploads, method: str) -> None:
         action = _param(params, "action") or ""
