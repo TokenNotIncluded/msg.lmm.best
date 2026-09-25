@@ -326,6 +326,17 @@ CREATE TABLE IF NOT EXISTS path_get_receipts (
     headers        TEXT NOT NULL DEFAULT '{}',
     created        REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS path_get_chunks (
+    request_id  TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    chunk_count INTEGER NOT NULL,
+    data        BLOB NOT NULL,
+    created     REAL NOT NULL,
+    PRIMARY KEY (request_id, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS path_get_chunks_created
+    ON path_get_chunks(created);
 """
 
 
@@ -700,6 +711,16 @@ class Store:
                 headers TEXT NOT NULL DEFAULT '{}',
                 created REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS path_get_chunks (
+                request_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                data BLOB NOT NULL,
+                created REAL NOT NULL,
+                PRIMARY KEY (request_id, chunk_index)
+            );
+            CREATE INDEX IF NOT EXISTS path_get_chunks_created
+                ON path_get_chunks(created);
             """
         )
         self._conn.execute(
@@ -3552,6 +3573,145 @@ class Store:
                  WHERE request_id = ? AND payload_sha256 = ? AND status IS NULL
                 """,
                 (request_id, payload_sha256),
+            )
+
+    def put_path_get_chunk(
+        self,
+        *,
+        request_id: str,
+        chunk_index: int,
+        chunk_count: int,
+        data: bytes,
+        max_total_bytes: int,
+        ttl_seconds: int,
+    ) -> dict[str, Any]:
+        now = time.time()
+        cutoff = now - ttl_seconds
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM path_get_chunks WHERE created < ?", (cutoff,))
+            receipt = self._conn.execute(
+                "SELECT 1 FROM path_get_receipts WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if receipt is not None:
+                raise StoreError("path GET request id already has an execution receipt", 409)
+
+            rows = self._conn.execute(
+                """
+                SELECT chunk_index, chunk_count, data
+                  FROM path_get_chunks
+                 WHERE request_id = ?
+                 ORDER BY chunk_index
+                """,
+                (request_id,),
+            ).fetchall()
+            if rows and any(int(row["chunk_count"]) != chunk_count for row in rows):
+                raise StoreError("path GET chunk count conflicts with existing transfer", 409)
+
+            existing = next(
+                (row for row in rows if int(row["chunk_index"]) == chunk_index),
+                None,
+            )
+            replay = existing is not None
+            if existing is not None:
+                if bytes(existing["data"]) != data:
+                    raise StoreError("path GET chunk index was reused with different data", 409)
+            else:
+                self._conn.execute(
+                    """
+                    INSERT INTO path_get_chunks(
+                        request_id, chunk_index, chunk_count, data, created
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (request_id, chunk_index, chunk_count, data, now),
+                )
+
+            self._conn.execute(
+                "UPDATE path_get_chunks SET created = ? WHERE request_id = ?",
+                (now, request_id),
+            )
+            stats = self._conn.execute(
+                """
+                SELECT COUNT(*) AS received,
+                       COALESCE(SUM(LENGTH(data)), 0) AS bytes
+                  FROM path_get_chunks
+                 WHERE request_id = ?
+                """,
+                (request_id,),
+            ).fetchone()
+            total_bytes = int(stats["bytes"])
+            if total_bytes > max_total_bytes:
+                raise StoreError(
+                    f"path GET transfer exceeds max_path_transfer_bytes={max_total_bytes}",
+                    413,
+                )
+            return {
+                "request_id": request_id,
+                "index": chunk_index,
+                "total": chunk_count,
+                "received": int(stats["received"]),
+                "bytes": total_bytes,
+                "replay": replay,
+            }
+
+    def path_get_chunk_state(
+        self,
+        request_id: str,
+        *,
+        ttl_seconds: int,
+        max_total_bytes: int,
+    ) -> tuple[dict[str, Any] | None, bytes | None]:
+        cutoff = time.time() - ttl_seconds
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM path_get_chunks WHERE created < ?", (cutoff,))
+            rows = self._conn.execute(
+                """
+                SELECT chunk_index, chunk_count, data, created
+                  FROM path_get_chunks
+                 WHERE request_id = ?
+                 ORDER BY chunk_index
+                """,
+                (request_id,),
+            ).fetchall()
+        if not rows:
+            return None, None
+
+        chunk_count = int(rows[0]["chunk_count"])
+        if any(int(row["chunk_count"]) != chunk_count for row in rows):
+            raise StoreError("path GET transfer has inconsistent chunk counts", 409)
+        indices = [int(row["chunk_index"]) for row in rows]
+        if any(index < 0 or index >= chunk_count for index in indices):
+            raise StoreError("path GET transfer has invalid chunk indexes", 409)
+        total_bytes = sum(len(bytes(row["data"])) for row in rows)
+        if total_bytes > max_total_bytes:
+            raise StoreError(
+                f"path GET transfer exceeds max_path_transfer_bytes={max_total_bytes}",
+                413,
+            )
+        present = set(indices)
+        missing = [index for index in range(chunk_count) if index not in present]
+        state = {
+            "request_id": request_id,
+            "total": chunk_count,
+            "received": len(rows),
+            "bytes": total_bytes,
+            "missing": missing,
+        }
+        if missing:
+            return state, None
+        raw = b"".join(bytes(row["data"]) for row in rows)
+        if len(raw) > max_total_bytes:
+            raise StoreError(
+                f"path GET transfer exceeds max_path_transfer_bytes={max_total_bytes}",
+                413,
+            )
+        return state, raw
+
+    def delete_path_get_chunks(self, request_id: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM path_get_chunks WHERE request_id = ?",
+                (request_id,),
             )
 
     def key_info(self, author_id: str) -> dict[str, Any] | None:
