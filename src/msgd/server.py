@@ -2110,7 +2110,7 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("order must be asc or desc", 400)
 
         path = f"/index/{kind}"
-        scope = _pagination_scope(path, params, exclude={"format", "order"})
+        scope = _pagination_scope(path, params, exclude={"format"})
         cursor = _decode_cursor(
             _param(params, "cursor"),
             kind=f"index-{kind}",
