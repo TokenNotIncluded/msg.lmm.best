@@ -34,6 +34,9 @@ class Config:
     max_post_bytes_post: int = 1_048_576
     max_request_bytes: int = 33_554_432
     max_path_payload_bytes: int = 18_432
+    max_path_transfer_bytes: int = 1_114_112  # 1 MiB body plus JSON/signature overhead
+    path_chunk_ttl_seconds: int = 3_600
+    path_max_chunks: int = 1_024
     max_file_bytes: int = 16_777_216
     max_files_per_post: int = 8
     max_filename_bytes: int = 255
@@ -103,6 +106,13 @@ class Config:
             max_path_payload_bytes=get(
                 "limits", "max_path_payload_bytes", base.max_path_payload_bytes
             ),
+            max_path_transfer_bytes=get(
+                "limits", "max_path_transfer_bytes", base.max_path_transfer_bytes
+            ),
+            path_chunk_ttl_seconds=get(
+                "limits", "path_chunk_ttl_seconds", base.path_chunk_ttl_seconds
+            ),
+            path_max_chunks=get("limits", "path_max_chunks", base.path_max_chunks),
             max_file_bytes=get("limits", "max_file_bytes", base.max_file_bytes),
             max_files_per_post=get("limits", "max_files_per_post", base.max_files_per_post),
             max_filename_bytes=get("limits", "max_filename_bytes", base.max_filename_bytes),
@@ -132,6 +142,9 @@ class Config:
             "max_post_bytes_post",
             "max_request_bytes",
             "max_path_payload_bytes",
+            "max_path_transfer_bytes",
+            "path_chunk_ttl_seconds",
+            "path_max_chunks",
             "max_file_bytes",
             "max_files_per_post",
             "max_filename_bytes",
