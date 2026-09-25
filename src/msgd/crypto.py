@@ -170,14 +170,18 @@ def request_payload(
             ("reply_to", "" if reply_to is None else str(reply_to)),
             ("files", canonical_json(list(files))),
         ]
-    elif action == "post.delete":
+    elif action in {"post.delete", "post.purge"}:
         if post_id is None or owner_id is None:
-            raise SignatureError("signed delete requires post_id and owner_id")
+            raise SignatureError(
+                f"signed {action.removeprefix('post.')} requires post_id and owner_id"
+            )
         fields += [
             ("post_id", str(post_id)),
             ("owner_id", owner_id),
             ("board", board),
         ]
+        if action == "post.purge":
+            fields.append(("reason", reason))
     elif action == "topic.policy":
         fields += [
             ("board", board),
