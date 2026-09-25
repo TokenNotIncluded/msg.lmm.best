@@ -1501,12 +1501,14 @@ class LegacyMigrationCase(unittest.TestCase):
                 self.assertIn("actor_id", columns)
                 self.assertIn("reply_to", columns)
                 self.assertIn("system", columns)
+                self.assertIn("custody_id", columns)
                 self.assertIn("certificates", tables)
                 self.assertIn("revocations", tables)
                 self.assertIn("topic_policies", tables)
                 self.assertIn("inbox_events", tables)
                 self.assertIn("certificate_requests", tables)
                 self.assertIn("identity_names", tables)
+                self.assertIn("custody_identities", tables)
             finally:
                 store.close()
 
