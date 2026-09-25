@@ -447,10 +447,9 @@ class ServerCase(unittest.TestCase):
                 )
             },
         )
-        cert_sig = sign_b64(
-            self.root_key,
-            base64.b64encode(certificate_payload(cert.body)).decode(),
-        )
+        cert_sig = base64.b64encode(
+            self.root_key.sign(certificate_payload(cert.body))
+        ).decode()
         decision = self.signing(
             action="cert.request.decision",
             key=root_public,
@@ -533,10 +532,9 @@ class ServerCase(unittest.TestCase):
             delegate=False,
             grants={"main": ("post.create", "post.delete.any")},
         )
-        cert_sig = sign_b64(
-            self.root_key,
-            base64.b64encode(certificate_payload(cert.body)).decode(),
-        )
+        cert_sig = base64.b64encode(
+            self.root_key.sign(certificate_payload(cert.body))
+        ).decode()
         decision = self.signing(
             action="cert.request.decision",
             key=root_public,
