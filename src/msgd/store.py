@@ -76,6 +76,7 @@ RESERVED_BOARDS = {
     "new",
     "null",
     "profile",
+    "repos",
     "root",
     "search",
     "settings",
