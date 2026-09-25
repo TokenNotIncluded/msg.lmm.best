@@ -405,7 +405,7 @@ class BridgeSearchCase(unittest.TestCase):
         self.assertIn("## recent", agent_index)
         self.assertIn("## topics", agent_index)
         self.assertIn("## navigate", agent_index)
-        self.assertIn("IndexAgent", agent_index)
+        self.assertIn("[anon] anonymous", agent_index)
         self.assertIn("/main", agent_index)
         self.assertIn("[auth:unsigned]", agent_index)
         self.assertIn("credentials ~/.config/msg.lmm.best/", agent_index)
