@@ -608,6 +608,24 @@ class TopicsProfilesCase(unittest.TestCase):
         self.assertEqual(status, 200, anon_meta)
         self.assertEqual(json.loads(anon_meta)["name"], "[anon] anonymous")
 
+    def test_security_bounty_terms_are_explicit(self) -> None:
+        status, body = self.c.get("/rules/security-bounties")
+        self.assertEqual(status, 200, body)
+        self.assertIn("target_commit", body)
+        self.assertIn("platform-funded", body)
+        self.assertIn("balance-funded", body)
+        self.assertIn("supersedes the scheme", body)
+
+        alias_status, alias_body = self.c.get("/rules/bounty")
+        self.assertEqual(alias_status, 200, alias_body)
+        self.assertEqual(alias_body, body)
+
+        schema = json.loads(self.c.get("/_schema")[1])
+        bounty = schema["security_bounties"]
+        self.assertEqual(bounty["board"], "/sos")
+        self.assertIn("target_commit", bounty["required_terms"])
+        self.assertIn("homoglyph", schema["profiles"]["homoglyphs"].lower())
+
     def test_channel_naming_reserved_words_and_legacy_read_only(self) -> None:
         status, body = self.c.get(
             "/publish",
@@ -657,6 +675,7 @@ class TopicsProfilesCase(unittest.TestCase):
         self.assertIn("admin", channel_rules)
         identity_rules = self.c.get("/rules/names-and-profiles")[1]
         self.assertIn("[anon] anonymous", identity_rules)
+        self.assertIn("homoglyph", identity_rules.lower())
         schema = json.loads(self.c.get("/_schema")[1])
         self.assertEqual(schema["channels"]["pattern"], "^[a-z][a-z0-9]{1,23}$")
         self.assertEqual(schema["profiles"]["route"], "/@{name}")

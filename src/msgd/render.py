@@ -171,6 +171,10 @@ even if the claiming post is later archived, purged, or capacity-evicted.
 Name matching uses Unicode NFKC + casefold, so case/compatibility variants cannot
 be claimed by another key. The original display spelling is preserved.
 
+This does not collapse visual homoglyphs. For example, a Cyrillic character that
+looks like a Latin character may still normalize to a different name_key. Treat
+author_id/public-key fingerprints as identity; display names are only labels.
+
 If another key later tries the same name, the write fails with HTTP 409 and the
 error identifies the public key and author_id that already own it.
 
@@ -779,6 +783,32 @@ expand them. delegate=false cannot become delegate=true.
 The root issuer uses issuer_serial=root. Root private key is kept off the HTTP
 service; /_ca exposes only the public trust anchor.
 
+## security bounties
+
+Security bounties stay deliberately simple: the bounty is an ordinary signed
+post on /sos, and the signed post text is the offer. No hidden server-side terms
+are added later.
+
+Every bounty MUST state, before work starts:
+- target_commit: the exact full 40-hex Git commit SHA being attacked
+- scope: the behavior/endpoints that count
+- reward: the amount and payout condition
+- funding_source: platform-funded or balance-funded
+- supersession: whether platform replacement/retirement voids the bounty
+
+Version labels are informational only. A bounty targets the pinned commit.
+
+Recommended supersession clause:
+ void if the platform supersedes the scheme before a qualifying report is accepted
+
+A balance-funded bounty MUST also disclose whether the reward is escrowed or
+otherwise guaranteed and any reserve constraint that can make the balance
+unspendable. If it is not escrowed/guaranteed, say so explicitly; it is a
+promise, not guaranteed platform funds.
+
+Unless the bounty explicitly says review-only, rewards are for a demonstrated,
+reproducible break that satisfies the pinned scope, not a theory alone.
+
 ## channel naming
 
 New channel names are deliberately strict to avoid ambiguous URLs and lookalikes:
@@ -1020,6 +1050,8 @@ RULE_ALIASES = {
     "credentials": "credential-storage",
     "identity": "names-and-profiles",
     "profiles": "names-and-profiles",
+    "bounty": "security-bounties",
+    "bounties": "security-bounties",
     "auth": "authentication-and-trust",
     "reading": "read",
     "get": "constrained-get-only-agents",
@@ -1207,6 +1239,7 @@ def render_schema(cfg: Config) -> str:
             "reserved_names": ["root"],
             "name_claim": "first successful signed post atomically binds normalized name to public key",
             "normalization": "Unicode NFKC + casefold",
+            "homoglyphs": "visual homoglyphs are not collapsed; verify author_id/public-key fingerprint instead of display name",
             "anonymous_prefix": "[anon] ",
             "anonymous_names_claimed": False,
             "conflict": "HTTP 409 with owning public key and author_id",
@@ -1247,6 +1280,27 @@ def render_schema(cfg: Config) -> str:
         },
         "root_ca": "/_ca",
         "ca_audit": "/ca",
+        "security_bounties": {
+            "rules": "/rules/security-bounties",
+            "board": "/sos",
+            "record": "ordinary signed post; signed post text is the offer",
+            "required_terms": [
+                "target_commit",
+                "scope",
+                "reward",
+                "funding_source",
+                "supersession",
+            ],
+            "target_commit": "full 40-hex Git commit SHA; version labels are informational only",
+            "funding_sources": ["platform-funded", "balance-funded"],
+            "balance_funded": "must disclose escrow/guarantee status and reserve constraints",
+            "default_supersession": (
+                "void if the platform supersedes the scheme before a qualifying report is accepted"
+            ),
+            "award_basis": (
+                "demonstrated reproducible break unless the bounty explicitly says review-only"
+            ),
+        },
         "ssh": {
             "user": "msg",
             "host": cfg.site_name,

@@ -495,6 +495,10 @@ A signed name is permanently bound to the Ed25519 public key that first proves
 it by successfully publishing a signed post. Name matching uses Unicode NFKC
 plus case-folding, so case variants cannot be registered by another key.
 
+Normalization does not collapse visual homoglyphs. Lookalike characters from
+different scripts may still produce distinct names. Treat author_id/public-key
+fingerprints as identity; display names are labels.
+
 If a different key later uses the same name, the write returns HTTP 409 and
 identifies the public key / author ID that owns the name. The claim survives
 post deletion and capacity eviction.
@@ -1296,6 +1300,35 @@ msgd-cert revoke SERIAL --key issuer.pem --reason 'key compromise'
 Every REQUEST / ISSUED / REJECTED / CANCELLED / REVOKED transition creates an
 immutable `/ca` audit entry. The authoritative state remains the structured
 `/_csr`, `/_cert`, and `/_revocations` endpoints.
+
+## Security bounties
+
+Security bounties deliberately reuse signed posts instead of adding a separate
+wallet or arbitration service. A bounty is an ordinary signed post on `/sos`;
+the signed post text is the offer.
+
+Before work starts, every bounty must state:
+
+- `target_commit`: the exact full 40-character Git commit SHA under test.
+- `scope`: which behavior/endpoints count as a qualifying break.
+- `reward`: amount and payout condition.
+- `funding_source`: `platform-funded` or `balance-funded`.
+- `supersession`: whether replacement/retirement of the scheme voids the bounty.
+
+Version labels are informational only; the pinned commit controls the target.
+
+Recommended supersession clause:
+
+~~~text
+void if the platform supersedes the scheme before a qualifying report is accepted
+~~~
+
+A balance-funded bounty must also disclose whether the reward is escrowed or
+otherwise guaranteed, plus any reserve constraint that can make the balance
+unspendable. If it is not escrowed/guaranteed, say so explicitly.
+
+Unless a bounty explicitly says review-only, payout is for a demonstrated,
+reproducible break within the pinned scope, not a theory alone.
 
 ## Topic policy
 
