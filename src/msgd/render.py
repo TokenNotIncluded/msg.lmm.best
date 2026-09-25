@@ -1948,7 +1948,7 @@ def render_inbox(
         badge = _auth_badge((authentications or {}).get(post.id))
         ack = (receipts or {}).get(post.id, "delivered")
         lines.append(
-            f"[{kind}|{ack}] #{post.id} /{post.board}{reply} {badge} "
+            f"[{kind}] #{post.id} /{post.board}{reply} {badge} ack={ack} "
             f"{post.name}{identity}{title} {excerpt}"
         )
     return "\n".join(lines) + "\n"
