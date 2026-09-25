@@ -79,11 +79,14 @@ class WebSiteService:
             raise StoreError("web path escapes site root", 400)
         return normalized, candidate
 
-    def allowed(self, signer_id: str, action: str) -> bool:
+    def allowed(self, signer_id: str, owner_id: str, action: str) -> bool:
         root = self.store.root_info()
         if root is not None and signer_id == root["root_id"]:
             return True
-        return action in self.store.permissions_for(signer_id, "*")
+        if self.store.scope_allowed(signer_id, f"web:{owner_id}", action):
+            return True
+        # Compatibility for certificates issued before resource scopes existed.
+        return signer_id == owner_id and action in self.store.permissions_for(signer_id, "*")
 
     def usage(self, author_id: str) -> int:
         with self._lock:
@@ -139,14 +142,15 @@ class WebSiteService:
         self,
         *,
         auth: SignedRequest,
+        owner_id: str,
         path: str,
         data: bytes,
         content_type: str,
     ) -> dict[str, object]:
-        if not self.allowed(auth.signer_id, "web.write"):
+        if not self.allowed(auth.signer_id, owner_id, "web.write"):
             raise StoreError("certificate does not grant web.write", 403)
 
-        normalized, destination = self._path(auth.signer_id, path)
+        normalized, destination = self._path(owner_id, path)
         # Burn the one-time nonce before state-dependent checks so a signed
         # mutation that fails today cannot be replayed after site state changes.
         self.store.consume_nonce(auth)
@@ -163,7 +167,7 @@ class WebSiteService:
                     raise StoreError("web path conflicts with a non-file entry", 409)
                 existing = destination.stat().st_size
 
-            used_before = self.usage(auth.signer_id)
+            used_before = self.usage(owner_id)
             used_after = used_before - existing + len(data)
             if used_after > self.cfg.web_max_site_bytes:
                 raise StoreError(
@@ -191,11 +195,17 @@ class WebSiteService:
                 "quota_bytes": self.cfg.web_max_site_bytes,
             }
 
-    def delete(self, *, auth: SignedRequest, path: str) -> dict[str, object]:
-        if not self.allowed(auth.signer_id, "web.delete"):
+    def delete(
+        self,
+        *,
+        auth: SignedRequest,
+        owner_id: str,
+        path: str,
+    ) -> dict[str, object]:
+        if not self.allowed(auth.signer_id, owner_id, "web.delete"):
             raise StoreError("certificate does not grant web.delete", 403)
 
-        normalized, target = self._path(auth.signer_id, path)
+        normalized, target = self._path(owner_id, path)
         # Consume first for the same replay reason as write().
         self.store.consume_nonce(auth)
         with self._lock:
@@ -204,7 +214,7 @@ class WebSiteService:
 
             target.unlink()
 
-            site = self._site_dir(auth.signer_id)
+            site = self._site_dir(owner_id)
             parent = target.parent
             while parent != site:
                 try:
@@ -217,6 +227,6 @@ class WebSiteService:
                 "ok": 1,
                 "deleted": True,
                 "path": normalized,
-                "used_bytes": self.usage(auth.signer_id),
+                "used_bytes": self.usage(owner_id),
                 "quota_bytes": self.cfg.web_max_site_bytes,
             }
