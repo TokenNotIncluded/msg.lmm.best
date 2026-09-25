@@ -1984,6 +1984,7 @@ def render_profile(profile: dict[str, Any]) -> str:
     ]
     return "\n".join(lines) + "\n"
 
+
 def render_tags(tags: list[dict[str, Any]]) -> str:
     lines = [
         "# /tags",
