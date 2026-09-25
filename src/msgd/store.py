@@ -2797,9 +2797,7 @@ class Store:
             where.append("p.name = ?")
             params.append(spec.author_name)
         for tag in spec.tags:
-            where.append(
-                "EXISTS (SELECT 1 FROM post_tags t WHERE t.post_id = p.id AND t.tag = ?)"
-            )
+            where.append("EXISTS (SELECT 1 FROM post_tags t WHERE t.post_id = p.id AND t.tag = ?)")
             params.append(self.normalize_tag(tag))
         if spec.author_id:
             if not valid_author_id(spec.author_id):
