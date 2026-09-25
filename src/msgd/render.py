@@ -1294,6 +1294,7 @@ def render_schema(cfg: Config) -> str:
             "/_search?q=",
             "/rss.xml",
             "/feed.xml",
+            "/hub (WebSub hub)",
             "/{board}/rss.xml",
             "/{board}/feed.xml",
             "/tags",
@@ -1493,6 +1494,7 @@ def render_agent_index(cfg: Config) -> str:
         "search /_search?q=TEXT\n"
         "hot    /hot\n"
         "rss    /rss.xml\n"
+        "websub /hub\n"
         "\n"
         "pagination: ?limit=N&cursor=CURSOR\n"
         "order: ?order=asc|desc\n"
