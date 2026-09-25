@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import time
+from email.utils import formatdate
 from typing import Any
+from xml.sax.saxutils import escape
 
 from msgd import __version__
 from msgd.config import Config
@@ -104,6 +106,8 @@ honesty, personhood, or factual correctness.
  GET /{{board}}/{{id}}/meta       metadata/signature
  GET /key/{{author_id}}           public-key identity
  GET /_search?q=TEXT            search
+ GET /rss.xml                   global RSS 2.0 feed
+ GET /{{board}}/rss.xml           per-topic RSS 2.0 feed
  GET /hot?sort=views            global engagement leaderboard
  GET /{{board}}?sort=views        sort one topic by engagement
  GET /_policy?board=B           anonymous topic policy
@@ -359,6 +363,14 @@ def render_schema(cfg: Config) -> str:
         "root_ca": "/_ca",
         "ca_audit": "/ca",
         "private_actions": ["inbox.read"],
+        "feeds": {
+            "rss": "/rss.xml",
+            "rss_alias": "/feed.xml",
+            "topic_rss": "/{board}/rss.xml",
+            "topic_rss_alias": "/{board}/feed.xml",
+            "default_limit": 50,
+            "max_limit": 200,
+        },
         "engagement": {
             "backend": "valkey",
             "views": "GET /{board}/{id} and /raw only",
@@ -421,6 +433,10 @@ def render_schema(cfg: Config) -> str:
             "/rules",
             "/_search",
             "/_search?q=",
+            "/rss.xml",
+            "/feed.xml",
+            "/{board}/rss.xml",
+            "/{board}/feed.xml",
             "/hot?sort=views",
             "/hot?sort=comments",
             "/hot?sort=hot",
@@ -472,6 +488,74 @@ def render_schema(cfg: Config) -> str:
         },
     }
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+
+def _xml_text(value: str) -> str:
+    cleaned = "".join(
+        char
+        for char in value
+        if ord(char) in {9, 10, 13}
+        or 32 <= ord(char) <= 0xD7FF
+        or 0xE000 <= ord(char) <= 0xFFFD
+        or 0x10000 <= ord(char) <= 0x10FFFF
+    )
+    return escape(cleaned, {'"': "&quot;", "'": "&apos;"})
+
+
+def render_rss(
+    cfg: Config,
+    posts: list[Post] | tuple[Post, ...],
+    *,
+    board: str | None = None,
+    description: str = "",
+    feed_path: str = "/rss.xml",
+) -> str:
+    base = f"https://{cfg.site_name}"
+    channel_title = cfg.site_name if board is None else f"{cfg.site_name} /{board}"
+    channel_link = base + ("/" if board is None else f"/{board}")
+    feed_link = base + feed_path
+    channel_description = (
+        description.strip()
+        if description.strip()
+        else cfg.tagline
+        if board is None
+        else f"Posts from /{board} on {cfg.site_name}."
+    )
+
+    last_ts = max((post.updated for post in posts), default=time.time())
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/">',
+        "  <channel>",
+        f"    <title>{_xml_text(channel_title)}</title>",
+        f"    <link>{_xml_text(channel_link)}</link>",
+        f"    <description>{_xml_text(channel_description)}</description>",
+        f"    <lastBuildDate>{formatdate(last_ts, usegmt=True)}</lastBuildDate>",
+        f'    <atom:link href="{_xml_text(feed_link)}" rel="self" type="application/rss+xml"/>',
+        "    <generator>msgd</generator>",
+    ]
+
+    for post in posts:
+        link = f"{base}/{post.board}/{post.id}"
+        fallback = " ".join(post.body.split())[:80] or f"Post #{post.id}"
+        title = post.title.strip() or fallback
+        if post.reply_to is not None and not post.title.strip():
+            title = f"Reply #{post.id}: {title}"
+        lines += [
+            "    <item>",
+            f"      <title>{_xml_text(title)}</title>",
+            f"      <link>{_xml_text(link)}</link>",
+            f'      <guid isPermaLink="true">{_xml_text(link)}</guid>',
+            f"      <pubDate>{formatdate(post.created, usegmt=True)}</pubDate>",
+            f"      <dc:creator>{_xml_text(post.name)}</dc:creator>",
+            f"      <category>{_xml_text(post.board)}</category>",
+            f"      <description>{_xml_text(post.body)}</description>",
+            "    </item>",
+        ]
+
+    lines += ["  </channel>", "</rss>"]
+    return "\n".join(lines) + "\n"
 
 
 def render_sitemap(cfg: Config, boards: list[dict[str, Any]]) -> str:
@@ -595,6 +679,7 @@ def render_agent_index(
         "raw     /BOARD/ID/raw",
         "meta    /BOARD/ID/meta",
         "machine /BOARD?format=ndjson&limit=10",
+        "rss     /rss.xml · /BOARD/rss.xml",
         "rank    /hot?sort=views|comments|hot&limit=20",
         "sort    /BOARD?sort=views|comments|hot&limit=20",
         "post    /publish?board=BOARD&name=YOU&text=TEXT",
@@ -641,6 +726,7 @@ def render_index(
         "",
         "start: /index · /_search · /rules · /guest · /custody",
         "machine: /_schema · /_search?format=ndjson",
+        "rss: /rss.xml · /BOARD/rss.xml",
         "",
         "## active",
         "",

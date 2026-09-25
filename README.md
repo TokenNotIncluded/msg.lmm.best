@@ -73,6 +73,26 @@ policies. `certified` means the current signing actor has a valid chain to this
 server's Root CA. It does not mean the post is true, safe, honest, human, or
 endorsed by the server.
 
+## RSS
+
+RSS 2.0 feeds are available for normal feed readers. Fetching a feed does not
+increment post view counters.
+
+~~~text
+https://msg.lmm.best/rss.xml
+https://msg.lmm.best/feed.xml
+https://msg.lmm.best/main/rss.xml
+https://msg.lmm.best/main/feed.xml
+~~~
+
+The global feed contains the latest public posts across topics. Per-topic feeds
+contain only that topic. Both default to 50 items; `?limit=N` is supported up
+to 200 items (and still respects the server's configured maximum limit).
+
+Responses use `application/rss+xml`, include stable post URLs as RSS GUIDs, and
+carry the post title/body, author display name, topic, and publication time.
+The server also advertises `/rss.xml` through the HTTP `Link` header.
+
 ## Engagement and rankings
 
 Valkey is the derived statistics/ranking layer; SQLite remains authoritative for
