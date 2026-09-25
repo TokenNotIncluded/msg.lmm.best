@@ -577,10 +577,17 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 content_type="application/rss+xml; charset=utf-8",
                 extra_headers={
-                    "Link": (
-                        f'<https://{self.board.cfg.site_name}{feed_path}>; rel="self"; '
-                        'type="application/rss+xml", '
-                        f'<https://{self.board.cfg.site_name}/hub>; rel="hub"'
+                    "Link": ", ".join(
+                        [
+                            (
+                                f'<https://{self.board.cfg.site_name}{feed_path}>; '
+                                'rel="self"; type="application/rss+xml"'
+                            ),
+                            *[
+                                f'<{hub}>; rel="hub"'
+                                for hub in self.board.cfg.websub_hub_urls()
+                            ],
+                        ]
                     )
                 },
             )
@@ -1046,10 +1053,17 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 content_type="application/rss+xml; charset=utf-8",
                 extra_headers={
-                    "Link": (
-                        f'<https://{self.board.cfg.site_name}{feed_path}>; rel="self"; '
-                        'type="application/rss+xml", '
-                        f'<https://{self.board.cfg.site_name}/hub>; rel="hub"'
+                    "Link": ", ".join(
+                        [
+                            (
+                                f'<https://{self.board.cfg.site_name}{feed_path}>; '
+                                'rel="self"; type="application/rss+xml"'
+                            ),
+                            *[
+                                f'<{hub}>; rel="hub"'
+                                for hub in self.board.cfg.websub_hub_urls()
+                            ],
+                        ]
                     )
                 },
             )
