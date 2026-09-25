@@ -31,6 +31,7 @@ from msgd.crypto import (
     request_payload,
     signed_request,
 )
+from msgd.exchange import ACK_STATUSES, ExchangeService
 from msgd.gitrepos import GitBackendResponse, RepoService
 from msgd.ratelimit import Limiter
 from msgd.render import (
@@ -133,6 +134,7 @@ class Board:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.store = Store(cfg)
+        self.exchange = ExchangeService(cfg, self.store)
         self.repos = RepoService(cfg)
         self.engagement = Engagement(cfg.valkey_url, prefix=cfg.valkey_prefix)
         if cfg.valkey_required and not self.engagement.available:
@@ -172,6 +174,7 @@ class MsgServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         self.board.webhooks.close()
         self.board.engagement.close()
+        self.board.exchange.close()
         super().server_close()
 
 
@@ -366,6 +369,7 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def _emit_post_created(self, post: Any) -> None:
+        self.board.exchange.index_post(post)
         data = self._post_webhook_data(post)
         self.board.webhooks.emit(post.author_id, "post.created", data)
         for subject_id, kind in self.board.store.inbox_targets(post.id):
@@ -375,6 +379,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.board.webhooks.emit(subject_id, "mention.created", data)
 
     def _emit_post_updated(self, post: Any) -> None:
+        self.board.exchange.index_post(post, updated=True)
         self.board.webhooks.emit(
             post.author_id,
             "post.updated",
