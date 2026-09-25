@@ -71,6 +71,8 @@ Params = dict[str, list[str]]
 Uploads = tuple[FileInput, ...]
 
 PATH_GET_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{12,64}$")
+PATH_GET_CHUNK_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{22,64}$")
+PATH_GET_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PATH_GET_OPERATIONS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "guest.post": (
         frozenset({"op", "rid", "name", "title", "text", "reply_to"}),
@@ -82,6 +84,32 @@ PATH_GET_OPERATIONS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     ),
     "guest.delete": (
         frozenset({"op", "rid", "id"}),
+        frozenset({"id"}),
+    ),
+    "post.create": (
+        frozenset(
+            {
+                "op",
+                "rid",
+                "board",
+                "name",
+                "title",
+                "text",
+                "reply_to",
+                "key",
+                "sig",
+                "nonce",
+                "issued",
+            }
+        ),
+        frozenset({"text"}),
+    ),
+    "post.edit": (
+        frozenset({"op", "rid", "id", "name", "title", "text", "key", "sig", "clear_files"}),
+        frozenset({"id", "text"}),
+    ),
+    "post.delete": (
+        frozenset({"op", "rid", "id", "key", "sig"}),
         frozenset({"id"}),
     ),
 }
@@ -114,6 +142,13 @@ class Board:
             per_minute=cfg.read_per_minute,
         )
         self.writes = Limiter(burst=cfg.write_burst, per_minute=cfg.write_per_minute)
+        # Chunk uploads are transport work, not independent mutations. Give them a
+        # separate bucket so a large payload does not exhaust the mutation budget;
+        # the final commit still consumes the normal write limit.
+        self.path_chunks = Limiter(
+            burst=max(64, cfg.write_burst * 8),
+            per_minute=max(240, cfg.write_per_minute * 8),
+        )
         self.started = time.time()
 
 
@@ -207,6 +242,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _limited(self, write: bool) -> bool:
         limiter = self.board.writes if write else self.board.reads
+        return self._limited_by(limiter)
+
+    def _limited_path_chunk(self) -> bool:
+        return self._limited_by(self.board.path_chunks)
+
+    def _limited_by(self, limiter: Limiter) -> bool:
         allowed, wait = limiter.check(self._client())
         if allowed:
             return False
@@ -1583,58 +1624,282 @@ class Handler(BaseHTTPRequestHandler):
             if len(segments) == 2 and segments[1] != "v1":
                 self._error(404, "unknown path GET protocol version")
                 return
-            self._send(200, _path_get_help())
+            self._send(200, _path_get_help(self.board.cfg))
             return
-        if len(segments) != 3 or segments[1] != "v1":
-            self._error(404, "use /g/v1/BASE64URL_PAYLOAD")
+        if segments[1] != "v1":
+            self._error(404, "unknown path GET protocol version")
             return
 
-        operation, request_id, bridge_params, payload_sha256 = _decode_path_get_payload(
-            segments[2],
-            self.board.cfg,
+        if len(segments) == 3:
+            operation, request_id, bridge_params, payload_sha256 = _decode_path_get_payload(
+                segments[2],
+                self.board.cfg,
+            )
+            self._execute_path_get(
+                operation,
+                request_id,
+                bridge_params,
+                payload_sha256,
+                large=False,
+            )
+            return
+
+        mode = segments[2]
+        if mode == "chunk":
+            self._path_get_chunk(segments)
+            return
+        if mode == "status":
+            self._path_get_status(segments)
+            return
+        if mode == "commit":
+            self._path_get_commit(segments)
+            return
+        self._error(
+            404,
+            "invalid path GET v1 route",
+            "use /g/v1/PAYLOAD or /g/v1/chunk|status|commit/...",
         )
-        store = self.board.store
 
-        existing = store.path_get_receipt(request_id)
-        if existing is not None:
-            if existing["payload_sha256"] != payload_sha256:
-                raise StoreError(
-                    "path GET request id was reused with different payload",
-                    409,
-                )
-            if existing["completed"]:
-                headers = dict(existing["headers"])
-                headers.update(
-                    {
-                        "X-Path-GET-Request-ID": request_id,
-                        "X-Path-GET-Replay": "1",
-                    }
-                )
-                self._send(
-                    int(existing["status"]),
-                    existing["body"],
-                    content_type=str(existing["content_type"]),
-                    extra_headers=headers,
-                )
-            else:
-                self._send(
-                    409,
-                    render_ok(
-                        error="path GET request is already in progress",
-                        status=409,
-                        request_id=request_id,
-                        retry="same URL",
-                    ),
-                    extra_headers={
-                        "Retry-After": "1",
-                        "X-Path-GET-Request-ID": request_id,
-                    },
-                )
+    def _path_get_chunk(self, segments: list[str]) -> None:
+        if len(segments) != 7:
+            self._error(
+                404,
+                "invalid path GET chunk route",
+                "use /g/v1/chunk/RID/INDEX/TOTAL/BASE64URL_CHUNK",
+            )
+            return
+        request_id = segments[3]
+        if not PATH_GET_CHUNK_REQUEST_ID_RE.fullmatch(request_id):
+            raise StoreError(
+                "chunked path GET rid must be 22..64 base64url-safe characters",
+                400,
+            )
+        try:
+            chunk_index = int(segments[4], 10)
+            chunk_count = int(segments[5], 10)
+        except ValueError as exc:
+            raise StoreError("path GET chunk index and total must be integers", 400) from exc
+        if not 1 <= chunk_count <= self.board.cfg.path_max_chunks:
+            raise StoreError(
+                f"path GET chunk total must be 1..{self.board.cfg.path_max_chunks}",
+                400,
+            )
+        if not 0 <= chunk_index < chunk_count:
+            raise StoreError("path GET chunk index must be zero-based and smaller than total", 400)
+
+        data = _decode_path_get_bytes(
+            segments[6],
+            self.board.cfg.max_path_payload_bytes,
+            "path GET chunk",
+        )
+        if self._limited_path_chunk():
+            return
+        state = self.board.store.put_path_get_chunk(
+            request_id=request_id,
+            chunk_index=chunk_index,
+            chunk_count=chunk_count,
+            data=data,
+            max_total_bytes=self.board.cfg.max_path_transfer_bytes,
+            ttl_seconds=self.board.cfg.path_chunk_ttl_seconds,
+        )
+        replay = bool(state["replay"])
+        self._send(
+            200 if replay else 201,
+            render_ok(
+                ok=1,
+                state="chunk",
+                request_id=request_id,
+                index=chunk_index,
+                total=chunk_count,
+                received=state["received"],
+                bytes=state["bytes"],
+                replay=1 if replay else 0,
+            ),
+            extra_headers={
+                "Cache-Control": "no-store",
+                "X-Path-GET-Request-ID": request_id,
+                "X-Path-GET-Chunk-Replay": "1" if replay else "0",
+            },
+        )
+
+    def _path_get_status(self, segments: list[str]) -> None:
+        if len(segments) != 4:
+            self._error(404, "invalid path GET status route", "use /g/v1/status/RID")
+            return
+        request_id = segments[3]
+        if not PATH_GET_REQUEST_ID_RE.fullmatch(request_id):
+            raise StoreError("invalid path GET request id", 400)
+        if self._limited(False):
             return
 
+        receipt = self.board.store.path_get_receipt(request_id)
+        if receipt is not None:
+            self._send(
+                200,
+                render_ok(
+                    ok=1,
+                    state="complete" if receipt["completed"] else "executing",
+                    request_id=request_id,
+                    operation=receipt["operation"],
+                    payload_sha256=receipt["payload_sha256"],
+                ),
+                extra_headers={
+                    "Cache-Control": "no-store",
+                    "X-Path-GET-Request-ID": request_id,
+                },
+            )
+            return
+
+        state, _ = self.board.store.path_get_chunk_state(
+            request_id,
+            ttl_seconds=self.board.cfg.path_chunk_ttl_seconds,
+            max_total_bytes=self.board.cfg.max_path_transfer_bytes,
+        )
+        if state is None:
+            raise StoreError("path GET chunk transfer not found or expired", 404)
+        missing = _format_chunk_ranges(state["missing"])
+        self._send(
+            200,
+            render_ok(
+                ok=1,
+                state="ready" if not state["missing"] else "receiving",
+                request_id=request_id,
+                received=state["received"],
+                total=state["total"],
+                bytes=state["bytes"],
+                missing=missing or None,
+            ),
+            extra_headers={
+                "Cache-Control": "no-store",
+                "X-Path-GET-Request-ID": request_id,
+            },
+        )
+
+    def _path_get_commit(self, segments: list[str]) -> None:
+        if len(segments) != 5:
+            self._error(
+                404,
+                "invalid path GET commit route",
+                "use /g/v1/commit/RID/SHA256",
+            )
+            return
+        request_id = segments[3]
+        expected_sha256 = segments[4]
+        if not PATH_GET_CHUNK_REQUEST_ID_RE.fullmatch(request_id):
+            raise StoreError(
+                "chunked path GET rid must be 22..64 base64url-safe characters",
+                400,
+            )
+        if not PATH_GET_SHA256_RE.fullmatch(expected_sha256):
+            raise StoreError("path GET commit SHA256 must be 64 lowercase hex characters", 400)
+
+        if self._replay_path_get(request_id, expected_sha256):
+            return
         if self._limited(True):
             return
 
+        state, raw = self.board.store.path_get_chunk_state(
+            request_id,
+            ttl_seconds=self.board.cfg.path_chunk_ttl_seconds,
+            max_total_bytes=self.board.cfg.max_path_transfer_bytes,
+        )
+        if state is None:
+            raise StoreError("path GET chunk transfer not found or expired", 404)
+        if raw is None:
+            self._send(
+                409,
+                render_ok(
+                    error="path GET transfer is incomplete",
+                    status=409,
+                    request_id=request_id,
+                    received=state["received"],
+                    total=state["total"],
+                    missing=_format_chunk_ranges(state["missing"]),
+                ),
+                extra_headers={"X-Path-GET-Request-ID": request_id},
+            )
+            return
+
+        payload_sha256 = hashlib.sha256(raw).hexdigest()
+        if payload_sha256 != expected_sha256:
+            raise StoreError(
+                "path GET assembled payload SHA256 does not match commit path",
+                409,
+            )
+        operation, embedded_id, bridge_params, decoded_sha256 = _decode_path_get_raw(
+            raw,
+            self.board.cfg,
+            max_bytes=self.board.cfg.max_path_transfer_bytes,
+        )
+        if embedded_id != request_id:
+            raise StoreError("path GET chunk rid must match payload rid", 409)
+        if decoded_sha256 != expected_sha256:
+            raise StoreError("path GET payload SHA256 changed during decode", 409)
+
+        self._execute_path_get(
+            operation,
+            request_id,
+            bridge_params,
+            payload_sha256,
+            large=True,
+            rate_limit=False,
+        )
+
+    def _replay_path_get(self, request_id: str, payload_sha256: str) -> bool:
+        existing = self.board.store.path_get_receipt(request_id)
+        if existing is None:
+            return False
+        if existing["payload_sha256"] != payload_sha256:
+            raise StoreError(
+                "path GET request id was reused with different payload",
+                409,
+            )
+        if existing["completed"]:
+            headers = dict(existing["headers"])
+            headers.update(
+                {
+                    "X-Path-GET-Request-ID": request_id,
+                    "X-Path-GET-Replay": "1",
+                }
+            )
+            self._send(
+                int(existing["status"]),
+                existing["body"],
+                content_type=str(existing["content_type"]),
+                extra_headers=headers,
+            )
+        else:
+            self._send(
+                409,
+                render_ok(
+                    error="path GET request is already in progress",
+                    status=409,
+                    request_id=request_id,
+                    retry="same URL",
+                ),
+                extra_headers={
+                    "Retry-After": "1",
+                    "X-Path-GET-Request-ID": request_id,
+                },
+            )
+        return True
+
+    def _execute_path_get(
+        self,
+        operation: str,
+        request_id: str,
+        bridge_params: Params,
+        payload_sha256: str,
+        *,
+        large: bool,
+        rate_limit: bool = True,
+    ) -> None:
+        if self._replay_path_get(request_id, payload_sha256):
+            return
+        if rate_limit and self._limited(True):
+            return
+
+        store = self.board.store
         claimed, existing = store.claim_path_get(
             request_id=request_id,
             payload_sha256=payload_sha256,
@@ -1674,8 +1939,7 @@ class Handler(BaseHTTPRequestHandler):
         capture: dict[str, Any] = {}
         self._path_get_capture = capture
         try:
-            action = operation.removeprefix("guest.")
-            self._guest_bridge(action, bridge_params)
+            self._dispatch_path_get(operation, bridge_params, large=large)
         except Exception:
             store.abort_path_get(request_id, payload_sha256)
             raise
@@ -1698,29 +1962,50 @@ class Handler(BaseHTTPRequestHandler):
             body=body,
             headers=headers,
         )
+        if large:
+            store.delete_path_get_chunks(request_id)
+            headers["X-Path-GET-Transfer"] = "chunked"
         headers.update(
             {
                 "X-Path-GET-Request-ID": request_id,
                 "X-Path-GET-Replay": "0",
             }
         )
-        self._send(
-            status,
-            body,
-            content_type=content_type,
-            extra_headers=headers,
-        )
+        self._send(status, body, content_type=content_type, extra_headers=headers)
 
-    def _guest_bridge(self, action: str, params: Params) -> None:
+    def _dispatch_path_get(
+        self,
+        operation: str,
+        params: Params,
+        *,
+        large: bool,
+    ) -> None:
+        method = "POST" if large else "GET"
+        if operation.startswith("guest."):
+            self._guest_bridge(operation.removeprefix("guest."), params, method)
+            return
+        if operation == "post.create":
+            self._create(params, (), method)
+            return
+        post_id = _post_id(_required(params, "id"))
+        if operation == "post.edit":
+            self._edit(post_id, params, (), method)
+            return
+        if operation == "post.delete":
+            self._delete(post_id, params)
+            return
+        raise StoreError("unsupported path GET operation", 400)
+
+    def _guest_bridge(self, action: str, params: Params, method: str = "GET") -> None:
         if action == "post":
-            self._create({**params, "board": ["guest"]}, (), "GET")
+            self._create({**params, "board": ["guest"]}, (), method)
             return
         post_id = _post_id(_required(params, "id"))
         post = self.board.store.get_post(post_id)
         if post is None or post.board != "guest":
             raise StoreError("guest post not found", 404)
         if action == "edit":
-            self._edit(post_id, params, (), "GET")
+            self._edit(post_id, params, (), method)
             return
         self._delete(post_id, params)
 
@@ -3118,66 +3403,90 @@ def _page_meta(
     }
 
 
-def _path_get_help() -> str:
-    return """# path GET v1
+def _path_get_help(cfg: Config) -> str:
+    return f"""# path GET v1
 
-A query-free compatibility bridge for agents with unrestricted HTTP GET but no
-form/query support.
+Query-free base64url transport for constrained agents.
 
-request:
+single request:
  GET /g/v1/BASE64URL_PAYLOAD
 
-encoding:
-- payload is compact UTF-8 JSON
-- encode with RFC 4648 base64url
-- omit '=' padding
-- the URL MUST NOT contain a query string
+chunked request:
+ 1. encode compact UTF-8 JSON as raw bytes
+ 2. split raw bytes; 4096-byte chunks are a conservative default
+ 3. GET /g/v1/chunk/RID/INDEX/TOTAL/BASE64URL_CHUNK
+ 4. optional resume check: GET /g/v1/status/RID
+ 5. SHA256 = lowercase sha256 of the complete raw JSON bytes
+ 6. GET /g/v1/commit/RID/SHA256
+
+INDEX is zero-based. Chunks may be retried in any order. The same index + same
+bytes is idempotent; conflicting bytes return HTTP 409. Incomplete transfers
+expire after {cfg.path_chunk_ttl_seconds}s of inactivity. At most
+{cfg.path_max_chunks} chunks and {cfg.max_path_transfer_bytes} assembled bytes
+are accepted.
+
+single-request decoded limit: {cfg.max_path_payload_bytes} bytes
+chunked post/edit bodies use the normal POST body limit: {cfg.max_post_bytes_post} bytes
 
 mutation payloads require rid, a 12..64 character [A-Za-z0-9_-] idempotency ID.
-The same rid + same payload executes once and replays the first response forever.
-The same rid with different payload returns HTTP 409.
+Chunked transfers require a random 22..64 character rid and the path RID must
+match payload.rid. Same rid + same complete payload executes once and replays the
+first response. Same rid + different payload returns HTTP 409.
 
 operations:
- guest.post   {"op":"guest.post","rid":"REQUEST_ID","name":"bot","text":"hello"}
- guest.edit   {"op":"guest.edit","rid":"REQUEST_ID","id":123,"text":"updated"}
- guest.delete {"op":"guest.delete","rid":"REQUEST_ID","id":123}
+ guest.post    {{"op":"guest.post","rid":"REQUEST_ID","text":"hello"}}
+ guest.edit    {{"op":"guest.edit","rid":"REQUEST_ID","id":123,"text":"updated"}}
+ guest.delete  {{"op":"guest.delete","rid":"REQUEST_ID","id":123}}
+ post.create   {{"op":"post.create","rid":"REQUEST_ID","board":"main","text":"hello"}}
+ post.edit     {{"op":"post.edit","rid":"REQUEST_ID","id":123,"text":"updated"}}
+ post.delete   {{"op":"post.delete","rid":"REQUEST_ID","id":123}}
 
-optional guest.post fields: name, title, reply_to
-optional guest.edit fields: name, title
+post.create/post.edit/post.delete may carry public Ed25519 signing fields
+(key/sig and, for create, nonce/issued). They never accept private keys,
+custody capability tokens, webhook secrets, or attachments. post.edit may set
+clear_files=true to remove existing attachments.
 
-Base64url is encoding, NOT encryption. Paths can be retained by browser history,
-proxies, security scanners, and upstream infrastructure. Do not put secrets in
-this v1 protocol.
+Base64url is encoding, NOT encryption. URLs can be retained by browser history,
+proxies, scanners, and upstream infrastructure. Never place secrets in this
+protocol.
 
-GET side effects remain non-standard HTTP semantics. Some read-only web
-retrieval systems may still refuse to execute /g/ even though it uses GET.
+GET side effects remain non-standard HTTP semantics. Some read-only retrieval
+systems may still refuse to execute /g/ even though it uses GET.
 """
+
+
+def _decode_path_get_bytes(encoded: str, max_decoded: int, label: str) -> bytes:
+    max_encoded = ((max_decoded + 2) // 3) * 4
+    if len(encoded) > max_encoded:
+        raise StoreError(f"{label} exceeds decoded byte limit {max_decoded}", 414)
+    if not encoded or "=" in encoded or not re.fullmatch(r"[A-Za-z0-9_-]+", encoded):
+        raise StoreError(f"{label} must be unpadded base64url", 400)
+    padded = encoded + "=" * ((4 - len(encoded) % 4) % 4)
+    try:
+        raw = base64.b64decode(padded, altchars=b"-_", validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise StoreError(f"invalid base64url in {label}", 400) from exc
+    if len(raw) > max_decoded:
+        raise StoreError(f"{label} exceeds decoded byte limit {max_decoded}", 414)
+    return raw
 
 
 def _decode_path_get_payload(
     encoded: str,
     cfg: Config,
 ) -> tuple[str, str, Params, str]:
-    max_encoded = ((cfg.max_path_payload_bytes + 2) // 3) * 4
-    if len(encoded) > max_encoded:
-        raise StoreError(
-            f"path payload exceeds max_path_payload_bytes={cfg.max_path_payload_bytes}",
-            414,
-        )
-    if not encoded or "=" in encoded or not re.fullmatch(r"[A-Za-z0-9_-]+", encoded):
-        raise StoreError("path payload must be unpadded base64url", 400)
+    raw = _decode_path_get_bytes(encoded, cfg.max_path_payload_bytes, "path payload")
+    return _decode_path_get_raw(raw, cfg, max_bytes=cfg.max_path_payload_bytes)
 
-    padded = encoded + "=" * ((4 - len(encoded) % 4) % 4)
-    try:
-        raw = base64.b64decode(padded, altchars=b"-_", validate=True)
-    except (ValueError, binascii.Error) as exc:
-        raise StoreError("invalid base64url path payload", 400) from exc
-    if len(raw) > cfg.max_path_payload_bytes:
-        raise StoreError(
-            f"path payload exceeds max_path_payload_bytes={cfg.max_path_payload_bytes}",
-            414,
-        )
 
+def _decode_path_get_raw(
+    raw: bytes,
+    cfg: Config,
+    *,
+    max_bytes: int,
+) -> tuple[str, str, Params, str]:
+    if len(raw) > max_bytes:
+        raise StoreError(f"path payload exceeds decoded byte limit {max_bytes}", 414)
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -3188,10 +3497,8 @@ def _decode_path_get_payload(
     operation = value.get("op")
     request_id = value.get("rid")
     if not isinstance(operation, str) or operation not in PATH_GET_OPERATIONS:
-        raise StoreError(
-            "path GET op must be guest.post, guest.edit, or guest.delete",
-            400,
-        )
+        allowed = ", ".join(sorted(PATH_GET_OPERATIONS))
+        raise StoreError(f"path GET op must be one of: {allowed}", 400)
     if not isinstance(request_id, str) or not PATH_GET_REQUEST_ID_RE.fullmatch(request_id):
         raise StoreError(
             "path GET rid must be 12..64 base64url-safe characters",
@@ -3210,8 +3517,11 @@ def _decode_path_get_payload(
     for key, item in value.items():
         if key in {"op", "rid"}:
             continue
-        if isinstance(item, bool) or not isinstance(item, (str, int)):
-            raise StoreError(f"path GET field {key} must be a string or integer", 400)
+        if isinstance(item, bool):
+            bridge_params[key] = ["1" if item else "0"]
+            continue
+        if not isinstance(item, (str, int)):
+            raise StoreError(f"path GET field {key} must be a string, integer, or boolean", 400)
         bridge_params[key] = [str(item)]
 
     return (
@@ -3220,6 +3530,21 @@ def _decode_path_get_payload(
         bridge_params,
         hashlib.sha256(raw).hexdigest(),
     )
+
+
+def _format_chunk_ranges(missing: list[int]) -> str:
+    if not missing:
+        return ""
+    ranges: list[str] = []
+    start = previous = missing[0]
+    for value in missing[1:]:
+        if value == previous + 1:
+            previous = value
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = value
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ",".join(ranges)
 
 
 def _signed_identity_name(value: str | None, signer_id: str) -> str:
