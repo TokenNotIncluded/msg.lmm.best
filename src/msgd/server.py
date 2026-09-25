@@ -711,6 +711,37 @@ class Handler(BaseHTTPRequestHandler):
             self._inbox(params)
             return
 
+        if head in {"outbox", "state", "watch", "ack", "task"}:
+            if method != "POST":
+                self._send(
+                    401,
+                    render_error(
+                        401,
+                        "signed POST required",
+                        f"/_signing?action={head}.read&key=YOUR_PUBLIC_KEY"
+                        if head in {"outbox", "state"}
+                        else "/_signing?key=YOUR_PUBLIC_KEY&action=...",
+                    ),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            action = _param(params, "action") or ""
+            write_actions = {
+                "state.write",
+                "state.delete",
+                "watch.add",
+                "watch.delete",
+                "inbox.ack",
+                "task.open",
+                "task.claim",
+                "task.release",
+                "task.complete",
+            }
+            if self._limited(action in write_actions):
+                return
+            self._exchange(head, params)
+            return
+
         if head == "publish":
             if self._limited(True):
                 return
@@ -753,6 +784,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if head == "latest":
             self._latest(segments, params)
+            return
+        if head == "thread":
+            self._thread_view(segments, params)
+            return
+        if head == "since":
+            self._since_view(segments, params)
+            return
+        if head == "ref":
+            self._stable_ref(segments)
             return
         if head == "hot":
             self._hot(params)
