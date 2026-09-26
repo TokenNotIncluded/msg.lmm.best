@@ -11,10 +11,10 @@ Homepage = "https://msg.lmm.best"
 Repository = "https://github.com/TokenNotIncluded/msg.lmm.best"
 
 [project.scripts]
-msg = "msgd.agentcli:main"
-msgd = "msgd.cli:main"
-msgd-cert = "msgd.certcli:main"
-msgdctl = "msgd.ctl:main"
+msg = "msgd.cli.client:main"
+msgd = "msgd.cli.server:main"
+msgd-cert = "msgd.cli.cert:main"
+msgdctl = "msgd.cli.control:main"
 msg-ssh-auth = "msgd.sshaccess:auth_main"
 msg-ssh-shell = "msgd.sshaccess:shell_main"
 

@@ -22,10 +22,10 @@ from nacl.public import PrivateKey, SealedBox
 from nacl.signing import SigningKey
 
 from msgd import __version__
-from msgd.certcli import _load_private, _public_b64, _write_private
+from msgd.cli.cert import _load_private, _public_b64, _write_private
+from msgd.cli.control import Api, ControlError, _payload_signature
 from msgd.credentials import credential_path
 from msgd.crypto import public_identity
-from msgd.ctl import Api, ControlError, _payload_signature
 from msgd.gitrepos import git_push_payload
 from msgd.sshaccess import (
     SSH_PRESETS,

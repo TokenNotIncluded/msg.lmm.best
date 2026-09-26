@@ -16,7 +16,7 @@ from urllib.request import Request, urlopen
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from msgd.certcli import _load_private, _public_b64, _sign_b64
+from msgd.cli.cert import _load_private, _public_b64, _sign_b64
 from msgd.config import Config
 from msgd.crypto import public_identity
 
