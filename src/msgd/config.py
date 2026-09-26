@@ -35,6 +35,11 @@ class Config:
     websub_max_lease_seconds: int = 2_592_000
     websub_external_hubs: str = ""
 
+    # Private Git object database used for post bodies and attachment bytes.
+    # Empty root derives from the database directory.
+    object_root: str = ""
+    object_enabled: bool = True
+
     # Public Git repositories. Empty root derives from the database directory.
     repo_root: str = ""
     repo_max_blob_bytes: int = 1_048_576
@@ -206,6 +211,8 @@ class Config:
                 "websub", "max_lease_seconds", base.websub_max_lease_seconds
             ),
             websub_external_hubs=get("websub", "external_hubs", base.websub_external_hubs),
+            object_root=get("objects", "root", base.object_root),
+            object_enabled=get("objects", "enabled", base.object_enabled),
             repo_root=get("repos", "root", base.repo_root),
             repo_max_blob_bytes=get("repos", "max_blob_bytes", base.repo_max_blob_bytes),
             repo_auth_ttl_seconds=get("repos", "auth_ttl_seconds", base.repo_auth_ttl_seconds),
