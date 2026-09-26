@@ -1,131 +1,76 @@
-"""Commerce and data-driven /store behavior."""
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
-from __future__ import annotations
+import pytest
 
-import json
-import tempfile
-import unittest
-from pathlib import Path
-
-from msgd.commerce import CommerceService
-from msgd.config import Config
-from msgd.store import Store, StoreError
-from msgd.templates import TopicTemplateService
-
-STORE_TEMPLATE = {
-    "v": 1,
-    "scope": "root",
-    "allow_extra": False,
-    "title_field": "name",
-    "fields": [
-        {"name": "name", "type": "string", "required": True, "max_bytes": 160},
-        {"name": "description", "type": "text", "required": True, "max_bytes": 4096},
-        {"name": "price_usd", "type": "number", "required": True, "min": 0.01},
-        {"name": "billing", "type": "string", "required": True, "max_bytes": 32},
-        {"name": "checkout_ttl_seconds", "type": "integer", "default": 900, "min": 60},
-        {"name": "fulfillment", "type": "json", "required": True, "max_bytes": 16384},
-        {"name": "active", "type": "boolean", "default": True},
-    ],
-}
+from msgnet.commerce import Commerce
+from msgnet.content import Content
+from msgnet.ledger import Ledger
+from msgnet.model import Conflict, Denied, Record
+from msgnet.policy import Principal
+from msgnet.templates import Field, Template
 
 
-class CommerceCase(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        root = Path(self.tmp.name)
-        templates_dir = root / "templates"
-        templates_dir.mkdir()
-        (templates_dir / "store.json").write_text(
-            json.dumps(STORE_TEMPLATE),
-            encoding="utf-8",
-        )
-        self.cfg = Config(
-            database=str(root / "msg.db"),
-            root_public_key=str(root / "root.pub"),
-            topic_template_dir=str(templates_dir),
-            certificate_only_topics="store,ads",
-            waffo_subscription_products="month=PROD_test_month",
-        )
-        self.store = Store(self.cfg)
-        self.templates = TopicTemplateService(self.cfg)
-        self.commerce = CommerceService(self.cfg, self.store, self.templates)
-
-    def tearDown(self) -> None:
-        self.commerce.close()
-        self.templates.close()
-        self.store.close()
-        self.tmp.cleanup()
-
-    def test_balance_defaults_to_zero_usd(self) -> None:
-        balance = self.commerce.balance("a" * 64)
-        self.assertEqual(balance["currency"], "USD")
-        self.assertEqual(balance["cents"], 0)
-        self.assertEqual(balance["balance"], "0.00")
-
-        cents = self.commerce.credit_balance(
-            "a" * 64,
-            125,
-            reason="test",
-            ref="test:1",
-        )
-        self.assertEqual(cents, 125)
-        self.assertEqual(self.commerce.balance("a" * 64)["balance"], "1.25")
-
-    def test_store_and_ads_are_certificate_only_by_default(self) -> None:
-        for board in ("store", "ads"):
-            policy = self.store.policy(board)
-            self.assertEqual(policy["anonymous"], [])
-            self.assertEqual(policy["signed"], [])
-
-    def test_product_price_and_fulfillment_are_read_from_store_post(self) -> None:
-        normalized = self.templates.normalize_fields(
-            "store",
-            {
-                "name": "Membership",
-                "description": "Data-defined membership",
-                "price_usd": 1,
-                "billing": "month",
-                "fulfillment": [
-                    {
-                        "type": "certificate",
-                        "grants": [
-                            {"scope": "web:self", "actions": ["web.write", "web.delete"]},
-                            {"scope": "account:self", "actions": ["badge.blue"]},
-                        ],
-                        "duration": "period",
-                    }
-                ],
-            },
-            reply_to=None,
-        )
-        assert normalized is not None
-        body, _values, _version, title = normalized
-        post, _ = self.store.create_post(
-            board="store",
-            body=body,
-            name="seed",
-            title=title,
-        )
-
-        product = self.commerce.product(post.id)
-        self.assertEqual(product["amount_cents"], 100)
-        self.assertEqual(product["amount"], "1.00")
-        self.assertEqual(product["currency"], "USD")
-        self.assertEqual(product["billing"], "month")
-        self.assertEqual(product["provider_product_id"], "PROD_test_month")
-
-    def test_fulfillment_rejects_unlisted_capabilities(self) -> None:
-        with self.assertRaises(StoreError):
-            self.commerce._normalize_fulfillment(
-                [
-                    {
-                        "type": "certificate",
-                        "grants": [{"scope": "topic:*", "actions": ["cert.issue"]}],
-                        "duration": 3600,
-                    }
-                ]
-            )
+def test_ledger_zero_balance_idempotency_and_overdraft(content: Content) -> None:
+    ledger = Ledger(content.database)
+    assert ledger.balance("alice") == 0
+    with content.database.transaction() as tx:
+        assert ledger.transfer(tx, "provider-payment-1", "system.clearing", "alice", 100)
+    with content.database.transaction() as tx:
+        assert not ledger.transfer(tx, "provider-payment-1", "system.clearing", "alice", 100)
+    with pytest.raises(Conflict), content.database.transaction() as tx:
+        ledger.transfer(tx, "provider-payment-1", "system.clearing", "alice", 200)
+    with pytest.raises(Denied), content.database.transaction() as tx:
+        ledger.transfer(tx, "overspend", "alice", "bob", 101)
+    assert ledger.balance("alice") == 100
+    assert ledger.balance("bob") == 0
+    assert ledger.balance("system.clearing") == -100
+    with content.database.transaction() as tx:
+        assert tx.one("SELECT sum(balance) FROM accounts")[0] == 0
+        with pytest.raises(sqlite3.IntegrityError):
+            tx.execute("DELETE FROM transfers")
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_concurrent_debits_are_serialized(content: Content) -> None:
+    ledger = Ledger(content.database)
+    with content.database.transaction() as tx:
+        ledger.transfer(tx, "fund", "system.clearing", "alice", 10)
+
+    def spend(number: int) -> bool:
+        try:
+            with content.database.transaction() as tx:
+                return ledger.transfer(tx, f"spend-{number}", "alice", "bob", 1)
+        except Denied:
+            return False
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(spend, range(20)))
+    assert sum(results) == 10
+    assert ledger.balance("alice") == 0
+    assert ledger.balance("bob") == 10
+
+
+def test_catalog_checkout_is_immutable(content: Content, root: Principal) -> None:
+    template = Template(
+        1,
+        (
+            Field("title", "string"),
+            Field("price_cents", "integer"),
+            Field("currency", "string", choices=("USD",)),
+            Field("enabled", "boolean"),
+        ),
+    )
+    content.topic(root, "store", template)
+    fields: Record = {"title": "Membership", "price_cents": 100, "currency": "USD", "enabled": True}
+    product = content.create(root, "store", b"normal catalog post", fields)
+    commerce = Commerce(content.database)
+    first = commerce.checkout(Principal("buyer"), product, "request-1", now=1000)
+    content.edit(root, product, 1, b"changed price", {**fields, "price_cents": 200})
+    retry = commerce.checkout(Principal("buyer"), product, "request-1", now=1100)
+    second = commerce.checkout(Principal("buyer"), product, "request-2", now=1100)
+    assert retry == first
+    assert first.snapshot["fields"] == fields
+    assert first.expires == 1900
+    assert first.revision == 1 and second.revision == 2
+    with pytest.raises(Conflict):
+        commerce.checkout(Principal("buyer"), product + 1, "request-1", now=1100)

@@ -1,0 +1,3 @@
+# New-schema storage only. Do not point this at an unconverted legacy database.
+data = "/var/lib/msg-lmm-best-v1"
+max_object_bytes = 1048576

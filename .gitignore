@@ -1,9 +1,7 @@
-__pycache__/
-*.pyc
-*.db
-*.db-wal
-*.db-shm
 .venv/
-dist/
+__pycache__/
 .pytest_cache/
 .ruff_cache/
+dist/
+*.egg-info/
+state/

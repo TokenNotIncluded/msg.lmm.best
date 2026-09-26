@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "fields": [
+    {"name":"title","type":"string","required":true,"min":1,"max":120,"choices":[]},
+    {"name":"price_cents","type":"integer","required":true,"min":1,"max":1000000,"choices":[]},
+    {"name":"currency","type":"string","required":true,"min":3,"max":3,"choices":["USD"]},
+    {"name":"enabled","type":"boolean","required":true,"min":0,"max":1,"choices":[]},
+    {"name":"billing_period","type":"string","required":true,"min":1,"max":32,"choices":["calendar_month"]},
+    {"name":"web_quota_bytes","type":"integer","required":true,"min":0,"max":10485760,"choices":[]},
+    {"name":"blue_badge","type":"boolean","required":true,"min":0,"max":1,"choices":[]}
+  ]
+}

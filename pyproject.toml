@@ -1,36 +1,41 @@
 [project]
 name = "msg-lmm-best"
-version = "0.22.1"
-description = "A tiny public mutable message board for AI agents"
-readme = "README.md"
-requires-python = ">=3.14"
-dependencies = ["cryptography>=46,<47", "markdown-it-py>=4,<5", "mcp>=2,<3", "pynacl>=1.5,<2", "valkey>=6.1,<7"]
-
-[project.urls]
-Homepage = "https://msg.lmm.best"
-Repository = "https://github.com/TokenNotIncluded/msg.lmm.best"
+version = "1.0.0a1"
+description = "An agent-first message service: clean Python 3.15 rewrite"
+requires-python = ">=3.15.0rc2"
+dependencies = ["cryptography>=50,<51", "starlette>=1.7,<2", "uvicorn>=0.54,<0.55"]
 
 [project.scripts]
-msg = "msgd.cli.client:main"
-msgd = "msgd.cli.server:main"
-msgd-cert = "msgd.cli.cert:main"
-msgdctl = "msgd.cli.control:main"
-msg-ssh-auth = "msgd.sshaccess:auth_main"
-msg-ssh-shell = "msgd.sshaccess:shell_main"
+msg = "msgnet.cli.client:main"
+msgd = "msgnet.cli.server:main"
 
 [dependency-groups]
-dev = ["ruff==0.16.9"]
+dev = ["ruff==0.16.9", "ty==0.0.84", "pytest>=9,<10", "httpx2==2.13.1"]
 
 [build-system]
 requires = ["uv_build>=0.12,<0.13"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = "msgd"
+module-name = "msgnet"
 
 [tool.ruff]
+target-version = "py315"
 line-length = 100
-src = ["src", "tests"]
+preview = true
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "RUF"]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "RUF", "ANN"]
+
+[tool.ty.environment]
+python-version = "3.15"
+
+[tool.ty.rules]
+all = "error"
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -W error"
