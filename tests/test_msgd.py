@@ -1423,6 +1423,112 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(status, 405, body)
 
 
+    def test_resource_scoped_certificate_can_manage_another_profile(self) -> None:
+        alice = Ed25519PrivateKey.generate()
+        delegate = Ed25519PrivateKey.generate()
+        attacker = Ed25519PrivateKey.generate()
+        self.signed_create(alice, "hello", name="Alice")
+        alice_id = public_identity_for_test(alice)
+
+        parent_serial = self.issue(
+            self.root_key,
+            alice,
+            grants=[
+                {
+                    "scope": "account:self",
+                    "actions": ["profile.update", "cert.issue", "cert.revoke"],
+                }
+            ],
+            delegate=True,
+        )
+        self.issue(
+            alice,
+            delegate,
+            issuer_serial=parent_serial,
+            grants=[
+                {
+                    "scope": f"account:{alice_id}",
+                    "actions": ["profile.update"],
+                }
+            ],
+        )
+
+        info = self.signing(
+            action="profile.update",
+            key=public_b64(delegate),
+            owner=alice_id,
+            bio="managed by delegated certificate",
+        )
+        status, body = self.c.post(
+            "/_profile",
+            owner=alice_id,
+            bio="managed by delegated certificate",
+            key=public_b64(delegate),
+            sig=sign_b64(delegate, info["payload_b64"]),
+            nonce=info["nonce"],
+            issued=str(info["issued"]),
+        )
+        self.assertEqual(status, 200, body)
+        updated = json.loads(body)
+        self.assertEqual(updated["bio"], "managed by delegated certificate")
+        self.assertEqual(updated["profile_actor_id"], public_identity_for_test(delegate))
+        self.assertEqual(updated["profile_actor_key"], public_b64(delegate))
+        self.assertEqual(
+            self.c.get("/@Alice/profile-actor-key"),
+            (200, public_b64(delegate) + "\n"),
+        )
+
+        denied = self.signing(
+            action="profile.update",
+            key=public_b64(attacker),
+            owner=alice_id,
+            bio="not allowed",
+        )
+        status, body = self.c.post(
+            "/_profile",
+            owner=alice_id,
+            bio="not allowed",
+            key=public_b64(attacker),
+            sig=sign_b64(attacker, denied["payload_b64"]),
+            nonce=denied["nonce"],
+            issued=str(denied["issued"]),
+        )
+        self.assertEqual(status, 403, body)
+        self.assertIn("profile.update", body)
+
+    def test_delegation_cannot_rebind_self_scope_to_child(self) -> None:
+        alice = Ed25519PrivateKey.generate()
+        delegate = Ed25519PrivateKey.generate()
+        parent_serial = self.issue(
+            self.root_key,
+            alice,
+            grants=[
+                {
+                    "scope": "account:self",
+                    "actions": ["profile.update", "cert.issue"],
+                }
+            ],
+            delegate=True,
+        )
+        info = self.signing(
+            action="cert.issue",
+            key=public_b64(alice),
+            issuer_serial=parent_serial,
+            subject_key=public_b64(delegate),
+            grants=json.dumps(
+                [{"scope": "account:self", "actions": ["profile.update"]}],
+                separators=(",", ":"),
+            ),
+        )
+        status, body = self.c.post(
+            "/_cert",
+            cert=info["certificate"],
+            sig=sign_b64(alice, info["payload_b64"]),
+        )
+        self.assertEqual(status, 403, body)
+        self.assertIn("issuer cannot issue for scope", body)
+
+
 class PostUploadCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

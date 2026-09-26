@@ -73,11 +73,11 @@ def _parse_grants(values: list[str]) -> dict[str, set[str]]:
     grants: dict[str, set[str]] = {}
     for value in values:
         if "=" not in value:
-            raise SystemExit("--grant must be TOPIC=action,action")
+            raise SystemExit("--grant must be TOPIC_OR_SCOPE=action,action")
         topic, actions_raw = value.split("=", 1)
         actions = {action.strip() for action in actions_raw.split(",") if action.strip()}
         if not topic or not actions:
-            raise SystemExit("--grant must include topic and actions")
+            raise SystemExit("--grant must include a topic/scope and actions")
         grants.setdefault(topic, set()).update(actions)
     return grants
 

@@ -130,15 +130,19 @@ def _compact_grants(values: list[str]) -> str:
     grants: dict[str, set[str]] = {}
     for value in values:
         if "=" not in value:
-            raise AgentCliError("--grant must be TOPIC=action,action")
-        topic, raw_actions = value.split("=", 1)
-        topic = topic.strip()
+            raise AgentCliError("--grant must be TOPIC_OR_SCOPE=action,action")
+        target, raw_actions = value.split("=", 1)
+        target = target.strip()
         actions = {item.strip() for item in raw_actions.split(",") if item.strip()}
-        if not topic or not actions:
-            raise AgentCliError("--grant must include a topic and at least one action")
-        grants.setdefault(topic, set()).update(actions)
+        if not target or not actions:
+            raise AgentCliError("--grant must include a topic/scope and at least one action")
+        grants.setdefault(target, set()).update(actions)
     rows = [
-        {"topic": topic, "actions": sorted(actions)} for topic, actions in sorted(grants.items())
+        {
+            ("scope" if ":" in target else "topic"): target,
+            "actions": sorted(actions),
+        }
+        for target, actions in sorted(grants.items())
     ]
     return json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
 
@@ -1054,7 +1058,12 @@ def main(argv: list[str] | None = None) -> int:
     since.set_defaults(func=command_since)
 
     request = sub.add_parser("request", help="request an authorization certificate")
-    request.add_argument("--grant", action="append", required=True, help="TOPIC=action,action")
+    request.add_argument(
+        "--grant",
+        action="append",
+        required=True,
+        help="TOPIC_OR_SCOPE=action,action",
+    )
     request.add_argument("--issuer", default="")
     request.add_argument("--delegate", action="store_true")
     request.add_argument("--message", default="")

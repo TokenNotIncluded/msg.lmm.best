@@ -28,6 +28,8 @@ from msgd.crypto import (
     curve25519_public_key,
     make_certificate,
     normalize_file_manifest,
+    normalize_grant_scope,
+    parse_certificate,
     payload_info,
     public_identity,
     request_payload,
@@ -1048,7 +1050,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(
                     404,
                     "invalid profile path",
-                    "try /@NAME, /@NAME/pubkey, /@NAME/w/, or /@NAME/keystore/ENTRY",
+                    "try /@NAME, /@NAME/pubkey, /@NAME/profile-actor-key, "
+                    "/@NAME/w/, or /@NAME/keystore/ENTRY",
                 )
                 return
             if len(segments) == 3 and resource != "keystore":
@@ -1100,6 +1103,8 @@ class Handler(BaseHTTPRequestHandler):
                 "bio": "bio",
                 "claim-signature": "claim_signature",
                 "profile-signature": "profile_signature",
+                "profile-actor-id": "profile_actor_id",
+                "profile-actor-key": "profile_actor_key",
             }
             if resource in scalar_fields:
                 value = profile.get(scalar_fields[resource])
@@ -1538,6 +1543,7 @@ class Handler(BaseHTTPRequestHandler):
         action = _required(params, "action").strip().lower()
         identity_key = _required(params, "key")
         canonical_key, signer_id = public_identity(identity_key)
+        owner_id = _management_owner(self.board.store, signer_id, _param(params, "owner"))
         nonce = _required(params, "nonce").strip().lower()
         issued = _int_required(params, "issued")
         key_id = (_param(params, "id") or "").strip().lower()
@@ -1601,6 +1607,7 @@ class Handler(BaseHTTPRequestHandler):
             name=name,
             scopes=scopes,
             expires=expires,
+            owner_id=_owner_payload_id(signer_id, owner_id),
         )
         auth = signed_request(
             canonical_key,
@@ -1611,16 +1618,24 @@ class Handler(BaseHTTPRequestHandler):
             issued=issued,
         )
         self.board.store.consume_nonce(auth)
-        profile = self.board.store.profile_by_author(auth.signer_id)
+        capability = "ssh.list" if action == "ssh.list" else "ssh.manage"
+        _require_owner_capability(
+            self.board.store,
+            auth.signer_id,
+            owner_id,
+            "ssh",
+            capability,
+        )
+        profile = self.board.store.profile_by_author(owner_id)
         if profile is None:
             raise StoreError("SSH access requires a registered signed profile", 403)
 
         service = self.board.ssh_keys
         if action == "ssh.list":
-            result: object = service.list(auth.signer_id)
+            result: object = service.list(owner_id)
         elif action == "ssh.add":
             result = service.add(
-                owner_id=auth.signer_id,
+                owner_id=owner_id,
                 public_key=ssh_public_key,
                 name=name,
                 scopes=scopes or ("read",),
@@ -1628,13 +1643,13 @@ class Handler(BaseHTTPRequestHandler):
                 created_by=auth.signer_id,
             )
         elif action == "ssh.scopes":
-            result = service.set_scopes(auth.signer_id, key_id, scopes)
+            result = service.set_scopes(owner_id, key_id, scopes)
         elif action == "ssh.rename":
-            result = service.rename(auth.signer_id, key_id, name)
+            result = service.rename(owner_id, key_id, name)
         elif action == "ssh.expiry":
-            result = service.set_expiry(auth.signer_id, key_id, expires)
+            result = service.set_expiry(owner_id, key_id, expires)
         else:
-            result = service.revoke(auth.signer_id, key_id)
+            result = service.revoke(owner_id, key_id)
 
         self._json(
             200,
@@ -1642,7 +1657,8 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": 1,
                 "action": action,
                 "account": profile["name"],
-                "owner_id": auth.signer_id,
+                "owner_id": owner_id,
+                "actor_id": auth.signer_id,
                 "result": result,
             },
         )
@@ -1652,7 +1668,7 @@ class Handler(BaseHTTPRequestHandler):
         if uploads and action not in {"post.create", "post.edit"}:
             raise StoreError("file uploads are only valid for post.create/post.edit signing", 400)
         key = _required(params, "key")
-        canonical_key, signer_id = public_identity(key)
+        _canonical_key, signer_id = public_identity(key)
         store = self.board.store
 
         if action == "post.create":
@@ -1812,6 +1828,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action == "inbox.read":
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
             since, before, limit = _inbox_window(params, self.board.cfg)
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
@@ -1821,6 +1838,7 @@ class Handler(BaseHTTPRequestHandler):
                 version=1,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 since=since,
                 before=before,
                 limit=limit,
@@ -1829,6 +1847,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "nonce": nonce,
                     "issued": issued,
                     "since": since,
@@ -1840,6 +1859,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action.startswith("webhook."):
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
             webhook_id, webhook_url, webhook_events, webhook_enabled = _webhook_fields(
                 params,
                 action,
@@ -1852,6 +1872,7 @@ class Handler(BaseHTTPRequestHandler):
                 version=1,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 webhook_id=webhook_id,
                 webhook_url=webhook_url,
                 webhook_events=webhook_events,
@@ -1861,6 +1882,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "nonce": nonce,
                     "issued": issued,
                     "webhook_id": webhook_id or None,
@@ -1873,12 +1895,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action in {"keystore.put", "keystore.delete"}:
-            if store.profile_by_author(signer_id) is None:
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
+            profile = store.profile_by_author(owner_id)
+            if profile is None:
                 raise StoreError("keystore requires an established signed profile", 403)
             name = store.normalize_keystore_name(_required(params, "name"))
-            if action == "keystore.delete" and store.keystore_entry(signer_id, name) is None:
+            if action == "keystore.delete" and store.keystore_entry(owner_id, name) is None:
                 raise StoreError("keystore entry not found", 404)
-            version = store.keystore_version(signer_id, name) + 1
+            version = store.keystore_version(owner_id, name) + 1
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
             ciphertext = ""
@@ -1894,6 +1918,7 @@ class Handler(BaseHTTPRequestHandler):
                 version=version,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 keystore_name=name,
                 keystore_ciphertext=ciphertext,
                 keystore_sha256=digest,
@@ -1902,12 +1927,13 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "version": version,
                     "nonce": nonce,
                     "issued": issued,
                     "name": name,
                     "algorithm": "curve25519",
-                    "public_key": curve25519_public_key(canonical_key),
+                    "public_key": curve25519_public_key(str(profile["public_key"])),
                     "format": KEYSTORE_FORMAT,
                     "sha256": digest or None,
                     **payload_info(payload),
@@ -1916,9 +1942,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action in {"web.write", "web.delete"}:
-            if store.profile_by_author(signer_id) is None:
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
+            if store.profile_by_author(owner_id) is None:
                 raise StoreError("web hosting requires an established signed profile", 403)
-            if not self.board.web.allowed(signer_id, action):
+            if not self.board.web.allowed(signer_id, owner_id, action):
                 raise StoreError(f"certificate does not grant {action}", 403)
             web_path = self.board.web.normalize_path(_required(params, "path"))
             nonce = _param(params, "nonce") or secrets.token_hex(16)
@@ -1953,6 +1980,7 @@ class Handler(BaseHTTPRequestHandler):
                 version=1,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 web_path=web_path,
                 web_sha256=web_sha256,
                 web_bytes=web_bytes,
@@ -1962,6 +1990,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "version": 1,
                     "nonce": nonce,
                     "issued": issued,
@@ -1976,17 +2005,21 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action == "profile.update":
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
             requested_name = _param(params, "name")
             if requested_name:
                 requested_claim = store.name_claim(requested_name)
-                if requested_claim is not None and str(requested_claim["author_id"]) != signer_id:
+                if (
+                    requested_claim is not None
+                    and str(requested_claim["author_id"]) != owner_id
+                ):
                     raise StoreError(
                         f"name {requested_name!r} is already bound to public key "
                         f"{requested_claim['public_key']} "
                         f"(author_id {requested_claim['author_id']})",
                         409,
                     )
-            current = store.profile_by_author(signer_id)
+            current = store.profile_by_author(owner_id)
             if current is None:
                 raise StoreError(
                     "post with a signed name first to create a profile/name claim",
@@ -2000,10 +2033,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise StoreError("profile bio exceeds 4096 UTF-8 bytes", 413)
             name_key = store.normalize_identity_name(name)
             claim = store.name_claim(name_key)
-            if claim is None or str(claim["author_id"]) != signer_id:
-                raise StoreError("profile name must be claimed by this public key", 403)
+            if claim is None or str(claim["author_id"]) != owner_id:
+                raise StoreError("profile name must be claimed by target identity", 403)
             name = str(claim["display_name"])
-            version = store.profile_version(signer_id) + 1
+            version = store.profile_version(owner_id) + 1
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
             payload = request_payload(
@@ -2012,14 +2045,16 @@ class Handler(BaseHTTPRequestHandler):
                 version=version,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 profile_name=name,
                 profile_bio=bio,
-                profile_public_key=canonical_key,
+                profile_public_key=str(current["public_key"]),
             )
             self._json(
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "version": version,
                     "nonce": nonce,
                     "issued": issued,
@@ -2150,8 +2185,18 @@ class Handler(BaseHTTPRequestHandler):
                 grants = _grants(_required(params, "grants"))
                 delegate = _truthy(_param(params, "delegate"))
 
-            not_before = _int_required(params, "not_before", int(time.time()) - 60)
-            not_after = _int_required(params, "not_after", int(time.time()) + 365 * 86400)
+            now = int(time.time())
+            default_not_before = now - 60
+            default_not_after = now + 365 * 86400
+            if issuer_serial != "root":
+                parent_row = store.certificate(issuer_serial)
+                if parent_row is None:
+                    raise StoreError("issuer certificate not found", 404)
+                parent = parse_certificate(str(parent_row["body"]))
+                default_not_before = max(default_not_before, parent.not_before)
+                default_not_after = min(default_not_after, parent.not_after)
+            not_before = _int_required(params, "not_before", default_not_before)
+            not_after = _int_required(params, "not_after", default_not_after)
             cert = make_certificate(
                 serial=_param(params, "serial") or secrets.token_hex(16),
                 issuer_serial=issuer_serial,
@@ -2480,6 +2525,7 @@ class Handler(BaseHTTPRequestHandler):
         key = _required(params, "key")
         sig = _required(params, "sig")
         canonical_key, signer_id = public_identity(key)
+        owner_id = _management_owner(self.board.store, signer_id, _param(params, "owner"))
         nonce = _required(params, "nonce")
         issued = _int_required(params, "issued")
         since, before, limit = _inbox_window(params, self.board.cfg)
@@ -2489,6 +2535,7 @@ class Handler(BaseHTTPRequestHandler):
             version=1,
             nonce=nonce,
             issued=issued,
+            owner_id=_owner_payload_id(signer_id, owner_id),
             since=since,
             before=before,
             limit=limit,
@@ -2501,15 +2548,22 @@ class Handler(BaseHTTPRequestHandler):
             nonce=nonce,
             issued=issued,
         )
+        _require_owner_capability(
+            self.board.store,
+            auth.signer_id,
+            owner_id,
+            "mailbox",
+            "inbox.read",
+        )
         self.board.store.consume_nonce(auth)
         events = self.board.store.inbox(
-            auth.signer_id,
+            owner_id,
             since=since,
             before=before,
             limit=limit,
         )
         receipts = self.board.exchange.receipts_for(
-            auth.signer_id,
+            owner_id,
             [post.id for post, _kinds in events],
         )
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
@@ -2536,7 +2590,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(
             200,
             render_inbox(
-                auth.signer_id,
+                owner_id,
                 events,
                 latest_id=self.board.store.stats()["latest_id"],
                 authentications={
@@ -2605,11 +2659,19 @@ class Handler(BaseHTTPRequestHandler):
         )
         self.board.store.consume_nonce(auth)
         service = self.board.exchange
+        owner_id = str(meta.get("owner_id") or auth.signer_id)
 
         if action == "outbox.read":
+            _require_owner_capability(
+                self.board.store,
+                auth.signer_id,
+                owner_id,
+                "mailbox",
+                "outbox.read",
+            )
             limit = int(meta["limit"])
             posts = self.board.store.list_posts(
-                author_id=auth.signer_id,
+                author_id=owner_id,
                 since=meta["since"],
                 before=meta["before"],
                 limit=limit,
@@ -2643,38 +2705,53 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        if action == "state.read":
-            self._json(200, service.state_read(auth.signer_id, meta["name"]))
-            return
-        if action == "state.write":
-            self._json(
-                200,
-                service.state_write(
-                    auth.signer_id,
-                    str(meta["name"]),
-                    str(meta["value"]),
-                ),
+        if action in {"state.read", "state.write", "state.delete"}:
+            _require_owner_capability(
+                self.board.store,
+                auth.signer_id,
+                owner_id,
+                "state",
+                action,
             )
-            return
-        if action == "state.delete":
-            self._json(200, service.state_delete(auth.signer_id, str(meta["name"])))
+            if action == "state.read":
+                self._json(200, service.state_read(owner_id, meta["name"]))
+                return
+            if action == "state.write":
+                self._json(
+                    200,
+                    service.state_write(
+                        owner_id,
+                        str(meta["name"]),
+                        str(meta["value"]),
+                    ),
+                )
+                return
+            self._json(200, service.state_delete(owner_id, str(meta["name"])))
             return
 
-        if action == "watch.add":
-            self._json(
-                201,
-                service.watch_add(
-                    auth.signer_id,
-                    str(meta["kind"]),
-                    str(meta["target"]),
-                ),
+        if action in {"watch.add", "watch.delete", "watch.list"}:
+            capability = "watch.read" if action == "watch.list" else "watch.manage"
+            _require_owner_capability(
+                self.board.store,
+                auth.signer_id,
+                owner_id,
+                "watch",
+                capability,
             )
-            return
-        if action == "watch.delete":
-            self._json(200, service.watch_delete(auth.signer_id, str(meta["id"])))
-            return
-        if action == "watch.list":
-            self._json(200, service.watch_list(auth.signer_id))
+            if action == "watch.add":
+                self._json(
+                    201,
+                    service.watch_add(
+                        owner_id,
+                        str(meta["kind"]),
+                        str(meta["target"]),
+                    ),
+                )
+                return
+            if action == "watch.delete":
+                self._json(200, service.watch_delete(owner_id, str(meta["id"])))
+                return
+            self._json(200, service.watch_list(owner_id))
             return
 
         if action in {"inbox.ack", "post.ack"}:
@@ -2734,6 +2811,7 @@ class Handler(BaseHTTPRequestHandler):
         nonce = _required(params, "nonce")
         issued = _int_required(params, "issued")
         canonical_key, signer_id = public_identity(key)
+        owner_id = _management_owner(self.board.store, signer_id, _param(params, "owner"))
         webhook_id, webhook_url, webhook_events, webhook_enabled = _webhook_fields(
             params,
             action,
@@ -2744,6 +2822,7 @@ class Handler(BaseHTTPRequestHandler):
             version=1,
             nonce=nonce,
             issued=issued,
+            owner_id=_owner_payload_id(signer_id, owner_id),
             webhook_id=webhook_id,
             webhook_url=webhook_url,
             webhook_events=webhook_events,
@@ -2758,19 +2837,27 @@ class Handler(BaseHTTPRequestHandler):
             issued=issued,
         )
         self.board.store.consume_nonce(auth)
+        capability = "webhook.list" if action == "webhook.list" else "webhook.manage"
+        _require_owner_capability(
+            self.board.store,
+            auth.signer_id,
+            owner_id,
+            "webhook",
+            capability,
+        )
 
         service = self.board.webhooks
         if action == "webhook.create":
-            self._json(201, service.create(auth.signer_id, webhook_url, webhook_events))
+            self._json(201, service.create(owner_id, webhook_url, webhook_events))
             return
         if action == "webhook.list":
-            self._json(200, service.list(auth.signer_id))
+            self._json(200, service.list(owner_id))
             return
         if action == "webhook.update":
             self._json(
                 200,
                 service.update(
-                    auth.signer_id,
+                    owner_id,
                     webhook_id,
                     url=webhook_url,
                     events=webhook_events,
@@ -2779,14 +2866,14 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if action == "webhook.delete":
-            service.delete(auth.signer_id, webhook_id)
-            self._json(200, {"ok": 1, "id": webhook_id})
+            service.delete(owner_id, webhook_id)
+            self._json(200, {"ok": 1, "id": webhook_id, "owner_id": owner_id})
             return
         if action == "webhook.rotate":
-            self._json(200, service.rotate(auth.signer_id, webhook_id))
+            self._json(200, service.rotate(owner_id, webhook_id))
             return
         if action == "webhook.test":
-            delivery_id = service.test(auth.signer_id, webhook_id)
+            delivery_id = service.test(owner_id, webhook_id)
             self._json(
                 202,
                 {
@@ -2794,6 +2881,7 @@ class Handler(BaseHTTPRequestHandler):
                     "event": "webhook.test",
                     "webhook_id": webhook_id,
                     "delivery_id": delivery_id,
+                    "owner_id": owner_id,
                 },
             )
             return
@@ -2810,7 +2898,9 @@ class Handler(BaseHTTPRequestHandler):
         version = _int_required(params, "version")
         canonical_key, signer_id = public_identity(key)
         store = self.board.store
-        if store.profile_by_author(signer_id) is None:
+        owner_id = _management_owner(store, signer_id, _param(params, "owner"))
+        profile = store.profile_by_author(owner_id)
+        if profile is None:
             raise StoreError("keystore requires an established signed profile", 403)
         name = store.normalize_keystore_name(_required(params, "name"))
         ciphertext = ""
@@ -2826,6 +2916,7 @@ class Handler(BaseHTTPRequestHandler):
             version=version,
             nonce=nonce,
             issued=issued,
+            owner_id=_owner_payload_id(signer_id, owner_id),
             keystore_name=name,
             keystore_ciphertext=ciphertext,
             keystore_sha256=digest,
@@ -2838,18 +2929,25 @@ class Handler(BaseHTTPRequestHandler):
             nonce=nonce,
             issued=issued,
         )
+        capability = "keystore.write" if action == "keystore.put" else "keystore.delete"
+        _require_owner_capability(store, auth.signer_id, owner_id, "keystore", capability)
         if action == "keystore.put":
             result = store.keystore_put(
                 auth=auth,
                 name=name,
                 ciphertext_b64=ciphertext,
                 expected_sha256=digest,
+                owner_id=owner_id,
             )
             result["algorithm"] = "curve25519"
-            result["public_key"] = curve25519_public_key(canonical_key)
+            result["public_key"] = curve25519_public_key(str(profile["public_key"]))
+            result["owner_id"] = owner_id
             self._json(200, result)
             return
-        self._json(200, store.keystore_delete(auth=auth, name=name))
+        self._json(
+            200,
+            store.keystore_delete(auth=auth, name=name, owner_id=owner_id),
+        )
 
     def _web(self, params: Params) -> None:
         action = _required(params, "action")
@@ -2865,10 +2963,11 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("web action version must be 1", 400)
 
         canonical_key, signer_id = public_identity(key)
-        profile = self.board.store.profile_by_author(signer_id)
+        owner_id = _management_owner(self.board.store, signer_id, _param(params, "owner"))
+        profile = self.board.store.profile_by_author(owner_id)
         if profile is None:
             raise StoreError("web hosting requires an established signed profile", 403)
-        if not self.board.web.allowed(signer_id, action):
+        if not self.board.web.allowed(signer_id, owner_id, action):
             raise StoreError(f"certificate does not grant {action}", 403)
 
         web_path = self.board.web.normalize_path(_required(params, "path"))
@@ -2908,6 +3007,7 @@ class Handler(BaseHTTPRequestHandler):
             version=version,
             nonce=nonce,
             issued=issued,
+            owner_id=_owner_payload_id(signer_id, owner_id),
             web_path=web_path,
             web_sha256=web_sha256,
             web_bytes=web_bytes,
@@ -2925,14 +3025,21 @@ class Handler(BaseHTTPRequestHandler):
         if action == "web.write":
             result = self.board.web.write(
                 auth=auth,
+                owner_id=owner_id,
                 path=web_path,
                 data=data,
                 content_type=web_content_type,
             )
         else:
-            result = self.board.web.delete(auth=auth, path=web_path)
+            result = self.board.web.delete(
+                auth=auth,
+                owner_id=owner_id,
+                path=web_path,
+            )
 
         result["owner"] = str(profile["name"])
+        result["owner_id"] = owner_id
+        result["actor_id"] = auth.signer_id
         result["url"] = f"/@{quote(str(profile['name']), safe='')}/w/{quote(web_path, safe='/')}"
         result.update(self._write_client_metadata(params))
         self._json(200, result)
@@ -2943,27 +3050,30 @@ class Handler(BaseHTTPRequestHandler):
         nonce = _required(params, "nonce")
         issued = _int_required(params, "issued")
         canonical_key, signer_id = public_identity(key)
-        current = self.board.store.profile_by_author(signer_id)
+        store = self.board.store
+        owner_id = _management_owner(store, signer_id, _param(params, "owner"))
+        current = store.profile_by_author(owner_id)
         if current is None:
             raise StoreError("profile/name claim not found; publish a signed post first", 404)
         name = _param(params, "name") or str(current["name"])
-        claim = self.board.store.name_claim(name)
-        if claim is None or str(claim["author_id"]) != signer_id:
-            raise StoreError("profile name must be claimed by this public key", 403)
+        claim = store.name_claim(name)
+        if claim is None or str(claim["author_id"]) != owner_id:
+            raise StoreError("profile name must be claimed by target identity", 403)
         name = str(claim["display_name"])
         bio = _param(params, "bio")
         if bio is None:
             bio = str(current["bio"])
-        version = self.board.store.profile_version(signer_id) + 1
+        version = store.profile_version(owner_id) + 1
         payload = request_payload(
             action="profile.update",
             signer_id=signer_id,
             version=version,
             nonce=nonce,
             issued=issued,
+            owner_id=_owner_payload_id(signer_id, owner_id),
             profile_name=name,
             profile_bio=bio,
-            profile_public_key=canonical_key,
+            profile_public_key=str(current["public_key"]),
         )
         auth = signed_request(
             canonical_key,
@@ -2973,14 +3083,22 @@ class Handler(BaseHTTPRequestHandler):
             nonce=nonce,
             issued=issued,
         )
+        _require_owner_capability(
+            store,
+            auth.signer_id,
+            owner_id,
+            "account",
+            "profile.update",
+        )
         info = payload_info(payload)
         self._json(
             200,
-            self.board.store.update_profile(
+            store.update_profile(
                 auth=auth,
                 name=name,
                 bio=bio,
                 payload_b64=info["payload_b64"],
+                owner_id=owner_id,
             ),
         )
 
@@ -5311,7 +5429,24 @@ def _exchange_signing_spec(
         "issued",
         int(time.time()) if signing else None,
     )
+    managed_owner_actions = {
+        "outbox.read",
+        "state.read",
+        "state.write",
+        "state.delete",
+        "watch.add",
+        "watch.delete",
+        "watch.list",
+    }
+    owner_id = (
+        _management_owner(board.store, signer_id, _param(params, "owner"))
+        if action in managed_owner_actions
+        else signer_id
+    )
     common: dict[str, Any] = {"nonce": nonce, "issued": issued}
+    if action in managed_owner_actions:
+        common["owner_id"] = owner_id
+    payload_owner = _owner_payload_id(signer_id, owner_id)
 
     if action == "outbox.read":
         since, before, limit = _inbox_window(params, board.cfg)
@@ -5321,6 +5456,7 @@ def _exchange_signing_spec(
             version=1,
             nonce=nonce,
             issued=issued,
+            owner_id=payload_owner,
             since=since,
             before=before,
             limit=limit,
@@ -5340,6 +5476,7 @@ def _exchange_signing_spec(
             version=1,
             nonce=nonce,
             issued=issued,
+            owner_id=payload_owner,
             state_name=state_name,
             state_value=state_value,
         )
@@ -5368,6 +5505,7 @@ def _exchange_signing_spec(
             version=1,
             nonce=nonce,
             issued=issued,
+            owner_id=payload_owner,
             watch_id=watch_id,
             watch_kind=watch_kind,
             watch_target=watch_target,
@@ -5949,9 +6087,13 @@ def _optional_positive_int(params: Params, key: str) -> int | None:
 def _grant_manifest(
     grants: dict[str, tuple[str, ...]],
 ) -> tuple[dict[str, object], ...]:
-    return tuple(
-        {"topic": topic, "actions": list(actions)} for topic, actions in sorted(grants.items())
-    )
+    result: list[dict[str, object]] = []
+    for scope, actions in sorted(grants.items()):
+        if scope == "*" or valid_board_name(scope):
+            result.append({"topic": scope, "actions": list(actions)})
+        else:
+            result.append({"scope": normalize_grant_scope(scope), "actions": list(actions)})
+    return tuple(result)
 
 
 def _policy_mask(
@@ -6053,19 +6195,67 @@ def _grants(value: str) -> dict[str, tuple[str, ...]]:
         raise StoreError("grants must be a JSON array", 400)
     grants: dict[str, tuple[str, ...]] = {}
     for item in raw:
-        if not isinstance(item, dict) or not isinstance(item.get("topic"), str):
+        if not isinstance(item, dict):
             raise StoreError("invalid grant", 400)
+        has_topic = isinstance(item.get("topic"), str)
+        has_scope = isinstance(item.get("scope"), str)
+        if has_topic == has_scope:
+            raise StoreError("grant requires exactly one of topic or scope", 400)
         actions = item.get("actions")
         if not isinstance(actions, list) or not all(isinstance(x, str) for x in actions):
             raise StoreError("invalid grant actions", 400)
-        normalized = tuple(sorted(set(actions)))
-        invalid = set(normalized) - ACTIONS
+        normalized_actions = tuple(sorted(set(actions)))
+        invalid = set(normalized_actions) - ACTIONS
         if invalid:
             raise StoreError(f"unknown grant actions: {sorted(invalid)}", 400)
-        if item["topic"] != "*" and any(action.startswith("web.") for action in normalized):
-            raise StoreError("web grants require topic='*'", 400)
-        grants[item["topic"]] = normalized
+        try:
+            scope = (
+                str(item["topic"])
+                if has_topic
+                else normalize_grant_scope(str(item["scope"]))
+            )
+            if has_topic:
+                normalize_grant_scope(scope, legacy_topic=True)
+        except SignatureError as exc:
+            raise StoreError(str(exc), 400) from exc
+        grants[scope] = normalized_actions
     return grants
+
+
+def _management_owner(store: Store, signer_id: str, raw: str | None) -> str:
+    if raw is None or not raw.strip() or raw.strip().lower() == "self":
+        return signer_id
+    value = raw.strip()
+    if value.startswith("@"):
+        value = value[1:]
+    if valid_author_id(value):
+        owner_id = value
+    else:
+        profile = store.profile_by_name(value)
+        if profile is None:
+            raise StoreError(f"target profile not found: {value}", 404)
+        owner_id = str(profile["author_id"])
+    if store.profile_by_author(owner_id) is None:
+        raise StoreError("target profile not found", 404)
+    return owner_id
+
+
+def _owner_payload_id(signer_id: str, owner_id: str) -> str | None:
+    return owner_id if owner_id != signer_id else None
+
+
+def _require_owner_capability(
+    store: Store,
+    signer_id: str,
+    owner_id: str,
+    resource: str,
+    action: str,
+) -> None:
+    if not store.owner_action_allowed(signer_id, owner_id, resource, action):
+        raise StoreError(
+            f"certificate does not grant {action} for {resource}:{owner_id}",
+            403,
+        )
 
 
 def _required(params: Params, key: str) -> str:

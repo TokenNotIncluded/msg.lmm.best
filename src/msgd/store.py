@@ -31,9 +31,12 @@ from msgd.crypto import (
     SignedRequest,
     canonical_json,
     certificate_payload,
+    concrete_scope,
     curve25519_public_key,
+    normalize_grant_scope,
     parse_certificate,
     public_identity,
+    scope_covers,
     verify_detached,
 )
 from msgd.search import SearchSpec
@@ -353,6 +356,8 @@ CREATE TABLE IF NOT EXISTS profiles (
     version           INTEGER NOT NULL DEFAULT 0,
     payload_b64       TEXT NOT NULL DEFAULT '',
     signature         TEXT NOT NULL DEFAULT '',
+    actor_id          TEXT NOT NULL DEFAULT '',
+    actor_key         TEXT NOT NULL DEFAULT '',
     updated           REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS profiles_name ON profiles(primary_name_key);
@@ -825,6 +830,18 @@ class Store:
             """
         )
 
+        profile_columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(profiles)").fetchall()
+        }
+        profile_additions = {
+            "actor_id": "TEXT NOT NULL DEFAULT ''",
+            "actor_key": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in profile_additions.items():
+            if profile_columns and name not in profile_columns:
+                self._conn.execute(f"ALTER TABLE profiles ADD COLUMN {name} {definition}")
+
         revocation_columns = {
             str(row["name"])
             for row in self._conn.execute("PRAGMA table_info(revocations)").fetchall()
@@ -905,6 +922,8 @@ class Store:
                 version INTEGER NOT NULL DEFAULT 0,
                 payload_b64 TEXT NOT NULL DEFAULT '',
                 signature TEXT NOT NULL DEFAULT '',
+                actor_id TEXT NOT NULL DEFAULT '',
+                actor_key TEXT NOT NULL DEFAULT '',
                 updated REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS profiles_name
@@ -1216,6 +1235,8 @@ class Store:
             "profile_version": 0,
             "profile_payload_b64": "",
             "profile_signature": "",
+            "profile_actor_id": root_id,
+            "profile_actor_key": root["public_key"],
             "profile_signed": False,
             "updated": None,
             "system": True,
@@ -1617,16 +1638,22 @@ class Store:
         if not grants:
             raise StoreError("certificate grants are required", 400)
         result: list[dict[str, object]] = []
-        for topic, actions in sorted(grants.items()):
-            if topic != "*" and not valid_board_name(topic):
-                raise StoreError(f"invalid/reserved channel grant: {topic!r}", 400)
+        for scope, actions in sorted(grants.items()):
             normalized = sorted(set(actions))
             if not normalized:
                 raise StoreError("grant actions are required", 400)
             invalid = set(normalized) - ACTIONS
             if invalid:
                 raise StoreError(f"invalid grant actions: {sorted(invalid)}", 400)
-            result.append({"topic": topic, "actions": normalized})
+            try:
+                if scope == "*" or valid_board_name(scope):
+                    normalize_grant_scope(scope, legacy_topic=True)
+                    result.append({"topic": scope, "actions": normalized})
+                else:
+                    normalized_scope = normalize_grant_scope(scope)
+                    result.append({"scope": normalized_scope, "actions": normalized})
+            except SignatureError as exc:
+                raise StoreError(str(exc), 400) from exc
         return result
 
     @staticmethod
@@ -1637,11 +1664,20 @@ class Store:
         for item in value:
             if not isinstance(item, dict):
                 raise StoreError("invalid stored grant", 500)
-            topic = item.get("topic")
             actions = item.get("actions")
-            if not isinstance(topic, str) or not isinstance(actions, list):
+            has_topic = isinstance(item.get("topic"), str)
+            has_scope = isinstance(item.get("scope"), str)
+            if has_topic == has_scope or not isinstance(actions, list):
                 raise StoreError("invalid stored grant", 500)
-            result[topic] = {str(action) for action in actions}
+            try:
+                scope = (
+                    normalize_grant_scope(str(item["topic"]), legacy_topic=True)
+                    if has_topic
+                    else normalize_grant_scope(str(item["scope"]))
+                )
+            except SignatureError as exc:
+                raise StoreError(str(exc), 500) from exc
+            result.setdefault(scope, set()).update(str(action) for action in actions)
         return result
 
     def _create_system_post(self, title: str, body: str) -> Post:
@@ -1796,7 +1832,14 @@ class Store:
         if csr["requested_issuer"] and csr["requested_issuer"] != signer_id:
             return False
         grants = self._grant_map(csr["grants"])
-        return all("cert.issue" in self.permissions_for(signer_id, topic) for topic in grants)
+        return all(
+            self.scope_allowed(
+                signer_id,
+                concrete_scope(scope, str(csr["subject_id"])),
+                "cert.issue",
+            )
+            for scope in grants
+        )
 
     def cancel_csr(self, csr_id: int, signer_id: str, reason: str = "") -> dict[str, Any]:
         csr = self.csr(csr_id)
@@ -1867,12 +1910,18 @@ class Store:
         if cert.delegate and not csr["delegate"]:
             raise StoreError("certificate delegation exceeds CSR", 403)
         requested = self._grant_map(csr["grants"])
-        for topic, actions in cert.grants.items():
-            allowed = set(requested.get("*", set()))
-            if topic != "*":
-                allowed.update(requested.get(topic, set()))
+        for scope, actions in cert.grants.items():
+            child_scope = concrete_scope(scope, cert.subject_id)
+            allowed: set[str] = set()
+            for requested_scope, requested_actions in requested.items():
+                if scope_covers(
+                    requested_scope,
+                    child_scope,
+                    subject_id=str(csr["subject_id"]),
+                ):
+                    allowed.update(requested_actions)
             if not set(actions).issubset(allowed):
-                raise StoreError(f"certificate grants exceed CSR for topic {topic}", 403)
+                raise StoreError(f"certificate grants exceed CSR for scope {scope}", 403)
 
     @staticmethod
     def _csr_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -2531,15 +2580,40 @@ class Store:
             "last_used": round(float(row["last_used"]), 3),
         }
 
-    def permissions_for(self, subject_id: str, board: str) -> set[str]:
+    def permissions_for_scope(self, subject_id: str, scope: str) -> set[str]:
+        try:
+            requested_scope = normalize_grant_scope(scope)
+        except SignatureError as exc:
+            raise StoreError(str(exc), 400) from exc
         permissions: set[str] = set()
         for row in self.certificates_for(subject_id):
             if not self.certificate_active(str(row["serial"])):
                 continue
             cert = parse_certificate(str(row["body"]))
-            permissions.update(cert.grants.get("*", ()))
-            permissions.update(cert.grants.get(board, ()))
+            for grant_scope, actions in cert.grants.items():
+                if scope_covers(grant_scope, requested_scope, subject_id=cert.subject_id):
+                    permissions.update(actions)
         return permissions
+
+    def permissions_for(self, subject_id: str, board: str) -> set[str]:
+        return self.permissions_for_scope(subject_id, f"topic:{board}")
+
+    def scope_allowed(self, signer_id: str, scope: str, action: str) -> bool:
+        root = self.root_info()
+        if root is not None and signer_id == root["root_id"]:
+            return True
+        return action in self.permissions_for_scope(signer_id, scope)
+
+    def owner_action_allowed(
+        self,
+        signer_id: str,
+        owner_id: str,
+        resource: str,
+        action: str,
+    ) -> bool:
+        if signer_id == owner_id:
+            return True
+        return self.scope_allowed(signer_id, f"{resource}:{owner_id}", action)
 
     def signed_allowed(
         self,
@@ -2587,8 +2661,12 @@ class Store:
                 parent = parse_certificate(str(parent_info["body"]))
                 if parent.subject_id == signer_id:
                     allowed = all(
-                        "cert.revoke" in self._certificate_actions(parent, topic)
-                        for topic in cert.grants
+                        "cert.revoke"
+                        in self._certificate_actions(
+                            parent,
+                            concrete_scope(scope, cert.subject_id),
+                        )
+                        for scope in cert.grants
                     )
         if not allowed:
             raise StoreError("not allowed to revoke this certificate", 403)
@@ -2893,7 +2971,7 @@ class Store:
             profile = self._conn.execute(
                 """
                 SELECT author_id, primary_name_key, bio, version, payload_b64,
-                       signature, updated
+                       signature, actor_id, actor_key, updated
                   FROM profiles
                  WHERE author_id = ?
                 """,
@@ -2931,6 +3009,8 @@ class Store:
             "profile_version": int(profile["version"]),
             "profile_payload_b64": str(profile["payload_b64"]),
             "profile_signature": str(profile["signature"]),
+            "profile_actor_id": str(profile["actor_id"] or author_id),
+            "profile_actor_key": str(profile["actor_key"] or primary["public_key"]),
             "profile_signed": bool(profile["signature"]),
             "updated": round(float(profile["updated"]), 3),
             "certification": self.certification(author_id),
@@ -3036,8 +3116,10 @@ class Store:
         name: str,
         ciphertext_b64: str,
         expected_sha256: str,
+        owner_id: str | None = None,
     ) -> dict[str, Any]:
-        if self.profile_by_author(auth.signer_id) is None:
+        target_id = owner_id or auth.signer_id
+        if self.profile_by_author(target_id) is None:
             raise StoreError("keystore requires an established signed profile", 403)
         name = self.normalize_keystore_name(name)
         ciphertext, _canonical, digest = self.prepare_keystore_ciphertext(
@@ -3049,7 +3131,7 @@ class Store:
         with self._lock, self._conn:
             current = self._conn.execute(
                 "SELECT version, created FROM keystore_entries WHERE owner_id = ? AND name = ?",
-                (auth.signer_id, name),
+                (target_id, name),
             ).fetchone()
             expected_version = int(current["version"] if current is not None else 0) + 1
             if auth.version != expected_version:
@@ -3061,7 +3143,7 @@ class Store:
                       FROM keystore_entries
                      WHERE owner_id = ? AND name <> ?
                     """,
-                    (auth.signer_id, name),
+                    (target_id, name),
                 ).fetchone()["n"]
             )
             if used + len(ciphertext) > KEYSTORE_MAX_TOTAL_BYTES:
@@ -3082,7 +3164,7 @@ class Store:
                     updated = excluded.updated
                 """,
                 (
-                    auth.signer_id,
+                    target_id,
                     name,
                     ciphertext,
                     digest,
@@ -3091,17 +3173,24 @@ class Store:
                     now,
                 ),
             )
-        result = self.keystore_entry(auth.signer_id, name)
+        result = self.keystore_entry(target_id, name)
         assert result is not None
         return result
 
-    def keystore_delete(self, *, auth: SignedRequest, name: str) -> dict[str, Any]:
+    def keystore_delete(
+        self,
+        *,
+        auth: SignedRequest,
+        name: str,
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        target_id = owner_id or auth.signer_id
         name = self.normalize_keystore_name(name)
         self.consume_nonce(auth)
         with self._lock, self._conn:
             current = self._conn.execute(
                 "SELECT version FROM keystore_entries WHERE owner_id = ? AND name = ?",
-                (auth.signer_id, name),
+                (target_id, name),
             ).fetchone()
             if current is None:
                 raise StoreError("keystore entry not found", 404)
@@ -3109,9 +3198,9 @@ class Store:
                 raise StoreError("stale keystore version", 409)
             self._conn.execute(
                 "DELETE FROM keystore_entries WHERE owner_id = ? AND name = ?",
-                (auth.signer_id, name),
+                (target_id, name),
             )
-        return {"ok": 1, "deleted": True, "name": name}
+        return {"ok": 1, "deleted": True, "name": name, "owner_id": target_id}
 
     def profile_version(self, author_id: str) -> int:
         with self._lock:
@@ -3128,7 +3217,9 @@ class Store:
         name: str,
         bio: str,
         payload_b64: str,
+        owner_id: str | None = None,
     ) -> dict[str, Any]:
+        target_id = owner_id or auth.signer_id
         if len(bio.encode("utf-8")) > 4096:
             raise StoreError("profile bio exceeds 4096 UTF-8 bytes", 413)
         name_key = self.normalize_identity_name(name)
@@ -3138,11 +3229,11 @@ class Store:
                 "SELECT author_id FROM name_claims WHERE name_key = ?",
                 (name_key,),
             ).fetchone()
-            if claim is None or str(claim["author_id"]) != auth.signer_id:
-                raise StoreError("profile name must already be claimed by this public key", 403)
+            if claim is None or str(claim["author_id"]) != target_id:
+                raise StoreError("profile name must already be claimed by target identity", 403)
             current = self._conn.execute(
                 "SELECT version FROM profiles WHERE author_id = ?",
-                (auth.signer_id,),
+                (target_id,),
             ).fetchone()
             expected = int(current["version"] if current is not None else 0) + 1
             if auth.version != expected:
@@ -3151,27 +3242,31 @@ class Store:
                 """
                 INSERT INTO profiles(
                     author_id, primary_name_key, bio, version, payload_b64,
-                    signature, updated
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    signature, actor_id, actor_key, updated
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(author_id) DO UPDATE SET
                     primary_name_key = excluded.primary_name_key,
                     bio = excluded.bio,
                     version = excluded.version,
                     payload_b64 = excluded.payload_b64,
                     signature = excluded.signature,
+                    actor_id = excluded.actor_id,
+                    actor_key = excluded.actor_key,
                     updated = excluded.updated
                 """,
                 (
-                    auth.signer_id,
+                    target_id,
                     name_key,
                     bio,
                     auth.version,
                     payload_b64,
                     auth.signature,
+                    auth.signer_id,
+                    auth.public_key,
                     time.time(),
                 ),
             )
-        profile = self.profile_by_author(auth.signer_id)
+        profile = self.profile_by_author(target_id)
         assert profile is not None
         return profile
 
@@ -5509,22 +5604,33 @@ class Store:
         return True
 
     @staticmethod
-    def _certificate_actions(cert: Certificate, topic: str) -> set[str]:
-        actions = set(cert.grants.get("*", ()))
-        if topic != "*":
-            actions.update(cert.grants.get(topic, ()))
+    def _certificate_actions(cert: Certificate, requested_scope: str) -> set[str]:
+        actions: set[str] = set()
+        for grant_scope, granted in cert.grants.items():
+            if scope_covers(
+                grant_scope,
+                requested_scope,
+                subject_id=cert.subject_id,
+            ):
+                actions.update(granted)
         return actions
 
     @staticmethod
     def _check_delegation(parent: Certificate, child: Certificate) -> None:
         if not parent.delegate:
             raise StoreError("issuer certificate cannot delegate", 403)
-        for topic, child_actions in child.grants.items():
-            parent_actions = Store._certificate_actions(parent, topic)
+        if child.not_before < parent.not_before or child.not_after > parent.not_after:
+            raise StoreError("child certificate validity exceeds issuer certificate", 403)
+        for scope, child_actions in child.grants.items():
+            child_scope = concrete_scope(scope, child.subject_id)
+            parent_actions = Store._certificate_actions(parent, child_scope)
             if "cert.issue" not in parent_actions:
-                raise StoreError(f"issuer lacks cert.issue for topic {topic}", 403)
+                raise StoreError(f"issuer cannot issue for scope {child_scope}", 403)
             if not set(child_actions).issubset(parent_actions):
-                raise StoreError(f"child grant exceeds issuer grant for topic {topic}", 403)
+                raise StoreError(
+                    f"child grant exceeds issuer grant for scope {child_scope}",
+                    403,
+                )
 
     @staticmethod
     def _select_posts() -> str:

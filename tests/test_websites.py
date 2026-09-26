@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from msgd.config import Config
-from msgd.crypto import SignatureError, certificate_payload, make_certificate
+from msgd.crypto import certificate_payload, make_certificate
 from msgd.server import build_server
 
 
@@ -176,6 +176,7 @@ class WebSiteCase(unittest.TestCase):
         path: str,
         data: bytes,
         content_type: str = "text/html",
+        owner: str | None = None,
     ) -> tuple[int, dict]:
         digest = hashlib.sha256(data).hexdigest()
         status, signing = self.signing(
@@ -185,6 +186,7 @@ class WebSiteCase(unittest.TestCase):
             sha256=digest,
             bytes=str(len(data)),
             content_type=content_type,
+            **({"owner": owner} if owner is not None else {}),
         )
         if status != 200:
             return status, signing
@@ -199,6 +201,7 @@ class WebSiteCase(unittest.TestCase):
             sig=sign_b64(key, signing["payload_b64"]),
             nonce=str(signing["nonce"]),
             issued=str(signing["issued"]),
+            **({"owner": owner} if owner is not None else {}),
         )
         try:
             parsed = json.loads(body.decode())
@@ -206,8 +209,18 @@ class WebSiteCase(unittest.TestCase):
             parsed = {"error": body.decode()}
         return status, parsed
 
-    def delete(self, key: Ed25519PrivateKey, path: str) -> tuple[int, dict]:
-        status, signing = self.signing(key, "web.delete", path=path)
+    def delete(
+        self,
+        key: Ed25519PrivateKey,
+        path: str,
+        owner: str | None = None,
+    ) -> tuple[int, dict]:
+        status, signing = self.signing(
+            key,
+            "web.delete",
+            path=path,
+            **({"owner": owner} if owner is not None else {}),
+        )
         if status != 200:
             return status, signing
         status, body, _headers = self.c.post(
@@ -219,6 +232,7 @@ class WebSiteCase(unittest.TestCase):
             sig=sign_b64(key, signing["payload_b64"]),
             nonce=str(signing["nonce"]),
             issued=str(signing["issued"]),
+            **({"owner": owner} if owner is not None else {}),
         )
         return status, json.loads(body.decode())
 
@@ -267,18 +281,40 @@ class WebSiteCase(unittest.TestCase):
         )
         self.assertEqual(status, 413, error)
 
-    def test_web_grants_are_global_only(self) -> None:
-        with self.assertRaisesRegex(SignatureError, "web grants require topic"):
-            make_certificate(
-                serial="3" * 32,
-                issuer_serial="root",
-                issuer_id=author_id(self.root),
-                subject_key=public_b64(Ed25519PrivateKey.generate()),
-                not_before=1,
-                not_after=4_102_444_800,
-                delegate=False,
-                grants={"main": {"web.write"}},
-            )
+    def test_resource_scope_can_delegate_one_site(self) -> None:
+        cert = make_certificate(
+            serial="3" * 32,
+            issuer_serial="root",
+            issuer_id=author_id(self.root),
+            subject_key=public_b64(self.bob),
+            not_before=1,
+            not_after=4_102_444_800,
+            delegate=False,
+            grants={f"web:{author_id(self.alice)}": {"web.write"}},
+        )
+        signature = base64.b64encode(
+            self.root.sign(certificate_payload(cert.body))
+        ).decode("ascii")
+        self.server.board.store.register_certificate(cert.body, signature)
+
+        status, result = self.put(
+            self.bob,
+            "delegated.html",
+            b"<p>delegated</p>",
+            owner="@AliceWeb",
+        )
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["owner"], "AliceWeb")
+        self.assertEqual(result["actor_id"], author_id(self.bob))
+        self.assertEqual(self.c.get("/@AliceWeb/w/delegated.html")[0], 200)
+        self.assertEqual(self.c.get("/@BobWeb/w/delegated.html")[0], 404)
+
+        status, error = self.delete(
+            self.bob,
+            "delegated.html",
+            owner="@AliceWeb",
+        )
+        self.assertEqual(status, 403, error)
 
 
 if __name__ == "__main__":
