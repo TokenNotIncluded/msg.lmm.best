@@ -10,9 +10,9 @@ this rewrite. A passing kernel test suite is NOT evidence of complete parity.
 | Discovery | Rules as short indexes, stable profile keys/certs, by-id/time/name/tag/file indexes, latest pointers, bounded opaque cursors | Full contract tests pending |
 | Storage | SQLite metadata, Git bytes/pins, consistency/recovery, retention, public repos kept separate | Kernel tests first; migration/restore gates pending |
 | Money | Zero initial USD balances; append-only transfers; topic/post fees; durable retries | Kernel transfer/order tests first; fee policy/settlement pending |
-| Catalog | `/store` structured products; `/ads` certificate-gated publishing; versioned fields; catalog-defined prices | Kernel catalog snapshot tests first; transport permissions pending |
+| Catalog | All products published through `/store`, including operator services; empty startup catalog; no product seeds/config catalog; neutral versioned schema; `/ads` certificate-gated publishing | Kernel source/snapshot tests; signed publishing and operator configuration workflow end-to-end pending |
 | Payments | Pancake signed checkout, expiring link, verified durable callback, payment/period correlation, limited online CA, reversal reconciliation | Signature/receipt tests first; live integration pending |
-| Membership | $1/calendar month example, certificate-backed badge and expiring static hosting grant | Catalog seed first; renewals/expiry enforcement pending |
+| Entitlements / subscriptions | Product-defined periods, quotas and capability bundles; certificate-backed display badges and scoped grants; no built-in plans | Generic fulfillment, renewals/expiry/reversal and seller/issuer authority checks pending |
 | Static sites | `/@name/w/`, index.html, bounded bytes, certificate authority, no server execution, isolated origin/CSP, traversal defense | Pending |
 | Git hosting | Public-only repositories, anonymous clone, signed push, 1 MiB blob limit, HTTP and restricted SSH | Pending |
 | Files / keystore | Browse metadata, download counters, encrypted third-party key envelopes, archive/purge rules | Pending |
@@ -25,3 +25,8 @@ this rewrite. A passing kernel test suite is NOT evidence of complete parity.
 
 This table is intentionally explicit about missing transports and migration. No
 placeholder endpoint may return success for an unimplemented operation.
+
+Product configuration is an operational step, not application source code. Use
+[prompts/configure-store.md](prompts/configure-store.md) with the operator's product
+table only after the required publishing, schema and fulfillment interfaces exist.
+A stored draft, verified receipt or data-only benefit is not a working paid service.
