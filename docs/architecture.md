@@ -63,14 +63,32 @@ bound to request digests, so retrying a different transfer under the same key fa
 A system clearing account is the only account permitted to be negative. No daily
 rewards, virtual currency multiplier, or invented withdraw/refund endpoint.
 
-A product is a structured post in `/store`; checkout records pin its revision,
-price, subject, seller and declarative benefits. Later edits cannot change an
-existing order. Prices belong to product data, not `if product == membership` code.
-The example $1/calendar-month membership bundles web hosting and a blue badge.
-Default byte quota is documented explicitly in the example; operators can change
-it. Store/advertising publishing is certificate-gated; their sale prices remain
-operator-defined rather than invented. Topic creation fees and per-topic post fees
-must debit the ledger in the same transaction as the resource mutation.
+Every product is a structured post published through the authenticated `/store`
+flow, including the operator's own services, subscriptions and permission grants.
+There is no parallel catalog in Python, TOML, environment variables or product seed
+files. Fresh installs contain no products; startup/reload cannot create, reset or
+republish them. The starter store template describes only common field constraints.
+
+Product data defines prices, periods, sellable quotas, benefits, availability and
+policies. Checkout records pin the product revision, price, buyer, seller and
+benefit data. Later edits cannot change an existing order. Product titles and IDs
+are identifiers, never inputs to a hidden membership-specific dispatch branch.
+Renewal must explicitly bind its contracted product revision or an agreed change;
+it must not silently apply the latest price or benefits to an existing subscription.
+
+The server provides audited capability implementations and validates their inputs;
+products compose those capabilities as bounded data. Defining a new capability may
+require reviewed code. Merely publishing a new price, bundle or duration must not.
+Products cannot load plugins, execute scripts, or turn display text into authority.
+Until a fulfillment action is implemented and verified, its presence in product
+metadata does not mean it can be sold or delivered.
+
+Store/advertising publishing is certificate-gated. Selling permission to publish
+there is itself a `/store` product, subject to the issuer's existing grant ceiling,
+not an exception that grants the merchant new authority. Topic creation fees and
+per-topic post fees debit the ledger in the same transaction as the resource
+mutation. Operator-specified products and prices are provisioned by the workflow in
+[prompts/configure-store.md](prompts/configure-store.md), never by startup seeds.
 
 Templates have versions and reject unknown fields and oversized values. The initial
 schema is a deliberately bounded declarative subset (string, integer, boolean,
@@ -106,9 +124,14 @@ and legal obligations are still states the system must be able to reconcile.
 
 ## Configuration and deployment
 
-`/etc/msg.lmm.best/config.toml` plus templates, product seeds, privacy.md, terms.md,
-and private key paths. Domain, paths, quotas and fees are configuration, not scattered
-constants. Do not ship real credentials or fictitious legal guarantees. New code is
+`/etc/msg.lmm.best/config.toml` holds infrastructure settings; related files may
+hold payment-provider credentials, key references, privacy.md and terms.md. It
+must not contain products, commercial prices or sellable entitlements. Versioned
+topic schemas are managed through authorized topic configuration. Repository schema
+examples are operator references, not automatically loaded catalog data.
+Infrastructure resource ceilings remain independently enforced; a sold quota cannot
+override them, and an infrastructure limit is not a product's promised quota.
+Do not ship real credentials or fictitious legal guarantees. New code is
 built on Python 3.15.0rc2 (3.15 final is scheduled for 2026-10-01); use pinned tools,
 a committed lock, Ruff annotation checks and ty all-rules-as-errors. No blanket
 `type: ignore`, catch-all silent exceptions, or made-up ty `strict = true` option.
