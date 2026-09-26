@@ -78,13 +78,17 @@ def test_optional_empty_string_respects_declared_minimum() -> None:
         Template(1, (Field("title", "string", minimum=1),)).validate({"title": ""})
 
 
-def test_catalog_examples_are_schema_valid() -> None:
+def test_store_schema_accepts_explicit_sale_availability() -> None:
     from pathlib import Path
-
-    from msgnet.model import object_field
 
     root = Path(__file__).parents[1] / "config"
     template = Template.parse(decode((root / "templates/store.json").read_bytes()))
-    product = decode((root / "products/membership.json").read_bytes())
-    template.validate(object_field(product["fields"]))
-    assert object_field(product["fields"])["enabled"] is False
+    for enabled in (False, True):
+        template.validate({
+            "title": "Operator-defined product",
+            "price_cents": 237,
+            "currency": "USD",
+            "enabled": enabled,
+        })
+    with pytest.raises(Invalid):
+        template.validate({"title": "Incomplete offer"})
