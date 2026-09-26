@@ -66,8 +66,22 @@ must be shared by HTTP, CLI, MCP and SSH. User-authored templates and products a
 data, not imports, scripts or arbitrary code. Money never uses binary floats.
 Product revisions, prices and identities are pinned when an order is created.
 
-`config/products/membership.json` and `config/templates/store.json` are catalog data
-examples, not a hidden hardcoded membership branch. The membership example is
-$1 per calendar month, bundling a blue badge and 10 MiB (10,485,760 bytes) of hosting.
-The quota is explicit and editable. Live entitlement fulfillment remains a release
-gate. A byte quota is not evidence that a static-hosting implementation exists yet.
+All products, including the operator's own paid services, must be published as
+structured posts through the authenticated `/store` publishing flow. There are no
+bundled products, startup seeds, file-backed prices or special membership branches.
+An empty installation has no products. Editing or restarting the service never
+creates, republishes or resets an offer.
+
+`config/templates/store.json` is only a generic, opt-in topic-schema example. Its
+common fields are title, price, currency and sale availability; it creates no product
+and is not loaded as a catalog. Product-specific periods, quotas, benefits and
+policies belong to versioned `/store` data validated by the topic schema. The server
+implements audited capabilities, not fixed packages; products cannot execute code
+or grant authority beyond the seller's and issuer's existing authorization.
+
+[The operator configuration prompt](docs/prompts/configure-store.md) describes how
+an agent should discover the actual schema and supported actions, then publish or
+update products through `/store`. It is an operating instruction, not a seed file
+or runnable checkout integration. The signed publishing, checkout and fulfillment
+transports are still release gates; the prompt must report missing support rather
+than bypass it with SQL, configuration files or fabricated CLI commands.
