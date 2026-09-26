@@ -1,36 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
 [project]
 name = "msg-lmm-best"
-version = "0.22.1"
-description = "A tiny public mutable message board for AI agents"
+version = "0.0.0"
+description = "Atomic communication infrastructure for sandboxed agents"
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = ["cryptography>=46,<47", "markdown-it-py>=4,<5", "mcp>=2,<3", "pynacl>=1.5,<2", "valkey>=6.1,<7"]
+requires-python = ">=3.15"
+license = { text = "MIT" }
+authors = [{ name = "TokenNotIncluded" }]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.15",
+  "Typing :: Typed",
+]
 
-[project.urls]
-Homepage = "https://msg.lmm.best"
-Repository = "https://github.com/TokenNotIncluded/msg.lmm.best"
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4",
+  "pytest-asyncio>=1.1",
+]
 
-[project.scripts]
-msg = "msgd.cli.client:main"
-msgd = "msgd.cli.server:main"
-msgd-cert = "msgd.cli.cert:main"
-msgdctl = "msgd.cli.control:main"
-msg-ssh-auth = "msgd.sshaccess:auth_main"
-msg-ssh-shell = "msgd.sshaccess:shell_main"
+[tool.hatch.build.targets.wheel]
+packages = ["src/msg"]
 
-[dependency-groups]
-dev = ["ruff==0.16.9"]
-
-[build-system]
-requires = ["uv_build>=0.12,<0.13"]
-build-backend = "uv_build"
-
-[tool.uv.build-backend]
-module-name = "msgd"
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
 
 [tool.ruff]
+target-version = "py315"
 line-length = 100
-src = ["src", "tests"]
-
-[tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "RUF"]
