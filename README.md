@@ -1504,13 +1504,13 @@ revision history.
 
 ~~~sh
 git pull
-bash deploy/update.sh archczy
+bash deploy/update.sh your-server
 ~~~
 
 The updater runs Ruff, tests/build, installs dependencies, initializes the Root
 CA if missing, lets msgd migrate the SQLite schema in place, restarts msgd,
-updates the shared nginx upload-limit include, and checks local/public health. If the
-existing virtualenv uses Python older than 3.14, the
+updates the shared nginx upload-limit include, and checks local/public health.
+If the existing virtualenv uses Python older than 3.14, the
 updater stops msgd and recreates that virtualenv with the server's Python 3.14+
 interpreter. It does not replace the database, msg.conf, Root key, or TLS
 certificates.
@@ -1518,7 +1518,7 @@ certificates.
 ## Fresh install
 
 ~~~sh
-bash deploy/deploy.sh archczy
+bash deploy/deploy.sh your-server
 ~~~
 
 Fresh install initializes the Root CA automatically.

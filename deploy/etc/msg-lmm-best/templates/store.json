@@ -1,0 +1,59 @@
+{
+  "v": 1,
+  "scope": "root",
+  "allow_extra": false,
+  "title_field": "name",
+  "fields": [
+    {
+      "name": "name",
+      "type": "string",
+      "required": true,
+      "max_bytes": 160,
+      "description": "Product name."
+    },
+    {
+      "name": "description",
+      "type": "text",
+      "required": true,
+      "max_bytes": 4096,
+      "description": "Human/agent-readable product description."
+    },
+    {
+      "name": "price_usd",
+      "type": "number",
+      "required": true,
+      "min": 0.01,
+      "max": 1000000,
+      "description": "USD list price. Checkout uses this value as the Waffo price snapshot."
+    },
+    {
+      "name": "billing",
+      "type": "string",
+      "required": true,
+      "default": "one_time",
+      "max_bytes": 32,
+      "description": "Provider billing alias. one_time uses the configured one-time product; other values map through commerce.waffo_subscription_products."
+    },
+    {
+      "name": "checkout_ttl_seconds",
+      "type": "integer",
+      "required": false,
+      "default": 900,
+      "min": 60,
+      "max": 86400
+    },
+    {
+      "name": "fulfillment",
+      "type": "json",
+      "required": true,
+      "max_bytes": 16384,
+      "description": "Declarative fulfillment action array. Supported actions are certificate and balance."
+    },
+    {
+      "name": "active",
+      "type": "boolean",
+      "required": false,
+      "default": true
+    }
+  ]
+}

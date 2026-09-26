@@ -292,9 +292,7 @@ class WebSiteCase(unittest.TestCase):
             delegate=False,
             grants={f"web:{author_id(self.alice)}": {"web.write"}},
         )
-        signature = base64.b64encode(
-            self.root.sign(certificate_payload(cert.body))
-        ).decode("ascii")
+        signature = base64.b64encode(self.root.sign(certificate_payload(cert.body))).decode("ascii")
         self.server.board.store.register_certificate(cert.body, signature)
 
         status, result = self.put(

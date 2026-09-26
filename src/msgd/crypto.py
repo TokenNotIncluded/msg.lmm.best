@@ -29,6 +29,7 @@ ACTIONS = frozenset(
         "post.delete.self",
         "post.delete.any",
         "topic.policy",
+        "topic.template",
         "profile.update",
         "ssh.list",
         "ssh.manage",
@@ -55,6 +56,7 @@ ACTIONS = frozenset(
         "repo.create",
         "repo.write",
         "repo.manage",
+        "badge.blue",
         "cert.issue",
         "cert.revoke",
     }
@@ -154,9 +156,7 @@ def normalize_grant_scope(value: str, *, legacy_topic: bool = False) -> str:
         if target != "*" and not _valid_topic(target):
             raise SignatureError(f"invalid topic scope: {value!r}")
     elif target not in {"self", "*"} and not IDENTITY_RE.fullmatch(target):
-        raise SignatureError(
-            f"{resource} scope target must be self, *, or a 64-hex identity"
-        )
+        raise SignatureError(f"{resource} scope target must be self, *, or a 64-hex identity")
     return f"{resource}:{target}"
 
 
@@ -210,9 +210,11 @@ def request_payload(
     body: str = "",
     anonymous: tuple[str, ...] | None = None,
     signed: tuple[str, ...] | None = None,
+    topic_template: str = "",
     serial: str = "",
     files: tuple[dict[str, object], ...] = (),
     reply_to: int | None = None,
+    template_version: int | None = None,
     since: int | None = None,
     before: int | None = None,
     limit: int | None = None,
@@ -269,6 +271,8 @@ def request_payload(
             ("reply_to", "" if reply_to is None else str(reply_to)),
             ("files", canonical_json(list(files))),
         ]
+        if template_version is not None:
+            fields.append(("template_version", str(template_version)))
     elif action == "post.edit":
         if post_id is None or owner_id is None:
             raise SignatureError("signed edit requires post_id and owner_id")
@@ -282,6 +286,8 @@ def request_payload(
             ("reply_to", "" if reply_to is None else str(reply_to)),
             ("files", canonical_json(list(files))),
         ]
+        if template_version is not None:
+            fields.append(("template_version", str(template_version)))
     elif action in {"post.delete", "post.purge"}:
         if post_id is None or owner_id is None:
             raise SignatureError(
@@ -300,6 +306,32 @@ def request_payload(
             fields.append(("anonymous", ",".join(sorted(anonymous))))
         if signed is not None:
             fields.append(("signed", ",".join(sorted(signed))))
+    elif action == "topic.template":
+        fields += [
+            ("board", board),
+            ("template", topic_template),
+        ]
+    elif action == "store.buy":
+        if post_id is None or post_id < 1:
+            raise SignatureError("store.buy requires product post_id")
+        if nonce is None or issued is None:
+            raise SignatureError("store.buy requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("post_id", str(post_id)),
+        ]
+    elif action == "balance.read":
+        if nonce is None or issued is None:
+            raise SignatureError("balance.read requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+        ]
     elif action == "cert.revoke":
         if not SERIAL_RE.fullmatch(serial):
             raise SignatureError("invalid certificate serial")

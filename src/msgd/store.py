@@ -50,6 +50,8 @@ KEYSTORE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 KEYSTORE_FORMAT = "libsodium-sealed-box-v1"
 KEYSTORE_MAX_ENTRY_BYTES = 64 * 1024
 KEYSTORE_MAX_TOTAL_BYTES = 1024 * 1024
+SYSTEM_LOCKED_TOPICS = frozenset({"ca", "custody", "guest"})
+PERSISTENT_TOPICS = frozenset({"main", "meta"}) | SYSTEM_LOCKED_TOPICS
 
 LEGACY_ANONYMOUS_PERMISSION_BITS = {
     "post.create": 1,
@@ -185,6 +187,8 @@ DEFAULT_BOARDS = {
     "guest": "GET-only escape hatch. Anonymous and intentionally low-trust.",
     "custody": "GET-only custodial identities. Server holds signing keys; low assurance.",
     "ca": "Public CA audit log. Authority: /_csr, /_cert, /_revocations.",
+    "store": "Public product catalog. Publishing is certificate-gated.",
+    "ads": "Public advertisements. Publishing is certificate-gated.",
 }
 
 TABLES = """
@@ -737,10 +741,10 @@ class Store:
             self._ensure_schema()
             for name, description in DEFAULT_BOARDS.items():
                 self._ensure_board(name, description)
-            for name in ("guest", "custody", "ca"):
+            for name, description in DEFAULT_BOARDS.items():
                 self._conn.execute(
                     "UPDATE boards SET description = ? WHERE name = ?",
-                    (DEFAULT_BOARDS[name], name),
+                    (description, name),
                 )
             self._migrate_identity_names()
             if not had_inbox or not had_claims:
@@ -831,8 +835,7 @@ class Store:
         )
 
         profile_columns = {
-            str(row["name"])
-            for row in self._conn.execute("PRAGMA table_info(profiles)").fetchall()
+            str(row["name"]) for row in self._conn.execute("PRAGMA table_info(profiles)").fetchall()
         }
         profile_additions = {
             "actor_id": "TEXT NOT NULL DEFAULT ''",
@@ -1562,7 +1565,7 @@ class Store:
                 "locked": locked,
             }
 
-        if board in {"ca", "custody"}:
+        if board in SYSTEM_LOCKED_TOPICS - {"guest"}:
             return result((), (), version=0, updated=None, locked=True)
         if board == "guest":
             return result(GUEST_ANONYMOUS, (), version=0, updated=None, locked=True)
@@ -1572,6 +1575,8 @@ class Store:
                 (board,),
             ).fetchone()
         if row is None:
+            if board in self.cfg.certificate_only_topic_set:
+                return result((), (), version=0, updated=None, locked=False)
             return result(DEFAULT_ANONYMOUS, DEFAULT_SIGNED, version=0, updated=None, locked=False)
         return result(
             json.loads(str(row["anonymous"])),
@@ -1588,7 +1593,7 @@ class Store:
         signed: tuple[str, ...] | None,
         version: int,
     ) -> dict[str, Any]:
-        if board in {"ca", "custody", "guest"}:
+        if board in SYSTEM_LOCKED_TOPICS:
             raise StoreError(f"/{board} policy is system-managed", 403)
         if not valid_board_name(board):
             raise StoreError(f"invalid board name: {board!r}", 400)
@@ -2321,6 +2326,7 @@ class Store:
                 "author": identity,
                 "actor": identity,
                 "actor_is_author": post.actor_id == post.author_id,
+                "blue_verified": False,
             }
         if post.system:
             return {
@@ -2332,6 +2338,7 @@ class Store:
                 "basis": "server-managed-system-state",
                 "author": None,
                 "actor": None,
+                "blue_verified": False,
             }
         if not post.signed:
             return {
@@ -2343,10 +2350,15 @@ class Store:
                 "basis": "anonymous-policy",
                 "author": None,
                 "actor": None,
+                "blue_verified": False,
             }
 
-        author = self.certification(post.author_id or "")
+        author_id = post.author_id or ""
+        author = self.certification(author_id)
         actor = self.certification(post.actor_id or "")
+        blue_verified = "badge.blue" in self.permissions_for_scope(
+            author_id, f"account:{author_id}"
+        )
         certified = bool(actor["certified"])
         never_certified = actor.get("status") == "none"
         return {
@@ -2369,6 +2381,7 @@ class Store:
             "author": author,
             "actor": actor,
             "actor_is_author": post.actor_id == post.author_id,
+            "blue_verified": blue_verified,
         }
 
     def create_custody_identity(self, name: str) -> dict[str, Any]:
@@ -3743,9 +3756,12 @@ class Store:
         return post
 
     def _prune_empty_boards(self) -> None:
+        protected = sorted(PERSISTENT_TOPICS | self.cfg.certificate_only_topic_set)
+        placeholders = ",".join("?" for _ in protected)
         self._conn.execute(
-            "DELETE FROM boards WHERE name NOT IN ('main', 'meta', 'guest', 'custody', 'ca')"
-            " AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.board = boards.name)"
+            f"DELETE FROM boards WHERE name NOT IN ({placeholders})"
+            " AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.board = boards.name)",
+            protected,
         )
 
     def comment_count(self, post_id: int) -> int:
@@ -5625,7 +5641,9 @@ class Store:
             child_scope = concrete_scope(scope, child.subject_id)
             parent_actions = Store._certificate_actions(parent, child_scope)
             if "cert.issue" not in parent_actions:
-                raise StoreError(f"issuer cannot issue for scope {child_scope}", 403)
+                raise StoreError(
+                    f"issuer cannot issue for scope {child_scope}: missing cert.issue", 403
+                )
             if not set(child_actions).issubset(parent_actions):
                 raise StoreError(
                     f"child grant exceeds issuer grant for scope {child_scope}",
