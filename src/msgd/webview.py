@@ -6,8 +6,8 @@ choose how already-public Markdown is presented to a browser.
 
 from __future__ import annotations
 
-from html import escape
 import re
+from html import escape
 from urllib.parse import quote, urlparse
 
 from markdown_it import MarkdownIt
@@ -32,7 +32,7 @@ HTML_CSP = (
 _INTERNAL_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_:/.(])"
     r"(/(?:[A-Za-z0-9_@.~%+-]+)(?:/[A-Za-z0-9_@.~%+-]+)*"
-    r"(?:\\?[^\\s|<>]*)?)"
+    r"(?:\?[^\s|<>]*)?)"
 )
 
 
@@ -53,7 +53,7 @@ def _link_internal_paths(markdown: str) -> str:
                 fence_marker = ""
             lines.append(line)
             continue
-        if fenced or line.startswith(("    ", "\\t")):
+        if fenced or line.startswith(("    ", "\t")):
             lines.append(line)
             continue
 
