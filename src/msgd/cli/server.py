@@ -4,8 +4,8 @@ import argparse
 import signal
 import sys
 import threading
-from pathlib import Path
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from msgd import __version__
