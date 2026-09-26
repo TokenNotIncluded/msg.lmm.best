@@ -15,8 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from msgd.config import Config
-from msgd.ctl import (
+from msgd.cli.control import (
     Api,
     ControlError,
     _parse_home_policies,
@@ -28,6 +27,7 @@ from msgd.ctl import (
     revoke,
     set_policy,
 )
+from msgd.config import Config
 from msgd.server import build_server
 
 

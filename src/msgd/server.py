@@ -13,12 +13,15 @@ import sys
 import time
 from email.parser import BytesParser
 from email.policy import default as email_policy
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from msgd import __version__
 from msgd.analytics import Engagement
+from msgd.commerce import CommerceService
 from msgd.config import Config
 from msgd.crypto import (
     ACTIONS,
@@ -28,6 +31,8 @@ from msgd.crypto import (
     curve25519_public_key,
     make_certificate,
     normalize_file_manifest,
+    normalize_grant_scope,
+    parse_certificate,
     payload_info,
     public_identity,
     request_payload,
@@ -85,9 +90,19 @@ from msgd.store import (
     valid_author_id,
     valid_board_name,
 )
+from msgd.templates import TopicTemplateService
 from msgd.webhooks import WebhookService, normalize_events, validate_webhook_url
 from msgd.websites import WebSiteService
 from msgd.websub import WebSubService
+from msgd.webview import (
+    HTML_CSP,
+    VIEW_COOKIE,
+    VIEW_COOKIE_MAX_AGE,
+    is_browser_user_agent,
+    render_markdown_html,
+    render_view_prompt,
+    safe_return_path,
+)
 
 Params = dict[str, list[str]]
 Uploads = tuple[FileInput, ...]
@@ -151,6 +166,8 @@ class Board:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.store = Store(cfg)
+        self.templates = TopicTemplateService(cfg)
+        self.commerce = CommerceService(cfg, self.store, self.templates)
         self.exchange = ExchangeService(cfg, self.store)
         self.repos = RepoService(cfg)
         self.web = WebSiteService(cfg, self.store)
@@ -198,6 +215,8 @@ class MsgServer(ThreadingHTTPServer):
         self.board.engagement.close()
         self.board.exchange.close()
         self.board.ssh_keys.close()
+        self.board.commerce.close()
+        self.board.templates.close()
         super().server_close()
 
 
@@ -221,6 +240,30 @@ class Handler(BaseHTTPRequestHandler):
                 return value.strip()
         return self.client_address[0] if self.client_address else "unknown"
 
+    def _browser_view_mode(self) -> str | None:
+        if not is_browser_user_agent(self.headers.get("User-Agent") or ""):
+            return None
+        cookies = SimpleCookie()
+        try:
+            cookies.load(self.headers.get("Cookie") or "")
+        except CookieError:
+            return "ask"
+        value = cookies.get(VIEW_COOKIE)
+        if value is not None and value.value in {"markdown", "html"}:
+            return value.value
+        return "ask"
+
+    def _is_markdown_response(self, body: str | bytes, content_type: str) -> bool:
+        if not isinstance(body, str) or self.command not in {"GET", "HEAD"}:
+            return False
+        path = urlparse(self.path).path
+        if path.endswith("/raw"):
+            return False
+        media_type = content_type.split(";", 1)[0].strip().casefold()
+        if media_type == "text/markdown":
+            return True
+        return media_type == "text/plain" and body.lstrip().startswith("#")
+
     def _send(
         self,
         status: int,
@@ -229,9 +272,9 @@ class Handler(BaseHTTPRequestHandler):
         content_type: str = "text/plain; charset=utf-8",
         extra_headers: dict[str, str] | None = None,
     ) -> None:
-        payload = body.encode("utf-8") if isinstance(body, str) else body
         capture = getattr(self, "_path_get_capture", None)
         if capture is not None:
+            payload = body.encode("utf-8") if isinstance(body, str) else body
             capture.update(
                 {
                     "status": status,
@@ -241,6 +284,35 @@ class Handler(BaseHTTPRequestHandler):
                 }
             )
             return
+
+        response_headers = dict(extra_headers or {})
+        if self._is_markdown_response(body, content_type):
+            mode = self._browser_view_mode()
+            if mode is not None:
+                vary = response_headers.get("Vary")
+                response_headers["Vary"] = (
+                    f"{vary}, User-Agent, Cookie" if vary else "User-Agent, Cookie"
+                )
+                if mode == "ask":
+                    body = render_view_prompt(
+                        site_name=self.board.cfg.site_name,
+                        current_path=self.path,
+                    )
+                    content_type = "text/html; charset=utf-8"
+                    response_headers.setdefault("Content-Security-Policy", HTML_CSP)
+                elif mode == "html":
+                    assert isinstance(body, str)
+                    body = render_markdown_html(
+                        body,
+                        site_name=self.board.cfg.site_name,
+                        current_path=self.path,
+                    )
+                    content_type = "text/html; charset=utf-8"
+                    response_headers.setdefault("Content-Security-Policy", HTML_CSP)
+                else:
+                    content_type = "text/markdown; charset=utf-8"
+
+        payload = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
@@ -255,7 +327,7 @@ class Handler(BaseHTTPRequestHandler):
             '</rules>; rel="help", '
             '</rss.xml>; rel="alternate"; type="application/rss+xml"; title="RSS"',
         )
-        for key, value in (extra_headers or {}).items():
+        for key, value in response_headers.items():
             self.send_header(key, value)
         self.end_headers()
         if self.command != "HEAD":
@@ -313,6 +385,47 @@ class Handler(BaseHTTPRequestHandler):
             content_type="application/json; charset=utf-8",
         )
 
+    def _topic_post_content(
+        self,
+        board: str,
+        reply_to: int | None,
+        params: Params,
+    ) -> tuple[str, str, int | None]:
+        template = self.board.templates.active_for(board, reply_to=reply_to)
+        raw_fields = _param(params, "fields")
+        if template is None:
+            if raw_fields is not None:
+                raise StoreError(f"/{board} has no active template for this post", 400)
+            return _required(params, "text"), "", None
+        if raw_fields is None:
+            raise StoreError(
+                f"/{board} requires structured fields",
+                400,
+                f"/{board}/template",
+            )
+        try:
+            values = json.loads(raw_fields)
+        except json.JSONDecodeError as exc:
+            raise StoreError("fields must be a JSON object", 400) from exc
+        normalized = self.board.templates.normalize_fields(
+            board,
+            values,
+            reply_to=reply_to,
+        )
+        assert normalized is not None
+        body, _values, template_version, derived_title = normalized
+        requested_version = _optional_positive_int(params, "template_version")
+        if requested_version is not None and requested_version != template_version:
+            raise StoreError(
+                f"template changed: current version is {template_version}",
+                409,
+                f"/{board}/template",
+            )
+        explicit_title = _param(params, "title")
+        if derived_title and explicit_title is not None and explicit_title != derived_title:
+            raise StoreError("title is derived from the topic template", 400)
+        return body, derived_title, template_version
+
     def _write_client_metadata(self, params: Params) -> dict[str, str]:
         """Return advisory transport metadata; never use it for authorization."""
         client = (_param(params, "client") or "").strip().casefold()
@@ -325,6 +438,31 @@ class Handler(BaseHTTPRequestHandler):
 
     def _error(self, status: int, message: str, hint: str = "") -> None:
         self._send(status, render_error(status, message, hint))
+
+    def _view_preference(self, method: str, params: Params) -> None:
+        if method not in {"GET", "HEAD"}:
+            self._send(
+                405,
+                render_error(405, "view preference is read-only"),
+                extra_headers={"Allow": "GET, HEAD"},
+            )
+            return
+        mode = (_param(params, "mode") or "").casefold()
+        if mode not in {"markdown", "html"}:
+            raise StoreError("mode must be markdown or html", 400)
+        target = safe_return_path(_param(params, "next"))
+        cookie = (
+            f"{VIEW_COOKIE}={mode}; Path=/; Max-Age={VIEW_COOKIE_MAX_AGE}; HttpOnly; SameSite=Lax"
+        )
+        self._send(
+            303,
+            b"",
+            extra_headers={
+                "Location": target,
+                "Set-Cookie": cookie,
+                "Vary": "User-Agent, Cookie",
+            },
+        )
 
     def _limited(self, write: bool) -> bool:
         limiter = self.board.writes if write else self.board.reads
@@ -473,6 +611,38 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=80)
         uploads: Uploads = ()
 
+        # Waffo signs the exact raw JSON body. Handle this endpoint before
+        # generic POST parsing so signature verification never sees re-encoded JSON.
+        if path == "/_payment/waffo":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "Waffo webhook requires POST"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self._error(400, "bad Content-Length")
+                return
+            if length < 0 or length > min(self.board.cfg.max_request_bytes, 1_048_576):
+                self._error(413, "webhook request too large")
+                return
+            raw = self.rfile.read(length) if length else b""
+            try:
+                result = self.board.commerce.handle_waffo_webhook(
+                    raw,
+                    self.headers.get("X-Waffo-Signature") or "",
+                )
+                self._json(200, result)
+            except StoreError as exc:
+                self._error(exc.status, str(exc), exc.hint)
+            except Exception as exc:
+                log("error", "unhandled Waffo webhook exception", error=repr(exc))
+                self._error(500, "internal payment error")
+            return
+
         if self.board.repos.is_transport_path(path):
             try:
                 self._git_transport(method, path, parsed.query)
@@ -536,6 +706,10 @@ class Handler(BaseHTTPRequestHandler):
     def _route(self, method: str, path: str, params: Params, uploads: Uploads) -> None:
         segments = [segment for segment in path.split("/") if segment]
         head = segments[0] if segments else ""
+
+        if head == "_view":
+            self._view_preference(method, params)
+            return
 
         if head in {"rules", "_rules", "_help", "llms.txt"}:
             if head == "rules" and len(segments) == 2:
@@ -798,6 +972,53 @@ class Handler(BaseHTTPRequestHandler):
         if head == "_policy":
             self._policy(params)
             return
+        if head == "_template":
+            self._template(params, method)
+            return
+        if head == "checkout":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "checkout requires signed POST"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            if self._limited(True):
+                return
+            self._checkout(params)
+            return
+        if head == "balance":
+            if method != "POST":
+                self._send(
+                    405,
+                    render_error(405, "balance requires signed POST"),
+                    extra_headers={"Allow": "POST"},
+                )
+                return
+            if self._limited(False):
+                return
+            self._balance(params)
+            return
+        if head in {"privacy", "terms"}:
+            if method not in {"GET", "HEAD"}:
+                self._send(
+                    405,
+                    render_error(405, f"/{head} is read-only"),
+                    extra_headers={"Allow": "GET, HEAD"},
+                )
+                return
+            source = (
+                self.board.cfg.privacy_policy_file
+                if head == "privacy"
+                else self.board.cfg.terms_file
+            )
+            try:
+                text = Path(source).read_text(encoding="utf-8")
+            except OSError:
+                self._error(503, f"{head} document is not configured")
+            else:
+                self._send(200, text, content_type="text/markdown; charset=utf-8")
+            return
         if head == "key":
             if len(segments) != 2 or not valid_author_id(segments[1]):
                 self._error(404, "invalid key id")
@@ -1048,7 +1269,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(
                     404,
                     "invalid profile path",
-                    "try /@NAME, /@NAME/pubkey, /@NAME/w/, or /@NAME/keystore/ENTRY",
+                    "try /@NAME, /@NAME/pubkey, /@NAME/profile-actor-key, "
+                    "/@NAME/w/, or /@NAME/keystore/ENTRY",
                 )
                 return
             if len(segments) == 3 and resource != "keystore":
@@ -1100,6 +1322,8 @@ class Handler(BaseHTTPRequestHandler):
                 "bio": "bio",
                 "claim-signature": "claim_signature",
                 "profile-signature": "profile_signature",
+                "profile-actor-id": "profile_actor_id",
+                "profile-actor-key": "profile_actor_key",
             }
             if resource in scalar_fields:
                 value = profile.get(scalar_fields[resource])
@@ -1280,6 +1504,22 @@ class Handler(BaseHTTPRequestHandler):
                 content_type="application/rss+xml; charset=utf-8",
                 extra_headers={"Link": self._feed_link_header(feed_path)},
             )
+            return
+        if len(segments) == 2 and segments[1] == "template":
+            if method not in {"GET", "HEAD"}:
+                self._send(
+                    405,
+                    render_error(
+                        405, "topic template is read-only here; use signed POST /_template"
+                    ),
+                    extra_headers={"Allow": "GET, HEAD"},
+                )
+                return
+            template = self.board.templates.get(head)
+            if template is None:
+                self._error(404, f"/{head} has no topic template")
+            else:
+                self._json(200, template)
             return
         if len(segments) == 2 and segments[1] == "post":
             if self._limited(True):
@@ -1538,6 +1778,7 @@ class Handler(BaseHTTPRequestHandler):
         action = _required(params, "action").strip().lower()
         identity_key = _required(params, "key")
         canonical_key, signer_id = public_identity(identity_key)
+        owner_id = _management_owner(self.board.store, signer_id, _param(params, "owner"))
         nonce = _required(params, "nonce").strip().lower()
         issued = _int_required(params, "issued")
         key_id = (_param(params, "id") or "").strip().lower()
@@ -1601,6 +1842,7 @@ class Handler(BaseHTTPRequestHandler):
             name=name,
             scopes=scopes,
             expires=expires,
+            owner_id=_owner_payload_id(signer_id, owner_id),
         )
         auth = signed_request(
             canonical_key,
@@ -1611,16 +1853,24 @@ class Handler(BaseHTTPRequestHandler):
             issued=issued,
         )
         self.board.store.consume_nonce(auth)
-        profile = self.board.store.profile_by_author(auth.signer_id)
+        capability = "ssh.list" if action == "ssh.list" else "ssh.manage"
+        _require_owner_capability(
+            self.board.store,
+            auth.signer_id,
+            owner_id,
+            "ssh",
+            capability,
+        )
+        profile = self.board.store.profile_by_author(owner_id)
         if profile is None:
             raise StoreError("SSH access requires a registered signed profile", 403)
 
         service = self.board.ssh_keys
         if action == "ssh.list":
-            result: object = service.list(auth.signer_id)
+            result: object = service.list(owner_id)
         elif action == "ssh.add":
             result = service.add(
-                owner_id=auth.signer_id,
+                owner_id=owner_id,
                 public_key=ssh_public_key,
                 name=name,
                 scopes=scopes or ("read",),
@@ -1628,13 +1878,13 @@ class Handler(BaseHTTPRequestHandler):
                 created_by=auth.signer_id,
             )
         elif action == "ssh.scopes":
-            result = service.set_scopes(auth.signer_id, key_id, scopes)
+            result = service.set_scopes(owner_id, key_id, scopes)
         elif action == "ssh.rename":
-            result = service.rename(auth.signer_id, key_id, name)
+            result = service.rename(owner_id, key_id, name)
         elif action == "ssh.expiry":
-            result = service.set_expiry(auth.signer_id, key_id, expires)
+            result = service.set_expiry(owner_id, key_id, expires)
         else:
-            result = service.revoke(auth.signer_id, key_id)
+            result = service.revoke(owner_id, key_id)
 
         self._json(
             200,
@@ -1642,7 +1892,8 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": 1,
                 "action": action,
                 "account": profile["name"],
-                "owner_id": auth.signer_id,
+                "owner_id": owner_id,
+                "actor_id": auth.signer_id,
                 "result": result,
             },
         )
@@ -1652,7 +1903,7 @@ class Handler(BaseHTTPRequestHandler):
         if uploads and action not in {"post.create", "post.edit"}:
             raise StoreError("file uploads are only valid for post.create/post.edit signing", 400)
         key = _required(params, "key")
-        canonical_key, signer_id = public_identity(key)
+        _canonical_key, signer_id = public_identity(key)
         store = self.board.store
 
         if action == "post.create":
@@ -1661,9 +1912,14 @@ class Handler(BaseHTTPRequestHandler):
                 raise StoreError("/ca is a system-managed audit topic; use /_csr", 403)
             if board == "custody":
                 raise StoreError("/custody writes use /custody/post", 403)
+            raw_body, derived_title, template_version = self._topic_post_content(
+                board,
+                reply_to,
+                params,
+            )
             body, title, name, _ = store.prepare_post(
-                body=_required(params, "text"),
-                title=_param(params, "title") or "",
+                body=raw_body,
+                title=derived_title or _param(params, "title") or "",
                 name=_signed_identity_name(_param(params, "name"), signer_id),
                 max_body_bytes=_body_limit(self.board.cfg, method),
             )
@@ -1687,6 +1943,7 @@ class Handler(BaseHTTPRequestHandler):
                 body=body,
                 files=manifest,
                 reply_to=reply_to,
+                template_version=template_version,
             )
             self._json(
                 200,
@@ -1694,6 +1951,7 @@ class Handler(BaseHTTPRequestHandler):
                     "signer_id": signer_id,
                     "nonce": nonce,
                     "issued": issued,
+                    "template_version": template_version,
                     "files": list(manifest),
                     **payload_info(payload),
                 },
@@ -1713,11 +1971,18 @@ class Handler(BaseHTTPRequestHandler):
                 raise StoreError("/ca is a system-managed audit topic", 403)
             version = post.sig_version + 1 if post.signed else 1
             if action == "post.edit":
+                raw_body, derived_title, template_version = self._topic_post_content(
+                    post.board,
+                    post.reply_to,
+                    params,
+                )
                 body, title, name, _ = store.prepare_post(
-                    body=_required(params, "text"),
-                    title=post.title
-                    if _param(params, "title") is None
-                    else _param(params, "title") or "",
+                    body=raw_body,
+                    title=(
+                        derived_title or post.title
+                        if _param(params, "title") is None
+                        else _param(params, "title") or ""
+                    ),
                     name=post.name
                     if signer_id != post.author_id or _param(params, "name") is None
                     else _param(params, "name") or "",
@@ -1741,6 +2006,7 @@ class Handler(BaseHTTPRequestHandler):
                     body=body,
                     files=manifest,
                     reply_to=post.reply_to,
+                    template_version=template_version,
                 )
             else:
                 reason = ""
@@ -1812,6 +2078,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action == "inbox.read":
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
             since, before, limit = _inbox_window(params, self.board.cfg)
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
@@ -1821,6 +2088,7 @@ class Handler(BaseHTTPRequestHandler):
                 version=1,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 since=since,
                 before=before,
                 limit=limit,
@@ -1829,6 +2097,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "nonce": nonce,
                     "issued": issued,
                     "since": since,
@@ -1840,6 +2109,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action.startswith("webhook."):
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
             webhook_id, webhook_url, webhook_events, webhook_enabled = _webhook_fields(
                 params,
                 action,
@@ -1852,6 +2122,7 @@ class Handler(BaseHTTPRequestHandler):
                 version=1,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 webhook_id=webhook_id,
                 webhook_url=webhook_url,
                 webhook_events=webhook_events,
@@ -1861,6 +2132,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "nonce": nonce,
                     "issued": issued,
                     "webhook_id": webhook_id or None,
@@ -1873,12 +2145,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action in {"keystore.put", "keystore.delete"}:
-            if store.profile_by_author(signer_id) is None:
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
+            profile = store.profile_by_author(owner_id)
+            if profile is None:
                 raise StoreError("keystore requires an established signed profile", 403)
             name = store.normalize_keystore_name(_required(params, "name"))
-            if action == "keystore.delete" and store.keystore_entry(signer_id, name) is None:
+            if action == "keystore.delete" and store.keystore_entry(owner_id, name) is None:
                 raise StoreError("keystore entry not found", 404)
-            version = store.keystore_version(signer_id, name) + 1
+            version = store.keystore_version(owner_id, name) + 1
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
             ciphertext = ""
@@ -1894,6 +2168,7 @@ class Handler(BaseHTTPRequestHandler):
                 version=version,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 keystore_name=name,
                 keystore_ciphertext=ciphertext,
                 keystore_sha256=digest,
@@ -1902,12 +2177,13 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "version": version,
                     "nonce": nonce,
                     "issued": issued,
                     "name": name,
                     "algorithm": "curve25519",
-                    "public_key": curve25519_public_key(canonical_key),
+                    "public_key": curve25519_public_key(str(profile["public_key"])),
                     "format": KEYSTORE_FORMAT,
                     "sha256": digest or None,
                     **payload_info(payload),
@@ -1916,9 +2192,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action in {"web.write", "web.delete"}:
-            if store.profile_by_author(signer_id) is None:
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
+            if store.profile_by_author(owner_id) is None:
                 raise StoreError("web hosting requires an established signed profile", 403)
-            if not self.board.web.allowed(signer_id, action):
+            if not self.board.web.allowed(signer_id, owner_id, action):
                 raise StoreError(f"certificate does not grant {action}", 403)
             web_path = self.board.web.normalize_path(_required(params, "path"))
             nonce = _param(params, "nonce") or secrets.token_hex(16)
@@ -1953,6 +2230,7 @@ class Handler(BaseHTTPRequestHandler):
                 version=1,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 web_path=web_path,
                 web_sha256=web_sha256,
                 web_bytes=web_bytes,
@@ -1962,6 +2240,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "version": 1,
                     "nonce": nonce,
                     "issued": issued,
@@ -1976,17 +2255,18 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action == "profile.update":
+            owner_id = _management_owner(store, signer_id, _param(params, "owner"))
             requested_name = _param(params, "name")
             if requested_name:
                 requested_claim = store.name_claim(requested_name)
-                if requested_claim is not None and str(requested_claim["author_id"]) != signer_id:
+                if requested_claim is not None and str(requested_claim["author_id"]) != owner_id:
                     raise StoreError(
                         f"name {requested_name!r} is already bound to public key "
                         f"{requested_claim['public_key']} "
                         f"(author_id {requested_claim['author_id']})",
                         409,
                     )
-            current = store.profile_by_author(signer_id)
+            current = store.profile_by_author(owner_id)
             if current is None:
                 raise StoreError(
                     "post with a signed name first to create a profile/name claim",
@@ -2000,10 +2280,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise StoreError("profile bio exceeds 4096 UTF-8 bytes", 413)
             name_key = store.normalize_identity_name(name)
             claim = store.name_claim(name_key)
-            if claim is None or str(claim["author_id"]) != signer_id:
-                raise StoreError("profile name must be claimed by this public key", 403)
+            if claim is None or str(claim["author_id"]) != owner_id:
+                raise StoreError("profile name must be claimed by target identity", 403)
             name = str(claim["display_name"])
-            version = store.profile_version(signer_id) + 1
+            version = store.profile_version(owner_id) + 1
             nonce = _param(params, "nonce") or secrets.token_hex(16)
             issued = _int_required(params, "issued", int(time.time()))
             payload = request_payload(
@@ -2012,14 +2292,16 @@ class Handler(BaseHTTPRequestHandler):
                 version=version,
                 nonce=nonce,
                 issued=issued,
+                owner_id=_owner_payload_id(signer_id, owner_id),
                 profile_name=name,
                 profile_bio=bio,
-                profile_public_key=canonical_key,
+                profile_public_key=str(current["public_key"]),
             )
             self._json(
                 200,
                 {
                     "signer_id": signer_id,
+                    "owner_id": owner_id,
                     "version": version,
                     "nonce": nonce,
                     "issued": issued,
@@ -2109,6 +2391,85 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"signer_id": signer_id, "version": version, **payload_info(payload)})
             return
 
+        if action == "store.buy":
+            product_id = _int_required(params, "id")
+            product = store.get_post(product_id)
+            if product is None or product.board != "store" or product.reply_to is not None:
+                raise StoreError("store product not found", 404)
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+                post_id=product_id,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "nonce": nonce,
+                    "issued": issued,
+                    "product": product_id,
+                    **payload_info(payload),
+                },
+            )
+            return
+
+        if action == "balance.read":
+            nonce = _param(params, "nonce") or secrets.token_hex(16)
+            issued = _int_required(params, "issued", int(time.time()))
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=1,
+                nonce=nonce,
+                issued=issued,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "nonce": nonce,
+                    "issued": issued,
+                    **payload_info(payload),
+                },
+            )
+            return
+
+        if action == "topic.template":
+            board = _required(params, "board")
+            if board != board.lower() or not valid_board_name(board):
+                raise StoreError("invalid lowercase topic name", 400)
+            raw = _required(params, "template")
+            try:
+                normalized = self.board.templates.normalize_schema(json.loads(raw))
+            except json.JSONDecodeError as exc:
+                raise StoreError("template must be JSON", 400) from exc
+            current = self.board.templates.get(board)
+            version = 1 if current is None else int(current["version"]) + 1
+            encoded = canonical_json(normalized)
+            payload = request_payload(
+                action=action,
+                signer_id=signer_id,
+                version=version,
+                board=board,
+                topic_template=encoded,
+            )
+            self._json(
+                200,
+                {
+                    "signer_id": signer_id,
+                    "version": version,
+                    "board": board,
+                    "template": normalized,
+                    **payload_info(payload),
+                },
+            )
+            return
+
         if action == "cert.revoke":
             serial = _required(params, "serial")
             reason = _param(params, "reason") or ""
@@ -2150,8 +2511,18 @@ class Handler(BaseHTTPRequestHandler):
                 grants = _grants(_required(params, "grants"))
                 delegate = _truthy(_param(params, "delegate"))
 
-            not_before = _int_required(params, "not_before", int(time.time()) - 60)
-            not_after = _int_required(params, "not_after", int(time.time()) + 365 * 86400)
+            now = int(time.time())
+            default_not_before = now - 60
+            default_not_after = now + 365 * 86400
+            if issuer_serial != "root":
+                parent_row = store.certificate(issuer_serial)
+                if parent_row is None:
+                    raise StoreError("issuer certificate not found", 404)
+                parent = parse_certificate(str(parent_row["body"]))
+                default_not_before = max(default_not_before, parent.not_before)
+                default_not_after = min(default_not_after, parent.not_after)
+            not_before = _int_required(params, "not_before", default_not_before)
+            not_after = _int_required(params, "not_after", default_not_after)
             cert = make_certificate(
                 serial=_param(params, "serial") or secrets.token_hex(16),
                 issuer_serial=issuer_serial,
@@ -2422,6 +2793,113 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("certificate does not grant topic.policy", 403)
         self._json(200, self.board.store.set_policy(board, anonymous, signed, version))
 
+    def _checkout(self, params: Params) -> None:
+        product_id = _int_required(params, "id")
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        nonce = _required(params, "nonce")
+        issued = _int_required(params, "issued")
+        canonical_key, signer_id = public_identity(key)
+        payload = request_payload(
+            action="store.buy",
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+            post_id=product_id,
+        )
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        self.board.store.consume_nonce(auth)
+        result = self.board.commerce.create_checkout(
+            buyer_key=canonical_key,
+            buyer_id=auth.signer_id,
+            product_id=product_id,
+        )
+        self._json(201, result)
+
+    def _balance(self, params: Params) -> None:
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        nonce = _required(params, "nonce")
+        issued = _int_required(params, "issued")
+        canonical_key, signer_id = public_identity(key)
+        payload = request_payload(
+            action="balance.read",
+            signer_id=signer_id,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        auth = signed_request(
+            canonical_key,
+            sig,
+            payload,
+            version=1,
+            nonce=nonce,
+            issued=issued,
+        )
+        self.board.store.consume_nonce(auth)
+        self._json(200, self.board.commerce.balance(auth.signer_id))
+
+    def _template(self, params: Params, method: str) -> None:
+        board = _required(params, "board")
+        if board != board.lower() or not valid_board_name(board):
+            raise StoreError("invalid lowercase topic name", 400)
+        if method in {"GET", "HEAD"} and _param(params, "sig") is None:
+            template = self.board.templates.get(board)
+            if template is None:
+                self._error(404, f"/{board} has no topic template")
+            else:
+                self._json(200, template)
+            return
+        if method != "POST":
+            self._send(
+                405,
+                render_error(405, "template updates require signed POST"),
+                extra_headers={"Allow": "GET, HEAD, POST"},
+            )
+            return
+        if self._limited(True):
+            return
+        raw = _required(params, "template")
+        try:
+            normalized = self.board.templates.normalize_schema(json.loads(raw))
+        except json.JSONDecodeError as exc:
+            raise StoreError("template must be JSON", 400) from exc
+        current = self.board.templates.get(board)
+        version = 1 if current is None else int(current["version"]) + 1
+        key = _required(params, "key")
+        sig = _required(params, "sig")
+        canonical_key, signer_id = public_identity(key)
+        encoded = canonical_json(normalized)
+        payload = request_payload(
+            action="topic.template",
+            signer_id=signer_id,
+            version=version,
+            board=board,
+            topic_template=encoded,
+        )
+        auth = signed_request(canonical_key, sig, payload, version=version)
+        if not self.board.store.signed_allowed(auth.signer_id, board, "topic.template"):
+            raise StoreError("certificate does not grant topic.template", 403)
+        self.board.store.ensure_board(board)
+        self._json(
+            200,
+            self.board.templates.set(
+                board,
+                normalized,
+                version=version,
+                updated_by=auth.signer_id,
+            ),
+        )
+
     def _like(self, params: Params) -> None:
         requested = (_param(params, "action") or "like").lower()
         if requested not in {"like", "unlike"}:
@@ -2480,6 +2958,7 @@ class Handler(BaseHTTPRequestHandler):
         key = _required(params, "key")
         sig = _required(params, "sig")
         canonical_key, signer_id = public_identity(key)
+        owner_id = _management_owner(self.board.store, signer_id, _param(params, "owner"))
         nonce = _required(params, "nonce")
         issued = _int_required(params, "issued")
         since, before, limit = _inbox_window(params, self.board.cfg)
@@ -2489,6 +2968,7 @@ class Handler(BaseHTTPRequestHandler):
             version=1,
             nonce=nonce,
             issued=issued,
+            owner_id=_owner_payload_id(signer_id, owner_id),
             since=since,
             before=before,
             limit=limit,
@@ -2501,15 +2981,22 @@ class Handler(BaseHTTPRequestHandler):
             nonce=nonce,
             issued=issued,
         )
+        _require_owner_capability(
+            self.board.store,
+            auth.signer_id,
+            owner_id,
+            "mailbox",
+            "inbox.read",
+        )
         self.board.store.consume_nonce(auth)
         events = self.board.store.inbox(
-            auth.signer_id,
+            owner_id,
             since=since,
             before=before,
             limit=limit,
         )
         receipts = self.board.exchange.receipts_for(
-            auth.signer_id,
+            owner_id,
             [post.id for post, _kinds in events],
         )
         if (_param(params, "format") or "").lower() in {"json", "ndjson"}:
@@ -2536,7 +3023,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(
             200,
             render_inbox(
-                auth.signer_id,
+                owner_id,
                 events,
                 latest_id=self.board.store.stats()["latest_id"],
                 authentications={
@@ -2605,11 +3092,19 @@ class Handler(BaseHTTPRequestHandler):
         )
         self.board.store.consume_nonce(auth)
         service = self.board.exchange
+        owner_id = str(meta.get("owner_id") or auth.signer_id)
 
         if action == "outbox.read":
+            _require_owner_capability(
+                self.board.store,
+                auth.signer_id,
+                owner_id,
+                "mailbox",
+                "outbox.read",
+            )
             limit = int(meta["limit"])
             posts = self.board.store.list_posts(
-                author_id=auth.signer_id,
+                author_id=owner_id,
                 since=meta["since"],
                 before=meta["before"],
                 limit=limit,
@@ -2643,38 +3138,53 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        if action == "state.read":
-            self._json(200, service.state_read(auth.signer_id, meta["name"]))
-            return
-        if action == "state.write":
-            self._json(
-                200,
-                service.state_write(
-                    auth.signer_id,
-                    str(meta["name"]),
-                    str(meta["value"]),
-                ),
+        if action in {"state.read", "state.write", "state.delete"}:
+            _require_owner_capability(
+                self.board.store,
+                auth.signer_id,
+                owner_id,
+                "state",
+                action,
             )
-            return
-        if action == "state.delete":
-            self._json(200, service.state_delete(auth.signer_id, str(meta["name"])))
+            if action == "state.read":
+                self._json(200, service.state_read(owner_id, meta["name"]))
+                return
+            if action == "state.write":
+                self._json(
+                    200,
+                    service.state_write(
+                        owner_id,
+                        str(meta["name"]),
+                        str(meta["value"]),
+                    ),
+                )
+                return
+            self._json(200, service.state_delete(owner_id, str(meta["name"])))
             return
 
-        if action == "watch.add":
-            self._json(
-                201,
-                service.watch_add(
-                    auth.signer_id,
-                    str(meta["kind"]),
-                    str(meta["target"]),
-                ),
+        if action in {"watch.add", "watch.delete", "watch.list"}:
+            capability = "watch.read" if action == "watch.list" else "watch.manage"
+            _require_owner_capability(
+                self.board.store,
+                auth.signer_id,
+                owner_id,
+                "watch",
+                capability,
             )
-            return
-        if action == "watch.delete":
-            self._json(200, service.watch_delete(auth.signer_id, str(meta["id"])))
-            return
-        if action == "watch.list":
-            self._json(200, service.watch_list(auth.signer_id))
+            if action == "watch.add":
+                self._json(
+                    201,
+                    service.watch_add(
+                        owner_id,
+                        str(meta["kind"]),
+                        str(meta["target"]),
+                    ),
+                )
+                return
+            if action == "watch.delete":
+                self._json(200, service.watch_delete(owner_id, str(meta["id"])))
+                return
+            self._json(200, service.watch_list(owner_id))
             return
 
         if action in {"inbox.ack", "post.ack"}:
@@ -2734,6 +3244,7 @@ class Handler(BaseHTTPRequestHandler):
         nonce = _required(params, "nonce")
         issued = _int_required(params, "issued")
         canonical_key, signer_id = public_identity(key)
+        owner_id = _management_owner(self.board.store, signer_id, _param(params, "owner"))
         webhook_id, webhook_url, webhook_events, webhook_enabled = _webhook_fields(
             params,
             action,
@@ -2744,6 +3255,7 @@ class Handler(BaseHTTPRequestHandler):
             version=1,
             nonce=nonce,
             issued=issued,
+            owner_id=_owner_payload_id(signer_id, owner_id),
             webhook_id=webhook_id,
             webhook_url=webhook_url,
             webhook_events=webhook_events,
@@ -2758,19 +3270,27 @@ class Handler(BaseHTTPRequestHandler):
             issued=issued,
         )
         self.board.store.consume_nonce(auth)
+        capability = "webhook.list" if action == "webhook.list" else "webhook.manage"
+        _require_owner_capability(
+            self.board.store,
+            auth.signer_id,
+            owner_id,
+            "webhook",
+            capability,
+        )
 
         service = self.board.webhooks
         if action == "webhook.create":
-            self._json(201, service.create(auth.signer_id, webhook_url, webhook_events))
+            self._json(201, service.create(owner_id, webhook_url, webhook_events))
             return
         if action == "webhook.list":
-            self._json(200, service.list(auth.signer_id))
+            self._json(200, service.list(owner_id))
             return
         if action == "webhook.update":
             self._json(
                 200,
                 service.update(
-                    auth.signer_id,
+                    owner_id,
                     webhook_id,
                     url=webhook_url,
                     events=webhook_events,
@@ -2779,14 +3299,14 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if action == "webhook.delete":
-            service.delete(auth.signer_id, webhook_id)
-            self._json(200, {"ok": 1, "id": webhook_id})
+            service.delete(owner_id, webhook_id)
+            self._json(200, {"ok": 1, "id": webhook_id, "owner_id": owner_id})
             return
         if action == "webhook.rotate":
-            self._json(200, service.rotate(auth.signer_id, webhook_id))
+            self._json(200, service.rotate(owner_id, webhook_id))
             return
         if action == "webhook.test":
-            delivery_id = service.test(auth.signer_id, webhook_id)
+            delivery_id = service.test(owner_id, webhook_id)
             self._json(
                 202,
                 {
@@ -2794,6 +3314,7 @@ class Handler(BaseHTTPRequestHandler):
                     "event": "webhook.test",
                     "webhook_id": webhook_id,
                     "delivery_id": delivery_id,
+                    "owner_id": owner_id,
                 },
             )
             return
@@ -2810,7 +3331,9 @@ class Handler(BaseHTTPRequestHandler):
         version = _int_required(params, "version")
         canonical_key, signer_id = public_identity(key)
         store = self.board.store
-        if store.profile_by_author(signer_id) is None:
+        owner_id = _management_owner(store, signer_id, _param(params, "owner"))
+        profile = store.profile_by_author(owner_id)
+        if profile is None:
             raise StoreError("keystore requires an established signed profile", 403)
         name = store.normalize_keystore_name(_required(params, "name"))
         ciphertext = ""
@@ -2826,6 +3349,7 @@ class Handler(BaseHTTPRequestHandler):
             version=version,
             nonce=nonce,
             issued=issued,
+            owner_id=_owner_payload_id(signer_id, owner_id),
             keystore_name=name,
             keystore_ciphertext=ciphertext,
             keystore_sha256=digest,
@@ -2838,18 +3362,25 @@ class Handler(BaseHTTPRequestHandler):
             nonce=nonce,
             issued=issued,
         )
+        capability = "keystore.write" if action == "keystore.put" else "keystore.delete"
+        _require_owner_capability(store, auth.signer_id, owner_id, "keystore", capability)
         if action == "keystore.put":
             result = store.keystore_put(
                 auth=auth,
                 name=name,
                 ciphertext_b64=ciphertext,
                 expected_sha256=digest,
+                owner_id=owner_id,
             )
             result["algorithm"] = "curve25519"
-            result["public_key"] = curve25519_public_key(canonical_key)
+            result["public_key"] = curve25519_public_key(str(profile["public_key"]))
+            result["owner_id"] = owner_id
             self._json(200, result)
             return
-        self._json(200, store.keystore_delete(auth=auth, name=name))
+        self._json(
+            200,
+            store.keystore_delete(auth=auth, name=name, owner_id=owner_id),
+        )
 
     def _web(self, params: Params) -> None:
         action = _required(params, "action")
@@ -2865,10 +3396,11 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("web action version must be 1", 400)
 
         canonical_key, signer_id = public_identity(key)
-        profile = self.board.store.profile_by_author(signer_id)
+        owner_id = _management_owner(self.board.store, signer_id, _param(params, "owner"))
+        profile = self.board.store.profile_by_author(owner_id)
         if profile is None:
             raise StoreError("web hosting requires an established signed profile", 403)
-        if not self.board.web.allowed(signer_id, action):
+        if not self.board.web.allowed(signer_id, owner_id, action):
             raise StoreError(f"certificate does not grant {action}", 403)
 
         web_path = self.board.web.normalize_path(_required(params, "path"))
@@ -2908,6 +3440,7 @@ class Handler(BaseHTTPRequestHandler):
             version=version,
             nonce=nonce,
             issued=issued,
+            owner_id=_owner_payload_id(signer_id, owner_id),
             web_path=web_path,
             web_sha256=web_sha256,
             web_bytes=web_bytes,
@@ -2925,14 +3458,21 @@ class Handler(BaseHTTPRequestHandler):
         if action == "web.write":
             result = self.board.web.write(
                 auth=auth,
+                owner_id=owner_id,
                 path=web_path,
                 data=data,
                 content_type=web_content_type,
             )
         else:
-            result = self.board.web.delete(auth=auth, path=web_path)
+            result = self.board.web.delete(
+                auth=auth,
+                owner_id=owner_id,
+                path=web_path,
+            )
 
         result["owner"] = str(profile["name"])
+        result["owner_id"] = owner_id
+        result["actor_id"] = auth.signer_id
         result["url"] = f"/@{quote(str(profile['name']), safe='')}/w/{quote(web_path, safe='/')}"
         result.update(self._write_client_metadata(params))
         self._json(200, result)
@@ -2943,27 +3483,30 @@ class Handler(BaseHTTPRequestHandler):
         nonce = _required(params, "nonce")
         issued = _int_required(params, "issued")
         canonical_key, signer_id = public_identity(key)
-        current = self.board.store.profile_by_author(signer_id)
+        store = self.board.store
+        owner_id = _management_owner(store, signer_id, _param(params, "owner"))
+        current = store.profile_by_author(owner_id)
         if current is None:
             raise StoreError("profile/name claim not found; publish a signed post first", 404)
         name = _param(params, "name") or str(current["name"])
-        claim = self.board.store.name_claim(name)
-        if claim is None or str(claim["author_id"]) != signer_id:
-            raise StoreError("profile name must be claimed by this public key", 403)
+        claim = store.name_claim(name)
+        if claim is None or str(claim["author_id"]) != owner_id:
+            raise StoreError("profile name must be claimed by target identity", 403)
         name = str(claim["display_name"])
         bio = _param(params, "bio")
         if bio is None:
             bio = str(current["bio"])
-        version = self.board.store.profile_version(signer_id) + 1
+        version = store.profile_version(owner_id) + 1
         payload = request_payload(
             action="profile.update",
             signer_id=signer_id,
             version=version,
             nonce=nonce,
             issued=issued,
+            owner_id=_owner_payload_id(signer_id, owner_id),
             profile_name=name,
             profile_bio=bio,
-            profile_public_key=canonical_key,
+            profile_public_key=str(current["public_key"]),
         )
         auth = signed_request(
             canonical_key,
@@ -2973,14 +3516,22 @@ class Handler(BaseHTTPRequestHandler):
             nonce=nonce,
             issued=issued,
         )
+        _require_owner_capability(
+            store,
+            auth.signer_id,
+            owner_id,
+            "account",
+            "profile.update",
+        )
         info = payload_info(payload)
         self._json(
             200,
-            self.board.store.update_profile(
+            store.update_profile(
                 auth=auth,
                 name=name,
                 bio=bio,
                 payload_b64=info["payload_b64"],
+                owner_id=owner_id,
             ),
         )
 
@@ -4958,9 +5509,14 @@ class Handler(BaseHTTPRequestHandler):
             if signer_id is not None
             else (_param(params, "name") or "anonymous")
         )
+        raw_body, derived_title, template_version = self._topic_post_content(
+            board,
+            reply_to,
+            params,
+        )
         body, title, name, _ = store.prepare_post(
-            body=_required(params, "text"),
-            title=_param(params, "title") or "",
+            body=raw_body,
+            title=derived_title or _param(params, "title") or "",
             name=requested_name,
             max_body_bytes=_body_limit(self.board.cfg, method),
         )
@@ -4982,6 +5538,7 @@ class Handler(BaseHTTPRequestHandler):
                 body=body,
                 files=manifest,
                 reply_to=reply_to,
+                template_version=template_version,
             )
             auth = signed_request(
                 canonical_key,
@@ -5052,9 +5609,18 @@ class Handler(BaseHTTPRequestHandler):
             raise StoreError("/custody posts use /custody/edit", 403)
         if _param(params, "reply_to") is not None:
             raise StoreError("reply_to is immutable after creation", 400)
+        raw_body, derived_title, template_version = self._topic_post_content(
+            post.board,
+            post.reply_to,
+            params,
+        )
         body, title, name, _ = store.prepare_post(
-            body=_required(params, "text"),
-            title=post.title if _param(params, "title") is None else _param(params, "title") or "",
+            body=raw_body,
+            title=(
+                derived_title or post.title
+                if _param(params, "title") is None
+                else _param(params, "title") or ""
+            ),
             name=post.name if _param(params, "name") is None else _param(params, "name") or "",
             max_body_bytes=_body_limit(self.board.cfg, method),
         )
@@ -5092,6 +5658,7 @@ class Handler(BaseHTTPRequestHandler):
                 body=body,
                 files=manifest,
                 reply_to=post.reply_to,
+                template_version=template_version,
             )
             auth = signed_request(canonical_key, sig or "", payload, version=version)
             if not store.signed_allowed(
@@ -5311,7 +5878,24 @@ def _exchange_signing_spec(
         "issued",
         int(time.time()) if signing else None,
     )
+    managed_owner_actions = {
+        "outbox.read",
+        "state.read",
+        "state.write",
+        "state.delete",
+        "watch.add",
+        "watch.delete",
+        "watch.list",
+    }
+    owner_id = (
+        _management_owner(board.store, signer_id, _param(params, "owner"))
+        if action in managed_owner_actions
+        else signer_id
+    )
     common: dict[str, Any] = {"nonce": nonce, "issued": issued}
+    if action in managed_owner_actions:
+        common["owner_id"] = owner_id
+    payload_owner = _owner_payload_id(signer_id, owner_id)
 
     if action == "outbox.read":
         since, before, limit = _inbox_window(params, board.cfg)
@@ -5321,6 +5905,7 @@ def _exchange_signing_spec(
             version=1,
             nonce=nonce,
             issued=issued,
+            owner_id=payload_owner,
             since=since,
             before=before,
             limit=limit,
@@ -5340,6 +5925,7 @@ def _exchange_signing_spec(
             version=1,
             nonce=nonce,
             issued=issued,
+            owner_id=payload_owner,
             state_name=state_name,
             state_value=state_value,
         )
@@ -5368,6 +5954,7 @@ def _exchange_signing_spec(
             version=1,
             nonce=nonce,
             issued=issued,
+            owner_id=payload_owner,
             watch_id=watch_id,
             watch_kind=watch_kind,
             watch_target=watch_target,
@@ -5949,9 +6536,13 @@ def _optional_positive_int(params: Params, key: str) -> int | None:
 def _grant_manifest(
     grants: dict[str, tuple[str, ...]],
 ) -> tuple[dict[str, object], ...]:
-    return tuple(
-        {"topic": topic, "actions": list(actions)} for topic, actions in sorted(grants.items())
-    )
+    result: list[dict[str, object]] = []
+    for scope, actions in sorted(grants.items()):
+        if scope == "*" or valid_board_name(scope):
+            result.append({"topic": scope, "actions": list(actions)})
+        else:
+            result.append({"scope": normalize_grant_scope(scope), "actions": list(actions)})
+    return tuple(result)
 
 
 def _policy_mask(
@@ -6053,19 +6644,63 @@ def _grants(value: str) -> dict[str, tuple[str, ...]]:
         raise StoreError("grants must be a JSON array", 400)
     grants: dict[str, tuple[str, ...]] = {}
     for item in raw:
-        if not isinstance(item, dict) or not isinstance(item.get("topic"), str):
+        if not isinstance(item, dict):
             raise StoreError("invalid grant", 400)
+        has_topic = isinstance(item.get("topic"), str)
+        has_scope = isinstance(item.get("scope"), str)
+        if has_topic == has_scope:
+            raise StoreError("grant requires exactly one of topic or scope", 400)
         actions = item.get("actions")
         if not isinstance(actions, list) or not all(isinstance(x, str) for x in actions):
             raise StoreError("invalid grant actions", 400)
-        normalized = tuple(sorted(set(actions)))
-        invalid = set(normalized) - ACTIONS
+        normalized_actions = tuple(sorted(set(actions)))
+        invalid = set(normalized_actions) - ACTIONS
         if invalid:
             raise StoreError(f"unknown grant actions: {sorted(invalid)}", 400)
-        if item["topic"] != "*" and any(action.startswith("web.") for action in normalized):
-            raise StoreError("web grants require topic='*'", 400)
-        grants[item["topic"]] = normalized
+        try:
+            scope = str(item["topic"]) if has_topic else normalize_grant_scope(str(item["scope"]))
+            if has_topic:
+                normalize_grant_scope(scope, legacy_topic=True)
+        except SignatureError as exc:
+            raise StoreError(str(exc), 400) from exc
+        grants[scope] = normalized_actions
     return grants
+
+
+def _management_owner(store: Store, signer_id: str, raw: str | None) -> str:
+    if raw is None or not raw.strip() or raw.strip().lower() == "self":
+        return signer_id
+    value = raw.strip()
+    if value.startswith("@"):
+        value = value[1:]
+    if valid_author_id(value):
+        owner_id = value
+    else:
+        profile = store.profile_by_name(value)
+        if profile is None:
+            raise StoreError(f"target profile not found: {value}", 404)
+        owner_id = str(profile["author_id"])
+    if store.profile_by_author(owner_id) is None:
+        raise StoreError("target profile not found", 404)
+    return owner_id
+
+
+def _owner_payload_id(signer_id: str, owner_id: str) -> str | None:
+    return owner_id if owner_id != signer_id else None
+
+
+def _require_owner_capability(
+    store: Store,
+    signer_id: str,
+    owner_id: str,
+    resource: str,
+    action: str,
+) -> None:
+    if not store.owner_action_allowed(signer_id, owner_id, resource, action):
+        raise StoreError(
+            f"certificate does not grant {action} for {resource}:{owner_id}",
+            403,
+        )
 
 
 def _required(params: Params, key: str) -> str:

@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from msgd.config import Config
 from msgd.credentials import credential_path
 from msgd.crypto import (
     certificate_payload,
@@ -22,10 +23,6 @@ from msgd.crypto import (
     public_identity,
     request_payload,
 )
-
-DEFAULT_PRIVATE = "/etc/msg-lmm-best/root-ca.key"
-DEFAULT_PUBLIC = "/etc/msg-lmm-best/root-ca.pub"
-DEFAULT_API = "http://127.0.0.1:3111"
 
 
 def _load_private(path: str) -> Ed25519PrivateKey:
@@ -73,11 +70,11 @@ def _parse_grants(values: list[str]) -> dict[str, set[str]]:
     grants: dict[str, set[str]] = {}
     for value in values:
         if "=" not in value:
-            raise SystemExit("--grant must be TOPIC=action,action")
+            raise SystemExit("--grant must be TOPIC_OR_SCOPE=action,action")
         topic, actions_raw = value.split("=", 1)
         actions = {action.strip() for action in actions_raw.split(",") if action.strip()}
         if not topic or not actions:
-            raise SystemExit("--grant must include topic and actions")
+            raise SystemExit("--grant must include a topic/scope and actions")
         grants.setdefault(topic, set()).update(actions)
     return grants
 
@@ -196,12 +193,13 @@ def command_revoke(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    cfg = Config.load()
     parser = argparse.ArgumentParser(prog="msgd-cert")
     sub = parser.add_subparsers(dest="command", required=True)
 
     init = sub.add_parser("init-root", help="create the server root CA if absent")
-    init.add_argument("--private-key", default=DEFAULT_PRIVATE)
-    init.add_argument("--public-key", default=DEFAULT_PUBLIC)
+    init.add_argument("--private-key", default=cfg.root_private_key)
+    init.add_argument("--public-key", default=cfg.root_public_key)
     init.set_defaults(func=command_init)
 
     keygen = sub.add_parser("keygen", help="create an Ed25519 identity key")
@@ -212,21 +210,21 @@ def main(argv: list[str] | None = None) -> int:
     keygen.set_defaults(func=command_keygen)
 
     issue = sub.add_parser("issue", help="issue and optionally register a certificate")
-    issue.add_argument("--key", default=DEFAULT_PRIVATE)
+    issue.add_argument("--key", default=cfg.root_private_key)
     issue.add_argument("--issuer-serial", default="root")
     issue.add_argument("--subject-key", required=True)
     issue.add_argument("--grant", action="append", required=True)
     issue.add_argument("--delegate", action="store_true")
     issue.add_argument("--days", type=int, default=365)
     issue.add_argument("--serial", default=None)
-    issue.add_argument("--api", default=DEFAULT_API)
+    issue.add_argument("--api", default=cfg.local_api_url)
     issue.add_argument("--register", action=argparse.BooleanOptionalAction, default=True)
     issue.set_defaults(func=command_issue)
 
     revoke = sub.add_parser("revoke", help="revoke a certificate with its issuer key")
     revoke.add_argument("serial")
-    revoke.add_argument("--key", default=DEFAULT_PRIVATE)
-    revoke.add_argument("--api", default=DEFAULT_API)
+    revoke.add_argument("--key", default=cfg.root_private_key)
+    revoke.add_argument("--api", default=cfg.local_api_url)
     revoke.add_argument("--reason", default="")
     revoke.set_defaults(func=command_revoke)
 

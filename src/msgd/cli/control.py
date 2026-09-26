@@ -8,7 +8,7 @@ import json
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
@@ -16,7 +16,8 @@ from urllib.request import Request, urlopen
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from msgd.certcli import DEFAULT_API, DEFAULT_PRIVATE, _load_private, _public_b64, _sign_b64
+from msgd.cli.cert import _load_private, _public_b64, _sign_b64
+from msgd.config import Config
 from msgd.crypto import public_identity
 
 CSR_REF_RE = re.compile(r"csr=/_csr\?id=(\d+)")
@@ -30,8 +31,8 @@ class ControlError(RuntimeError):
 
 @dataclass
 class Api:
-    base: str = DEFAULT_API
-    timeout: int = 15
+    base: str = field(default_factory=lambda: Config.load().local_api_url)
+    timeout: int = field(default_factory=lambda: Config.load().internal_http_timeout_seconds)
 
     def _request(
         self,
@@ -533,6 +534,7 @@ def command_purge_post(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    cfg = Config.load()
     parser = argparse.ArgumentParser(
         prog="msgdctl",
         description="Operator and CA control commands for msg.lmm.best",
@@ -540,23 +542,23 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     status = sub.add_parser("status", help="show server, Root CA, and pending CSR status")
-    status.add_argument("--api", default=DEFAULT_API)
+    status.add_argument("--api", default=cfg.local_api_url)
     status.set_defaults(func=command_status)
 
     pending = sub.add_parser("pending", help="list pending certificate requests")
-    pending.add_argument("--api", default=DEFAULT_API)
+    pending.add_argument("--api", default=cfg.local_api_url)
     pending.add_argument("--limit", type=int, default=50)
     pending.set_defaults(func=command_pending)
 
     show = sub.add_parser("show", help="show a CSR; accepts CSR id or /ca audit post id")
     show.add_argument("reference")
-    show.add_argument("--api", default=DEFAULT_API)
+    show.add_argument("--api", default=cfg.local_api_url)
     show.set_defaults(func=command_show)
 
     approve_p = sub.add_parser("approve", help="approve a CSR or /ca request-post id")
     approve_p.add_argument("reference")
-    approve_p.add_argument("--api", default=DEFAULT_API)
-    approve_p.add_argument("--key", default=DEFAULT_PRIVATE)
+    approve_p.add_argument("--api", default=cfg.local_api_url)
+    approve_p.add_argument("--key", default=cfg.root_private_key)
     approve_p.add_argument("--issuer-serial", default="root")
     approve_p.add_argument("--grant", action="append", help="narrow grant: TOPIC=action,action")
     approve_p.add_argument("--delegate", action=argparse.BooleanOptionalAction, default=None)
@@ -565,26 +567,26 @@ def main(argv: list[str] | None = None) -> int:
 
     reject_p = sub.add_parser("reject", help="reject a CSR or /ca request-post id")
     reject_p.add_argument("reference")
-    reject_p.add_argument("--api", default=DEFAULT_API)
-    reject_p.add_argument("--key", default=DEFAULT_PRIVATE)
+    reject_p.add_argument("--api", default=cfg.local_api_url)
+    reject_p.add_argument("--key", default=cfg.root_private_key)
     reject_p.add_argument("--reason", default="")
     reject_p.set_defaults(func=command_reject)
 
     certs = sub.add_parser("certs", help="list issued certificates")
-    certs.add_argument("--api", default=DEFAULT_API)
+    certs.add_argument("--api", default=cfg.local_api_url)
     certs.add_argument("--issuer", default="")
     certs.add_argument("--limit", type=int, default=50)
     certs.set_defaults(func=command_certs)
 
     revoke_p = sub.add_parser("revoke", help="revoke a certificate")
     revoke_p.add_argument("serial")
-    revoke_p.add_argument("--api", default=DEFAULT_API)
-    revoke_p.add_argument("--key", default=DEFAULT_PRIVATE)
+    revoke_p.add_argument("--api", default=cfg.local_api_url)
+    revoke_p.add_argument("--key", default=cfg.root_private_key)
     revoke_p.add_argument("--reason", default="")
     revoke_p.set_defaults(func=command_revoke)
 
     policies = sub.add_parser("policies", help="show all topic permission masks")
-    policies.add_argument("--api", default=DEFAULT_API)
+    policies.add_argument("--api", default=cfg.local_api_url)
     policies.set_defaults(func=command_policies)
 
     policy_set = sub.add_parser("policy-set", help="set topic base permission masks")
@@ -601,16 +603,16 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         help="signed base mask using bits 1,2,8",
     )
-    policy_set.add_argument("--api", default=DEFAULT_API)
-    policy_set.add_argument("--key", default=DEFAULT_PRIVATE)
+    policy_set.add_argument("--api", default=cfg.local_api_url)
+    policy_set.add_argument("--key", default=cfg.root_private_key)
     policy_set.set_defaults(func=command_policy_set)
 
     delete = sub.add_parser(
         "delete-post", help="archive a post; content is retained until capacity reclamation"
     )
     delete.add_argument("post_id", type=int)
-    delete.add_argument("--api", default=DEFAULT_API)
-    delete.add_argument("--key", default=DEFAULT_PRIVATE)
+    delete.add_argument("--api", default=cfg.local_api_url)
+    delete.add_argument("--key", default=cfg.root_private_key)
     delete.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
     delete.set_defaults(func=command_delete_post)
 
@@ -618,8 +620,8 @@ def main(argv: list[str] | None = None) -> int:
         "purge-post", help="irreversibly remove a post, for credential leaks or similar emergencies"
     )
     purge.add_argument("post_id", type=int)
-    purge.add_argument("--api", default=DEFAULT_API)
-    purge.add_argument("--key", default=DEFAULT_PRIVATE)
+    purge.add_argument("--api", default=cfg.local_api_url)
+    purge.add_argument("--key", default=cfg.root_private_key)
     purge.add_argument("--reason", required=True)
     purge.add_argument("--yes", action="store_true")
     purge.set_defaults(func=command_purge_post)

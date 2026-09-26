@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from msgd.certcli import main as cert_main
+from msgd.cli.cert import main as cert_main
 from msgd.credentials import credential_dir_candidates, credential_path, find_credential_dir
 
 

@@ -121,6 +121,7 @@ def ssh_access_payload(
     name: str = "",
     scopes: tuple[str, ...] | list[str] | str = (),
     expires: int | None = None,
+    owner_id: str | None = None,
 ) -> bytes:
     if action not in {
         "ssh.list",
@@ -150,6 +151,10 @@ def ssh_access_payload(
         "scopes": list(normalized_scopes),
         "expires": int(expires or 0),
     }
+    if owner_id is not None:
+        if not AUTHOR_ID_RE.fullmatch(owner_id):
+            raise StoreError("invalid SSH key owner id", 400)
+        value["owner_id"] = owner_id
     return SSH_ACCESS_MAGIC + canonical_json(value).encode("utf-8")
 
 
@@ -516,10 +521,10 @@ def _run_git_command(cfg: Config, item: dict[str, object], argv: list[str]) -> i
 def _local_get(cfg: Config, path: str) -> int:
     if not path.startswith("/") or path.startswith("//"):
         raise StoreError("path must be site-relative and begin with /", 400)
-    url = f"http://127.0.0.1:{cfg.port}{path}"
+    url = f"{cfg.local_api_url}{path}"
     request = Request(url, method="GET")
     try:
-        with urlopen(request, timeout=15) as response:
+        with urlopen(request, timeout=cfg.internal_http_timeout_seconds) as response:
             sys.stdout.buffer.write(response.read())
         return 0
     except HTTPError as exc:

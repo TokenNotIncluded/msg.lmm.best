@@ -1,0 +1,29 @@
+{
+  "name": "Membership",
+  "description": "USD 1/month membership. Includes the existing 10 MiB static web site and a certificate-backed blue account badge. Entitlements expire with the paid Waffo subscription period. No refunds.",
+  "price_usd": 1,
+  "billing": "month",
+  "checkout_ttl_seconds": 900,
+  "fulfillment": [
+    {
+      "type": "certificate",
+      "grants": [
+        {
+          "scope": "web:self",
+          "actions": [
+            "web.write",
+            "web.delete"
+          ]
+        },
+        {
+          "scope": "account:self",
+          "actions": [
+            "badge.blue"
+          ]
+        }
+      ],
+      "duration": "period"
+    }
+  ],
+  "active": true
+}

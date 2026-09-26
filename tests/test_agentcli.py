@@ -15,7 +15,7 @@ from unittest.mock import patch
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from msgd.agentcli import main as agent_main
+from msgd.cli.client import main as agent_main
 from msgd.config import Config
 from msgd.mcpserver import MsgMcpBackend, build_mcp_server
 from msgd.server import build_server

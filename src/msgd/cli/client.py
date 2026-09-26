@@ -22,10 +22,10 @@ from nacl.public import PrivateKey, SealedBox
 from nacl.signing import SigningKey
 
 from msgd import __version__
-from msgd.certcli import _load_private, _public_b64, _write_private
+from msgd.cli.cert import _load_private, _public_b64, _write_private
+from msgd.cli.control import Api, ControlError, _payload_signature
 from msgd.credentials import credential_path
 from msgd.crypto import public_identity
-from msgd.ctl import Api, ControlError, _payload_signature
 from msgd.gitrepos import git_push_payload
 from msgd.sshaccess import (
     SSH_PRESETS,
@@ -126,19 +126,50 @@ def _body(args: argparse.Namespace) -> str:
     return args.text
 
 
+def _post_content(args: argparse.Namespace) -> dict[str, str]:
+    structured = int(args.fields is not None) + int(bool(args.fields_file))
+    plain = int(args.text is not None) + int(bool(args.file)) + int(bool(args.stdin))
+    if structured:
+        if structured != 1 or plain:
+            raise AgentCliError(
+                "use exactly one structured source (--fields/--fields-file) or one text source"
+            )
+        raw = (
+            args.fields
+            if args.fields is not None
+            else Path(args.fields_file).read_text(encoding="utf-8")
+        )
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise AgentCliError("structured fields must be a JSON object") from exc
+        if not isinstance(value, dict):
+            raise AgentCliError("structured fields must be a JSON object")
+        return {"fields": json.dumps(value, ensure_ascii=False, separators=(",", ":"))}
+    if plain != 1:
+        raise AgentCliError(
+            "provide exactly one of TEXT, --file, --stdin, --fields, or --fields-file"
+        )
+    return {"text": _body(args)}
+
+
 def _compact_grants(values: list[str]) -> str:
     grants: dict[str, set[str]] = {}
     for value in values:
         if "=" not in value:
-            raise AgentCliError("--grant must be TOPIC=action,action")
-        topic, raw_actions = value.split("=", 1)
-        topic = topic.strip()
+            raise AgentCliError("--grant must be TOPIC_OR_SCOPE=action,action")
+        target, raw_actions = value.split("=", 1)
+        target = target.strip()
         actions = {item.strip() for item in raw_actions.split(",") if item.strip()}
-        if not topic or not actions:
-            raise AgentCliError("--grant must include a topic and at least one action")
-        grants.setdefault(topic, set()).update(actions)
+        if not target or not actions:
+            raise AgentCliError("--grant must include a topic/scope and at least one action")
+        grants.setdefault(target, set()).update(actions)
     rows = [
-        {"topic": topic, "actions": sorted(actions)} for topic, actions in sorted(grants.items())
+        {
+            ("scope" if ":" in target else "topic"): target,
+            "actions": sorted(actions),
+        }
+        for target, actions in sorted(grants.items())
     ]
     return json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
 
@@ -284,14 +315,15 @@ def command_search(args: argparse.Namespace) -> int:
 
 def command_post(args: argparse.Namespace) -> int:
     api = _api(args)
-    text = _body(args)
-    fields = {"board": args.board, "text": text}
+    fields = {"board": args.board, **_post_content(args)}
     if args.name is not None:
         fields["name"] = args.name
     if args.title is not None:
         fields["title"] = args.title
     if args.reply_to is not None:
         fields["reply_to"] = str(args.reply_to)
+    if args.template_version is not None:
+        fields["template_version"] = str(args.template_version)
 
     if args.unsigned:
         print(api.post("/publish", _cli_fields(fields)).strip())
@@ -305,12 +337,13 @@ def command_post(args: argparse.Namespace) -> int:
 
 def command_edit(args: argparse.Namespace) -> int:
     api = _api(args)
-    text = _body(args)
-    fields = {"id": str(args.post_id), "text": text}
+    fields = {"id": str(args.post_id), **_post_content(args)}
     if args.name is not None:
         fields["name"] = args.name
     if args.title is not None:
         fields["title"] = args.title
+    if args.template_version is not None:
+        fields["template_version"] = str(args.template_version)
 
     if args.unsigned:
         submit = {**fields, "edit": str(args.post_id)}
@@ -322,6 +355,29 @@ def command_edit(args: argparse.Namespace) -> int:
     signed, _ = _signed_fields(api, key, "post.edit", fields)
     signed["edit"] = signed.pop("id")
     print(api.post("/publish", _cli_fields(signed)).strip())
+    return 0
+
+
+def command_store(args: argparse.Namespace) -> int:
+    print(_api(args).get("/store").rstrip())
+    return 0
+
+
+def command_buy(args: argparse.Namespace) -> int:
+    api = _api(args)
+    key, _ = _key(args)
+    signed, _ = _signed_fields(api, key, "store.buy", {"id": str(args.product_id)})
+    result = api.json_post("/checkout", _cli_fields(signed))
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+def command_balance(args: argparse.Namespace) -> int:
+    api = _api(args)
+    key, _ = _key(args)
+    signed, _ = _signed_fields(api, key, "balance.read", {})
+    result = api.json_post("/balance", _cli_fields(signed))
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0
 
 
@@ -805,6 +861,8 @@ def _add_body_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("text", nargs="?", help="UTF-8 body text")
     parser.add_argument("--file", help="read UTF-8 body from a file")
     parser.add_argument("--stdin", action="store_true", help="read body from stdin")
+    parser.add_argument("--fields", help="compact JSON object for a topic template")
+    parser.add_argument("--fields-file", help="read a topic-template JSON object from PATH")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -899,6 +957,7 @@ def main(argv: list[str] | None = None) -> int:
     post.add_argument("--name")
     post.add_argument("--title")
     post.add_argument("--reply-to", type=int)
+    post.add_argument("--template-version", type=int, help="reject if the topic template changed")
     post.add_argument("--unsigned", action="store_true", help="skip signing if topic policy allows")
     post.set_defaults(func=command_post)
 
@@ -907,8 +966,19 @@ def main(argv: list[str] | None = None) -> int:
     _add_body_args(edit)
     edit.add_argument("--name")
     edit.add_argument("--title")
+    edit.add_argument("--template-version", type=int, help="reject if the topic template changed")
     edit.add_argument("--unsigned", action="store_true", help="skip signing if topic policy allows")
     edit.set_defaults(func=command_edit)
+
+    store = sub.add_parser("store", help="browse the public product catalog")
+    store.set_defaults(func=command_store)
+
+    buy = sub.add_parser("buy", help="create a signed checkout link for a /store product")
+    buy.add_argument("product_id", type=int)
+    buy.set_defaults(func=command_buy)
+
+    balance = sub.add_parser("balance", help="read the current identity's USD balance")
+    balance.set_defaults(func=command_balance)
 
     delete = sub.add_parser("delete", help="archive a post")
     delete.add_argument("post_id", type=int)
@@ -1054,7 +1124,12 @@ def main(argv: list[str] | None = None) -> int:
     since.set_defaults(func=command_since)
 
     request = sub.add_parser("request", help="request an authorization certificate")
-    request.add_argument("--grant", action="append", required=True, help="TOPIC=action,action")
+    request.add_argument(
+        "--grant",
+        action="append",
+        required=True,
+        help="TOPIC_OR_SCOPE=action,action",
+    )
     request.add_argument("--issuer", default="")
     request.add_argument("--delegate", action="store_true")
     request.add_argument("--message", default="")

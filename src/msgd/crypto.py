@@ -29,10 +29,52 @@ ACTIONS = frozenset(
         "post.delete.self",
         "post.delete.any",
         "topic.policy",
-        "cert.issue",
-        "cert.revoke",
+        "topic.template",
+        "profile.update",
+        "ssh.list",
+        "ssh.manage",
+        "webhook.list",
+        "webhook.manage",
+        "keystore.list",
+        "keystore.read",
+        "keystore.write",
+        "keystore.delete",
+        "state.read",
+        "state.write",
+        "state.delete",
+        "watch.read",
+        "watch.manage",
+        "inbox.read",
+        "outbox.read",
         "web.write",
         "web.delete",
+        "file.list",
+        "file.create",
+        "file.write",
+        "file.archive",
+        "file.purge",
+        "repo.create",
+        "repo.write",
+        "repo.manage",
+        "badge.blue",
+        "cert.issue",
+        "cert.revoke",
+    }
+)
+
+RESOURCE_SCOPES = frozenset(
+    {
+        "topic",
+        "account",
+        "ssh",
+        "webhook",
+        "keystore",
+        "state",
+        "watch",
+        "mailbox",
+        "files",
+        "web",
+        "repos",
     }
 )
 
@@ -96,6 +138,50 @@ def canonical_signature(value: str) -> str:
     return base64.b64encode(raw).decode("ascii")
 
 
+def normalize_grant_scope(value: str, *, legacy_topic: bool = False) -> str:
+    """Normalize legacy topic grants and resource scopes to one internal form."""
+    if legacy_topic:
+        if value == "*":
+            return "topic:*"
+        if not _valid_topic(value):
+            raise SignatureError(f"invalid grant topic: {value!r}")
+        return f"topic:{value}"
+
+    if ":" not in value:
+        raise SignatureError(f"invalid grant scope: {value!r}")
+    resource, target = value.split(":", 1)
+    if resource not in RESOURCE_SCOPES or not target:
+        raise SignatureError(f"invalid grant scope: {value!r}")
+    if resource == "topic":
+        if target != "*" and not _valid_topic(target):
+            raise SignatureError(f"invalid topic scope: {value!r}")
+    elif target not in {"self", "*"} and not IDENTITY_RE.fullmatch(target):
+        raise SignatureError(f"{resource} scope target must be self, *, or a 64-hex identity")
+    return f"{resource}:{target}"
+
+
+def concrete_scope(scope: str, subject_id: str) -> str:
+    """Resolve resource:self relative to the certificate subject."""
+    normalized = normalize_grant_scope(scope)
+    resource, target = normalized.split(":", 1)
+    if target == "self":
+        if not IDENTITY_RE.fullmatch(subject_id):
+            raise SignatureError("invalid subject id for self scope")
+        target = subject_id
+    return f"{resource}:{target}"
+
+
+def scope_covers(grant_scope: str, requested_scope: str, *, subject_id: str) -> bool:
+    """Return whether one certificate scope covers a concrete requested scope."""
+    grant = concrete_scope(grant_scope, subject_id)
+    requested = normalize_grant_scope(requested_scope)
+    requested_resource, requested_target = requested.split(":", 1)
+    grant_resource, grant_target = grant.split(":", 1)
+    return grant_resource == requested_resource and (
+        grant_target == "*" or grant_target == requested_target
+    )
+
+
 def verify_detached(public_key: str, signature: str, payload: bytes) -> tuple[str, str, str]:
     canonical_key, signer_id = public_identity(public_key)
     canonical_sig = canonical_signature(signature)
@@ -124,9 +210,11 @@ def request_payload(
     body: str = "",
     anonymous: tuple[str, ...] | None = None,
     signed: tuple[str, ...] | None = None,
+    topic_template: str = "",
     serial: str = "",
     files: tuple[dict[str, object], ...] = (),
     reply_to: int | None = None,
+    template_version: int | None = None,
     since: int | None = None,
     before: int | None = None,
     limit: int | None = None,
@@ -183,6 +271,8 @@ def request_payload(
             ("reply_to", "" if reply_to is None else str(reply_to)),
             ("files", canonical_json(list(files))),
         ]
+        if template_version is not None:
+            fields.append(("template_version", str(template_version)))
     elif action == "post.edit":
         if post_id is None or owner_id is None:
             raise SignatureError("signed edit requires post_id and owner_id")
@@ -196,6 +286,8 @@ def request_payload(
             ("reply_to", "" if reply_to is None else str(reply_to)),
             ("files", canonical_json(list(files))),
         ]
+        if template_version is not None:
+            fields.append(("template_version", str(template_version)))
     elif action in {"post.delete", "post.purge"}:
         if post_id is None or owner_id is None:
             raise SignatureError(
@@ -214,6 +306,32 @@ def request_payload(
             fields.append(("anonymous", ",".join(sorted(anonymous))))
         if signed is not None:
             fields.append(("signed", ",".join(sorted(signed))))
+    elif action == "topic.template":
+        fields += [
+            ("board", board),
+            ("template", topic_template),
+        ]
+    elif action == "store.buy":
+        if post_id is None or post_id < 1:
+            raise SignatureError("store.buy requires product post_id")
+        if nonce is None or issued is None:
+            raise SignatureError("store.buy requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+            ("post_id", str(post_id)),
+        ]
+    elif action == "balance.read":
+        if nonce is None or issued is None:
+            raise SignatureError("balance.read requires nonce and issued")
+        if not NONCE_RE.fullmatch(nonce):
+            raise SignatureError("nonce must be 32 lowercase hex characters")
+        fields += [
+            ("nonce", nonce),
+            ("issued", str(issued)),
+        ]
     elif action == "cert.revoke":
         if not SERIAL_RE.fullmatch(serial):
             raise SignatureError("invalid certificate serial")
@@ -267,6 +385,8 @@ def request_payload(
             ("before", "" if before is None else str(before)),
             ("limit", "" if limit is None else str(limit)),
         ]
+        if owner_id is not None:
+            fields.append(("owner_id", owner_id))
     elif action in {"state.read", "state.write", "state.delete"}:
         if nonce is None or issued is None:
             raise SignatureError(f"{action} requires nonce and issued")
@@ -279,6 +399,8 @@ def request_payload(
         ]
         if action == "state.write":
             fields.append(("state_value", state_value))
+        if owner_id is not None:
+            fields.append(("owner_id", owner_id))
     elif action in {"watch.add", "watch.delete", "watch.list"}:
         if nonce is None or issued is None:
             raise SignatureError(f"{action} requires nonce and issued")
@@ -291,6 +413,8 @@ def request_payload(
             ("watch_kind", watch_kind),
             ("watch_target", watch_target),
         ]
+        if owner_id is not None:
+            fields.append(("owner_id", owner_id))
     elif action in {"inbox.ack", "post.ack"}:
         if post_id is None or post_id < 1:
             raise SignatureError(f"{action} requires post_id")
@@ -328,6 +452,8 @@ def request_payload(
             ("issued", str(issued)),
             ("keystore_name", keystore_name),
         ]
+        if owner_id is not None:
+            fields.append(("owner_id", owner_id))
         if action == "keystore.put":
             fields += [
                 ("keystore_ciphertext", keystore_ciphertext),
@@ -353,6 +479,8 @@ def request_payload(
             ("webhook_events", canonical_json(sorted(webhook_events))),
             ("webhook_enabled", "1" if webhook_enabled else "0"),
         ]
+        if owner_id is not None:
+            fields.append(("owner_id", owner_id))
     elif action in {"web.write", "web.delete"}:
         if nonce is None or issued is None:
             raise SignatureError(f"{action} requires nonce and issued")
@@ -363,6 +491,8 @@ def request_payload(
             ("issued", str(issued)),
             ("web_path", web_path),
         ]
+        if owner_id is not None:
+            fields.append(("owner_id", owner_id))
         if action == "web.write":
             if web_bytes is None or web_bytes < 0:
                 raise SignatureError("web.write requires a non-negative byte count")
@@ -385,6 +515,8 @@ def request_payload(
             ("profile_bio", profile_bio),
             ("profile_public_key", profile_public_key),
         ]
+        if owner_id is not None:
+            fields.append(("owner_id", owner_id))
     else:
         raise SignatureError(f"unsupported signed action: {action}")
 
@@ -455,26 +587,36 @@ def parse_certificate(body: str) -> Certificate:
         raise SignatureError("certificate grants are required")
 
     grants: dict[str, set[str]] = {}
+    grant_wire: dict[str, tuple[str, str]] = {}
     for grant in grants_raw:
         if not isinstance(grant, dict):
             raise SignatureError("grant must be an object")
-        topic = _string(grant, "topic")
+        has_topic = isinstance(grant.get("topic"), str)
+        has_scope = isinstance(grant.get("scope"), str)
+        if has_topic == has_scope:
+            raise SignatureError("grant requires exactly one of topic or scope")
+        if has_topic:
+            raw_scope = _string(grant, "topic")
+            scope = normalize_grant_scope(raw_scope, legacy_topic=True)
+            wire = ("topic", raw_scope)
+        else:
+            raw_scope = _string(grant, "scope")
+            scope = normalize_grant_scope(raw_scope)
+            wire = ("scope", scope)
         actions = grant.get("actions")
-        if topic != "*" and not _valid_topic(topic):
-            raise SignatureError(f"invalid grant topic: {topic!r}")
         if not isinstance(actions, list) or not actions:
             raise SignatureError("grant actions are required")
-        current = grants.setdefault(topic, set())
+        current = grants.setdefault(scope, set())
+        grant_wire.setdefault(scope, wire)
         for action in actions:
             if not isinstance(action, str) or action not in ACTIONS:
                 raise SignatureError(f"invalid grant action: {action!r}")
-            if action.startswith("web.") and topic != "*":
-                raise SignatureError("web grants require topic='*'")
             current.add(action)
 
-    normalized_grants = [
-        {"topic": topic, "actions": sorted(actions)} for topic, actions in sorted(grants.items())
-    ]
+    normalized_grants = []
+    for scope, actions in sorted(grants.items()):
+        field, value = grant_wire[scope]
+        normalized_grants.append({field: value, "actions": sorted(actions)})
     normalized = {
         "delegate": delegate,
         "grants": normalized_grants,
@@ -525,8 +667,15 @@ def make_certificate(
         "not_after": int(not_after),
         "delegate": bool(delegate),
         "grants": [
-            {"topic": topic, "actions": sorted(set(actions))}
-            for topic, actions in sorted(grants.items())
+            (
+                {"topic": scope, "actions": sorted(set(actions))}
+                if scope == "*" or _valid_topic(scope)
+                else {
+                    "scope": normalize_grant_scope(scope),
+                    "actions": sorted(set(actions)),
+                }
+            )
+            for scope, actions in sorted(grants.items())
         ],
     }
     return parse_certificate(canonical_json(value))

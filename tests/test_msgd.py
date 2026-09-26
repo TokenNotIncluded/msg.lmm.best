@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import sqlite3
 import sys
@@ -24,6 +25,7 @@ from msgd.config import Config
 from msgd.exchange import ExchangeService
 from msgd.server import build_server
 from msgd.store import Store
+from msgd.webview import render_markdown_html
 
 
 def public_b64(key: Ed25519PrivateKey) -> str:
@@ -1422,6 +1424,111 @@ class ServerCase(unittest.TestCase):
         status, body = self.c.post("/mcp", key=public_b64(key))
         self.assertEqual(status, 405, body)
 
+    def test_resource_scoped_certificate_can_manage_another_profile(self) -> None:
+        alice = Ed25519PrivateKey.generate()
+        delegate = Ed25519PrivateKey.generate()
+        attacker = Ed25519PrivateKey.generate()
+        self.signed_create(alice, "hello", name="Alice")
+        alice_id = public_identity_for_test(alice)
+
+        parent_serial = self.issue(
+            self.root_key,
+            alice,
+            grants=[
+                {
+                    "scope": "account:self",
+                    "actions": ["profile.update", "cert.issue", "cert.revoke"],
+                }
+            ],
+            delegate=True,
+        )
+        self.issue(
+            alice,
+            delegate,
+            issuer_serial=parent_serial,
+            grants=[
+                {
+                    "scope": f"account:{alice_id}",
+                    "actions": ["profile.update"],
+                }
+            ],
+        )
+
+        info = self.signing(
+            action="profile.update",
+            key=public_b64(delegate),
+            owner=alice_id,
+            bio="managed by delegated certificate",
+        )
+        status, body = self.c.post(
+            "/_profile",
+            owner=alice_id,
+            bio="managed by delegated certificate",
+            key=public_b64(delegate),
+            sig=sign_b64(delegate, info["payload_b64"]),
+            nonce=info["nonce"],
+            issued=str(info["issued"]),
+        )
+        self.assertEqual(status, 200, body)
+        updated = json.loads(body)
+        self.assertEqual(updated["bio"], "managed by delegated certificate")
+        self.assertEqual(updated["profile_actor_id"], public_identity_for_test(delegate))
+        self.assertEqual(updated["profile_actor_key"], public_b64(delegate))
+        self.assertEqual(
+            self.c.get("/@Alice/profile-actor-key"),
+            (200, public_b64(delegate) + "\n"),
+        )
+
+        denied = self.signing(
+            action="profile.update",
+            key=public_b64(attacker),
+            owner=alice_id,
+            bio="not allowed",
+        )
+        status, body = self.c.post(
+            "/_profile",
+            owner=alice_id,
+            bio="not allowed",
+            key=public_b64(attacker),
+            sig=sign_b64(attacker, denied["payload_b64"]),
+            nonce=denied["nonce"],
+            issued=str(denied["issued"]),
+        )
+        self.assertEqual(status, 403, body)
+        self.assertIn("profile.update", body)
+
+    def test_delegation_cannot_rebind_self_scope_to_child(self) -> None:
+        alice = Ed25519PrivateKey.generate()
+        delegate = Ed25519PrivateKey.generate()
+        parent_serial = self.issue(
+            self.root_key,
+            alice,
+            grants=[
+                {
+                    "scope": "account:self",
+                    "actions": ["profile.update", "cert.issue"],
+                }
+            ],
+            delegate=True,
+        )
+        info = self.signing(
+            action="cert.issue",
+            key=public_b64(alice),
+            issuer_serial=parent_serial,
+            subject_key=public_b64(delegate),
+            grants=json.dumps(
+                [{"scope": "account:self", "actions": ["profile.update"]}],
+                separators=(",", ":"),
+            ),
+        )
+        status, body = self.c.post(
+            "/_cert",
+            cert=info["certificate"],
+            sig=sign_b64(alice, info["payload_b64"]),
+        )
+        self.assertEqual(status, 403, body)
+        self.assertIn("issuer cannot issue for scope", body)
+
 
 class PostUploadCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -2448,6 +2555,101 @@ class ExchangeProtocolCase(ServerCase):
         self.assertEqual(status, 200, body)
         meta = json.loads(body)
         self.assertEqual(meta["ack"]["read_count"], 2)
+
+    def test_browser_markdown_view_is_opt_in_and_machine_clients_are_unchanged(self) -> None:
+        browser = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36"
+            )
+        }
+
+        status, machine_body, machine_headers = self.c.raw(
+            "/",
+            headers={"User-Agent": "msg-agent/1.0"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(machine_headers["Content-Type"].startswith("text/plain"))
+        machine_markdown = machine_body.decode()
+        self.assertIn("start: /index", machine_markdown)
+
+        status, prompt_body, prompt_headers = self.c.raw("/", headers=browser)
+        self.assertEqual(status, 200)
+        self.assertTrue(prompt_headers["Content-Type"].startswith("text/html"))
+        self.assertIn("default-src 'none'", prompt_headers["Content-Security-Policy"])
+        prompt = prompt_body.decode()
+        self.assertIn("你是人类嘛\uff1f", prompt)
+        self.assertIn("仅改变网页展示形式", prompt)
+        self.assertIn("mode=markdown", prompt)
+        self.assertIn("mode=html", prompt)
+
+        status, markdown_body, markdown_headers = self.c.raw(
+            "/",
+            headers={**browser, "Cookie": "msg_view=markdown"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(markdown_headers["Content-Type"].startswith("text/markdown"))
+        self.assertEqual(markdown_body, machine_body)
+
+        status, html_body, html_headers = self.c.raw(
+            "/",
+            headers={**browser, "Cookie": "msg_view=html"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(html_headers["Content-Type"].startswith("text/html"))
+        html = html_body.decode()
+        self.assertIn('<a href="/index">/index</a>', html)
+        self.assertIn("查看 Markdown", html)
+
+    def test_browser_view_cookie_redirect_is_same_origin_only(self) -> None:
+        host, port = self.server.server_address[:2]
+        browser = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15"
+            )
+        }
+        connection = http.client.HTTPConnection(host, port, timeout=5)
+        connection.request(
+            "GET",
+            "/_view?mode=html&next=%2Frules",
+            headers=browser,
+        )
+        response = connection.getresponse()
+        self.assertEqual(response.status, 303)
+        self.assertEqual(response.getheader("Location"), "/rules")
+        self.assertIn("msg_view=html", response.getheader("Set-Cookie") or "")
+        response.read()
+        connection.close()
+
+        connection = http.client.HTTPConnection(host, port, timeout=5)
+        connection.request(
+            "GET",
+            "/_view?mode=html&next=https%3A%2F%2Fevil.example%2Fx",
+            headers=browser,
+        )
+        response = connection.getresponse()
+        self.assertEqual(response.status, 303)
+        self.assertEqual(response.getheader("Location"), "/")
+        response.read()
+        connection.close()
+
+    def test_browser_markdown_renderer_does_not_execute_raw_html_or_remote_images(self) -> None:
+        html = render_markdown_html(
+            (
+                "# safe\n\n"
+                "[inside](/rules)\n\n"
+                "<script>alert(1)</script>\n\n"
+                "![tracker](https://tracker.invalid/pixel)"
+            ),
+            site_name="msg.example",
+            current_path="/main/1",
+        )
+        self.assertIn('<a href="/rules">inside</a>', html)
+        self.assertNotIn("<script>", html)
+        self.assertIn("&lt;script&gt;", html)
+        self.assertNotIn("<img", html)
+        self.assertIn('class="md-image"', html)
+        self.assertIn("https://tracker.invalid/pixel", html)
 
 
 if __name__ == "__main__":

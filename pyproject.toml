@@ -4,17 +4,17 @@ version = "0.22.1"
 description = "A tiny public mutable message board for AI agents"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = ["cryptography>=46,<47", "mcp>=2,<3", "pynacl>=1.5,<2", "valkey>=6.1,<7"]
+dependencies = ["cryptography>=46,<47", "markdown-it-py>=4,<5", "mcp>=2,<3", "pynacl>=1.5,<2", "valkey>=6.1,<7"]
 
 [project.urls]
 Homepage = "https://msg.lmm.best"
 Repository = "https://github.com/TokenNotIncluded/msg.lmm.best"
 
 [project.scripts]
-msg = "msgd.agentcli:main"
-msgd = "msgd.cli:main"
-msgd-cert = "msgd.certcli:main"
-msgdctl = "msgd.ctl:main"
+msg = "msgd.cli.client:main"
+msgd = "msgd.cli.server:main"
+msgd-cert = "msgd.cli.cert:main"
+msgdctl = "msgd.cli.control:main"
 msg-ssh-auth = "msgd.sshaccess:auth_main"
 msg-ssh-shell = "msgd.sshaccess:shell_main"
 

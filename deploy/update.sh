@@ -3,9 +3,18 @@
 # Usage: bash deploy/update.sh [ssh-host]
 set -euo pipefail
 
-HOST="${1:-archczy}"
-DOMAIN="msg.lmm.best"
+HOST="${1:-${MSG_DEPLOY_HOST:-}}"
+DOMAIN="${MSG_DOMAIN:-msg.lmm.best}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [[ -z "$HOST" ]]; then
+    echo "error: ssh host is required (argument or MSG_DEPLOY_HOST)" >&2
+    exit 2
+fi
+if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+    echo "error: invalid MSG_DOMAIN: $DOMAIN" >&2
+    exit 2
+fi
 STAGE="/tmp/msg-lmm-best-update.$$"
 
 cd "$ROOT"
@@ -34,6 +43,10 @@ ssh "$HOST" "rm -rf '$STAGE' && mkdir -p '$STAGE'"
 tar -C "$ROOT" -cf - \
     "dist/$WHEEL" \
     deploy/msg-lmm-best.service \
+    deploy/etc/msg-lmm-best/templates/store.json \
+    deploy/etc/msg-lmm-best/templates/ads.json \
+    deploy/etc/msg-lmm-best/privacy.md \
+    deploy/etc/msg-lmm-best/terms.md \
     deploy/sshd/msg-lmm-best.conf \
     deploy/nginx/nginx.conf \
     deploy/nginx/msg.lmm.best.conf \
@@ -41,7 +54,7 @@ tar -C "$ROOT" -cf - \
     | ssh "$HOST" "tar -C '$STAGE' -xf -"
 
 echo "==> update $HOST"
-ssh "$HOST" STAGE="$STAGE" WHEEL="$WHEEL" 'bash -s' <<'REMOTE'
+ssh "$HOST" STAGE="$STAGE" WHEEL="$WHEEL" DOMAIN="$DOMAIN" 'bash -s' <<'REMOTE'
 set -euo pipefail
 SERVICE=msg-lmm-best.service
 
@@ -119,6 +132,29 @@ sudo UV_NO_CACHE=1 uv pip install --quiet \
 echo "==> root CA"
 sudo "$VENV/bin/msgd-cert" init-root
 
+echo "==> topic templates and commerce policy documents"
+sudo install -d -m 0755 /etc/msg-lmm-best/templates /etc/msg-lmm-best/commerce
+for name in store.json ads.json; do
+    if ! sudo test -e "/etc/msg-lmm-best/templates/$name"; then
+        sudo install -m 0644 "$D/etc/msg-lmm-best/templates/$name" "/etc/msg-lmm-best/templates/$name"
+    fi
+done
+for name in privacy.md terms.md; do
+    if ! sudo test -e "/etc/msg-lmm-best/$name"; then
+        sudo install -m 0644 "$D/etc/msg-lmm-best/$name" "/etc/msg-lmm-best/$name"
+    fi
+done
+
+if ! sudo grep -q '^\[topics\]' "$CONFIG"; then
+    echo "==> enable structured topic templates"
+    sudo tee -a "$CONFIG" >/dev/null <<'EOF'
+
+[topics]
+template_dir = /etc/msg-lmm-best/templates
+certificate_only = store,ads
+EOF
+fi
+
 if ! sudo grep -q '^\[analytics\]' "$CONFIG"; then
     echo "==> enable Valkey analytics"
     sudo tee -a "$CONFIG" >/dev/null <<'EOF'
@@ -127,6 +163,16 @@ if ! sudo grep -q '^\[analytics\]' "$CONFIG"; then
 valkey_url = redis://127.0.0.1:6379/0
 valkey_prefix = msgd
 valkey_required = true
+EOF
+fi
+
+if ! sudo grep -q '^\[objects\]' "$CONFIG"; then
+    echo "==> enable private Git object storage"
+    sudo tee -a "$CONFIG" >/dev/null <<'EOF'
+
+[objects]
+root = /var/lib/msg-lmm-best/objects.git
+enabled = true
 EOF
 fi
 
@@ -197,9 +243,16 @@ sudo systemctl daemon-reload
 echo "==> restart"
 sudo systemctl restart "$SERVICE"
 
+LOCAL_API="$("$VENV/bin/python" - "$CONFIG" <<'PY'
+import sys
+from msgd.config import Config
+
+print(Config.load(sys.argv[1]).local_api_url)
+PY
+)"
 healthy=0
 for _ in $(seq 1 50); do
-    if curl -fsS http://127.0.0.1:3111/_health >/dev/null; then
+    if curl -fsS "$LOCAL_API/_health" >/dev/null; then
         healthy=1
         break
     fi
@@ -211,15 +264,30 @@ if (( healthy == 0 )); then
     sudo journalctl -u "$SERVICE" -n 80 --no-pager || true
     exit 1
 fi
-curl -fsS http://127.0.0.1:3111/_health
-
+curl -fsS "$LOCAL_API/_health"
 
 echo "==> nginx request/path limits"
 sudo install -m 0644 "$D/nginx/nginx.conf" /etc/nginx/nginx.conf
-sed 's/^#TLS# \{0,1\}//' "$D/nginx/msg.lmm.best.conf" \
-    | sudo tee /etc/nginx/conf.d/msg.lmm.best.conf >/dev/null
-sudo install -m 0644 "$D/nginx/msg.lmm.best.proxy.conf" \
-    /etc/nginx/msg.lmm.best.proxy.conf
+UPSTREAM="${LOCAL_API#http://}"
+CLIENT_MAX_BODY_SIZE="$("$VENV/bin/python" - "$CONFIG" <<'PY'
+import sys
+from msgd.config import Config
+
+cfg = Config.load(sys.argv[1])
+print(max(cfg.max_request_bytes, cfg.repo_max_request_bytes))
+PY
+)"
+PROXY_CONF="/etc/nginx/$DOMAIN.proxy.conf"
+sed -e "s|__CLIENT_MAX_BODY_SIZE__|$CLIENT_MAX_BODY_SIZE|g" \
+    "$D/nginx/msg.lmm.best.proxy.conf" \
+    | sudo tee "$PROXY_CONF" >/dev/null
+sed \
+    -e 's/^#TLS# \{0,1\}//' \
+    -e "s|__DOMAIN__|$DOMAIN|g" \
+    -e "s|__UPSTREAM__|$UPSTREAM|g" \
+    -e "s|__PROXY_CONF__|$PROXY_CONF|g" \
+    "$D/nginx/msg.lmm.best.conf" \
+    | sudo tee "/etc/nginx/conf.d/$DOMAIN.conf" >/dev/null
 sudo nginx -t
 sudo systemctl reload nginx
 REMOTE
