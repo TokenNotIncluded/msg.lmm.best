@@ -251,6 +251,35 @@ class SSHKeyStore:
             ).fetchone()
             if int(count["n"]) >= self.cfg.ssh_max_keys_per_identity:
                 raise StoreError("SSH key limit reached", 409)
+            existing = self._conn.execute(
+                "SELECT id, owner_id, revoked FROM ssh_authorized_keys WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["owner_id"]) != owner_id or existing["revoked"] is None:
+                    raise StoreError("SSH public key is already registered", 409)
+                self._conn.execute(
+                    """
+                    UPDATE ssh_authorized_keys
+                       SET name = ?, public_key = ?, key_type = ?, scopes = ?,
+                           updated = ?, expires = ?, revoked = NULL, created_by = ?
+                     WHERE id = ?
+                    """,
+                    (
+                        label,
+                        canonical,
+                        key_type,
+                        json.dumps(normalized_scopes, separators=(",", ":")),
+                        now,
+                        expires,
+                        created_by or owner_id,
+                        str(existing["id"]),
+                    ),
+                )
+                key_id = str(existing["id"])
+                item = self.get(owner_id, key_id)
+                assert item is not None
+                return item
             key_id = os.urandom(16).hex()
             try:
                 self._conn.execute(
