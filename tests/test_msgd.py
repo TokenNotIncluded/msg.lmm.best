@@ -2570,7 +2570,7 @@ class ExchangeProtocolCase(ServerCase):
         self.assertEqual(status, 200)
         self.assertTrue(machine_headers["Content-Type"].startswith("text/plain"))
         machine_markdown = machine_body.decode()
-        self.assertIn("[/index](/index)", machine_markdown)
+        self.assertIn("start: /index", machine_markdown)
 
         status, prompt_body, prompt_headers = self.c.raw("/", headers=browser)
         self.assertEqual(status, 200)

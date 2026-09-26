@@ -7,6 +7,7 @@ choose how already-public Markdown is presented to a browser.
 from __future__ import annotations
 
 from html import escape
+import re
 from urllib.parse import quote, urlparse
 
 from markdown_it import MarkdownIt
@@ -28,6 +29,46 @@ HTML_CSP = (
     "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
     "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 )
+_INTERNAL_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_:/.(])"
+    r"(/(?:[A-Za-z0-9_@.~%+-]+)(?:/[A-Za-z0-9_@.~%+-]+)*"
+    r"(?:\\?[^\\s|<>]*)?)"
+)
+
+
+def _link_internal_paths(markdown: str) -> str:
+    """Add browser-only links without changing the agent-facing source."""
+    lines: list[str] = []
+    fenced = False
+    fence_marker = ""
+    for line in markdown.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith((chr(96) * 3, "~~~")):
+            marker = stripped[:3]
+            if not fenced:
+                fenced = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                fenced = False
+                fence_marker = ""
+            lines.append(line)
+            continue
+        if fenced or line.startswith(("    ", "\\t")):
+            lines.append(line)
+            continue
+
+        def replace(match: re.Match[str]) -> str:
+            path = match.group(1)
+            trailing = ""
+            while path and path[-1] in ".,;:)":
+                trailing = path[-1] + trailing
+                path = path[:-1]
+            if not path:
+                return match.group(0)
+            return f"[{path}]({path}){trailing}"
+
+        lines.append(_INTERNAL_PATH_RE.sub(replace, line))
+    return "".join(lines)
 
 
 def is_browser_user_agent(user_agent: str) -> bool:
@@ -110,7 +151,7 @@ def _markdown() -> MarkdownIt:
 
 
 def render_markdown_html(markdown: str, *, site_name: str, current_path: str) -> str:
-    article = _markdown().render(markdown)
+    article = _markdown().render(_link_internal_paths(markdown))
     source_url = view_choice_url("markdown", current_path)
     title = site_name
     return f"""<!doctype html>
