@@ -5641,7 +5641,7 @@ class Store:
             child_scope = concrete_scope(scope, child.subject_id)
             parent_actions = Store._certificate_actions(parent, child_scope)
             if "cert.issue" not in parent_actions:
-                raise StoreError(f"issuer lacks cert.issue for scope {child_scope}", 403)
+                raise StoreError(f"issuer cannot issue for scope {child_scope}: missing cert.issue", 403)
             if not set(child_actions).issubset(parent_actions):
                 raise StoreError(
                     f"child grant exceeds issuer grant for scope {child_scope}",
